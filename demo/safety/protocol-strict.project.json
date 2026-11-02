@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "kind": "project",
+  "id": "synthetic.project.strict",
+  "sources": [
+    "protocol_driver.c"
+  ],
+  "contracts": [
+    "protocol-api.contracts.json"
+  ],
+  "protocols": [
+    "strict.protocols.json"
+  ],
+  "profiles": {
+    "driver": {
+      "forbid": [
+        "heap_allocate",
+        "block",
+        "wait"
+      ],
+      "protocols": [
+        "transfer"
+      ]
+    }
+  },
+  "checks": [
+    {
+      "file": "protocol_driver.c",
+      "function": "initialized_transfer",
+      "profile": "driver"
+    },
+    {
+      "file": "protocol_driver.c",
+      "function": "reset_transfer",
+      "profile": "driver"
+    }
+  ],
+  "acceptedAssumptions": [
+    "synthetic.device.behavior"
+  ]
+}

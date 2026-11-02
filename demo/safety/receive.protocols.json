@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "kind": "protocols",
+  "id": "synthetic.receive",
+  "version": "1",
+  "machines": [
+    {
+      "id": "transfer",
+      "states": [
+        "new",
+        "ready",
+        "busy"
+      ],
+      "initial": "new",
+      "terminal": [
+        "new",
+        "ready"
+      ],
+      "operations": [
+        {
+          "symbol": "c:@F@transfer_init",
+          "argument": 1,
+          "from": [
+            "new"
+          ],
+          "to": "ready"
+        },
+        {
+          "symbol": "c:@F@transfer_start",
+          "argument": 1,
+          "from": [
+            "ready"
+          ],
+          "to": "busy",
+          "borrow": {
+            "argument": 2,
+            "mode": "write"
+          }
+        },
+        {
+          "symbol": "c:@F@transfer_finish",
+          "argument": 1,
+          "from": [
+            "busy"
+          ],
+          "to": "ready",
+          "releaseBorrow": true
+        }
+      ]
+    }
+  ]
+}

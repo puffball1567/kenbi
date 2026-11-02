@@ -1,0 +1,864 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "CWE125_Out_of_Bounds_Read__fixed_array_06",
+      "cwe": "CWE-125",
+      "class": [
+        "INAPPROPRIATE_BOUND"
+      ],
+      "axis": "spatial",
+      "intent": "bound an index to a fixed array's size",
+      "title": "Bound idx<1000 does not cover a 256-element array",
+      "contracts": [
+        "@spatial"
+      ],
+      "file": "CWE125_Out_of_Bounds_Read__fixed_array_06.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE125_Out_of_Bounds_Read__headroom_safe_05",
+      "cwe": "CWE-125",
+      "class": [
+        "INAPPROPRIATE_BOUND"
+      ],
+      "axis": "spatial",
+      "intent": "bound a look-ahead with the two-variable headroom idiom",
+      "title": "Wrap-prone pos+4<=end vs the safe end-pos>=4",
+      "contracts": [
+        "@spatial",
+        "@counted_by"
+      ],
+      "file": "CWE125_Out_of_Bounds_Read__headroom_safe_05.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE125_Out_of_Bounds_Read__limit_underflow_03",
+      "cwe": "CWE-125",
+      "class": [
+        "INAPPROPRIATE_BOUND"
+      ],
+      "axis": "spatial",
+      "intent": "add a companion so the limit does not underflow",
+      "title": "Underflow-prone i<=n-4 without the n>=4 companion",
+      "contracts": [
+        "@spatial",
+        "@counted_by"
+      ],
+      "file": "CWE125_Out_of_Bounds_Read__limit_underflow_03.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE125_Out_of_Bounds_Read__lookahead_01",
+      "cwe": "CWE-125",
+      "class": [
+        "INAPPROPRIATE_BOUND"
+      ],
+      "axis": "spatial",
+      "intent": "bound a look-ahead read without overflow",
+      "title": "Wrap-prone guard pos+5<=len on a 4-byte read",
+      "contracts": [
+        "@spatial",
+        "@counted_by"
+      ],
+      "file": "CWE125_Out_of_Bounds_Read__lookahead_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE125_Out_of_Bounds_Read__off_by_one_02",
+      "cwe": "CWE-125",
+      "class": [
+        "INAPPROPRIATE_BOUND"
+      ],
+      "axis": "spatial",
+      "intent": "use a strict index bound",
+      "title": "Off-by-one guard i<=n admits i==n",
+      "contracts": [
+        "@spatial",
+        "@counted_by"
+      ],
+      "file": "CWE125_Out_of_Bounds_Read__off_by_one_02.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE125_Out_of_Bounds_Read__signed_overflow_04",
+      "cwe": "CWE-125",
+      "class": [
+        "INAPPROPRIATE_BOUND"
+      ],
+      "axis": "spatial",
+      "intent": "keep guard arithmetic off a signed index",
+      "title": "Signed i+4<=n can overflow (UB, attacker-triggerable)",
+      "contracts": [
+        "@spatial",
+        "@counted_by"
+      ],
+      "file": "CWE125_Out_of_Bounds_Read__signed_overflow_04.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE1284_Invariant_Not_Maintained__capacity_01",
+      "cwe": "CWE-1284",
+      "class": [
+        "INVARIANT_NOT_MAINTAINED"
+      ],
+      "axis": "spatial",
+      "intent": "maintain a declared capacity invariant across a write",
+      "title": "Guard leaves no headroom for the increment",
+      "contracts": [
+        "@spatial",
+        "@invariant"
+      ],
+      "file": "CWE1284_Invariant_Not_Maintained__capacity_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE129_Improper_Array_Index__signed_negative_01",
+      "cwe": "CWE-129",
+      "class": [
+        "INDEX_MAYBE_NEGATIVE"
+      ],
+      "axis": "spatial",
+      "intent": "bound a signed index on both ends",
+      "title": "Signed index bounded above but not below",
+      "contracts": [
+        "@spatial",
+        "@counted_by"
+      ],
+      "file": "CWE129_Improper_Array_Index__signed_negative_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE252_Unchecked_Return__must_use_01",
+      "cwe": "CWE-252",
+      "class": [
+        "UNUSED_MUST_USE"
+      ],
+      "axis": "ownership",
+      "intent": "inspect a @must_use return value",
+      "title": "A @must_use result is discarded",
+      "contracts": [
+        "@must_use"
+      ],
+      "file": "CWE252_Unchecked_Return__must_use_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE362_Race_Condition__guarded_field_01",
+      "cwe": "CWE-362",
+      "class": [
+        "UNGUARDED_ACCESS"
+      ],
+      "axis": "concurrency",
+      "intent": "hold the lock across a guarded-field access",
+      "title": "A @guarded_by field read without the lock held",
+      "contracts": [
+        "@threadsafe",
+        "@guarded_by"
+      ],
+      "file": "CWE362_Race_Condition__guarded_field_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE401_Memory_Leak__branch_early_return_02",
+      "cwe": "CWE-401",
+      "class": [
+        "LEAK"
+      ],
+      "axis": "ownership",
+      "intent": "free on every path, including early returns",
+      "title": "Free obligation skipped on an early-return branch",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE401_Memory_Leak__branch_early_return_02.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE401_Memory_Leak__char_malloc_01",
+      "cwe": "CWE-401",
+      "class": [
+        "LEAK"
+      ],
+      "axis": "ownership",
+      "intent": "own a heap buffer for a function's duration",
+      "title": "Heap buffer never freed on the return path",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE401_Memory_Leak__char_malloc_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE401_Memory_Leak__char_malloc_41",
+      "cwe": "CWE-401",
+      "class": [
+        "LEAK"
+      ],
+      "axis": "ownership",
+      "intent": "own a heap buffer passed across a data flow",
+      "title": "Heap buffer leaked (flow variant)",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE401_Memory_Leak__char_malloc_41.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE415_Double_Free__conditional_02",
+      "cwe": "CWE-415",
+      "class": [
+        "DOUBLE_FREE"
+      ],
+      "axis": "ownership",
+      "intent": "free once even with a conditional free",
+      "title": "Double free on the conditional path",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE415_Double_Free__conditional_02.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE415_Double_Free__malloc_free_char_01",
+      "cwe": "CWE-415",
+      "class": [
+        "DOUBLE_FREE"
+      ],
+      "axis": "ownership",
+      "intent": "release a heap buffer exactly once",
+      "title": "Buffer freed twice",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE415_Double_Free__malloc_free_char_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE415_Double_Free__malloc_free_char_22a",
+      "cwe": "CWE-415",
+      "class": [
+        "DOUBLE_FREE"
+      ],
+      "axis": "ownership",
+      "intent": "release exactly once across a cross-file flow",
+      "title": "Double free across a cross-file handoff",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE415_Double_Free__malloc_free_char_22a.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE415_Double_Free__malloc_free_char_41",
+      "cwe": "CWE-415",
+      "class": [
+        "DOUBLE_FREE"
+      ],
+      "axis": "ownership",
+      "intent": "release exactly once across a data flow",
+      "title": "Double free (flow variant)",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE415_Double_Free__malloc_free_char_41.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE416_Use_After_Free__alias_02",
+      "cwe": "CWE-416",
+      "class": [
+        "USE_AFTER_FREE"
+      ],
+      "axis": "ownership",
+      "intent": "track liveness through an alias",
+      "title": "Use-after-free through an alias",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE416_Use_After_Free__alias_02.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE416_Use_After_Free__malloc_free_char_01",
+      "cwe": "CWE-416",
+      "class": [
+        "USE_AFTER_FREE"
+      ],
+      "axis": "ownership",
+      "intent": "use a buffer only while it is live",
+      "title": "Buffer used after free",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE416_Use_After_Free__malloc_free_char_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE457_Use_of_Uninitialized__local_int_01",
+      "cwe": "CWE-457",
+      "class": [
+        "USE_OF_UNINITIALIZED"
+      ],
+      "axis": "init",
+      "intent": "assign a local on every path before reading it",
+      "title": "A path reaches the read with the local unassigned",
+      "contracts": [
+        "@initcheck"
+      ],
+      "file": "CWE457_Use_of_Uninitialized__local_int_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE459_Incomplete_Cleanup__finally_bypassed_01",
+      "cwe": "CWE-459",
+      "class": [
+        "FINALLY_BYPASSED"
+      ],
+      "axis": "ownership",
+      "intent": "route every owning exit through the cleanup funnel",
+      "title": "An exit bypasses the @goto_finally funnel while owning p",
+      "contracts": [
+        "@mem",
+        "@goto_finally"
+      ],
+      "file": "CWE459_Incomplete_Cleanup__finally_bypassed_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE476_Null_Dereference__nullable_return_01",
+      "cwe": "CWE-476",
+      "class": [
+        "NULL_DEREF"
+      ],
+      "axis": "ownership",
+      "intent": "exclude NULL before dereferencing",
+      "title": "Dereferencing a @nullable result without a check",
+      "contracts": [
+        "@nullable"
+      ],
+      "file": "CWE476_Null_Dereference__nullable_return_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE562_Return_of_Stack_Address__local_01",
+      "cwe": "CWE-562",
+      "class": [
+        "DANGLING_RETURN"
+      ],
+      "axis": "ownership",
+      "intent": "never return a pointer into the current frame",
+      "title": "Returning the address of a local",
+      "contracts": [],
+      "file": "CWE562_Return_of_Stack_Address__local_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE590_Free_Memory_Not_on_Heap__free_char_declare_01",
+      "cwe": "CWE-590",
+      "class": [
+        "FREE_NONHEAP"
+      ],
+      "axis": "ownership",
+      "intent": "free only heap memory",
+      "title": "Freeing a non-heap (stack) pointer",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE590_Free_Memory_Not_on_Heap__free_char_declare_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE667_Improper_Locking__requires_lock_01",
+      "cwe": "CWE-667",
+      "class": [
+        "REQUIRED_LOCK_NOT_HELD"
+      ],
+      "axis": "concurrency",
+      "intent": "hold a callee's required lock across the call",
+      "title": "Calling a @requires_lock function without the lock",
+      "contracts": [
+        "@threadsafe",
+        "@requires_lock"
+      ],
+      "file": "CWE667_Improper_Locking__requires_lock_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE672_Use_After_Move__channel_send_01",
+      "cwe": "CWE-672",
+      "class": [
+        "USE_AFTER_MOVE"
+      ],
+      "axis": "ownership",
+      "intent": "use an object only before ownership is moved",
+      "title": "Using a pointer after it is @moves-handed off",
+      "contracts": [
+        "@mem",
+        "@moves",
+        "@borrows"
+      ],
+      "file": "CWE672_Use_After_Move__channel_send_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE761_Free_Pointer_Not_at_Start_of_Buffer__char_fixed_string_01",
+      "cwe": "CWE-761",
+      "class": [
+        "FREE_INTERIOR"
+      ],
+      "axis": "ownership",
+      "intent": "free a buffer at its allocation start",
+      "title": "Freeing an advanced (interior) pointer",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE761_Free_Pointer_Not_at_Start_of_Buffer__char_fixed_string_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE762_Mismatched_Free__wrong_deallocator_01",
+      "cwe": "CWE-762",
+      "class": [
+        "WRONG_DEALLOCATOR"
+      ],
+      "axis": "ownership",
+      "intent": "free with the deallocator the resource declares",
+      "title": "Freed with free() instead of the declared g_free",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE762_Mismatched_Free__wrong_deallocator_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE763_Release_Invalid_Pointer__borrow_freed_01",
+      "cwe": "CWE-763",
+      "class": [
+        "BORROW_FREED"
+      ],
+      "axis": "ownership",
+      "intent": "never free a pointer you only borrow",
+      "title": "A @borrows callee frees the borrowed pointer",
+      "contracts": [
+        "@borrows"
+      ],
+      "file": "CWE763_Release_Invalid_Pointer__borrow_freed_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE787_Out_of_Bounds_Write__lookahead_01",
+      "cwe": "CWE-787",
+      "class": [
+        "INAPPROPRIATE_BOUND"
+      ],
+      "axis": "spatial",
+      "intent": "bound a fixed-width write without overflow",
+      "title": "Wrap-prone i+4<=len on a 4-byte write",
+      "contracts": [
+        "@spatial",
+        "@counted_by"
+      ],
+      "file": "CWE787_Out_of_Bounds_Write__lookahead_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE825_Expired_Pointer__arena_use_after_destroy_01",
+      "cwe": "CWE-825",
+      "class": [
+        "BORROW_OUTLIVES_OWNER"
+      ],
+      "axis": "ownership",
+      "intent": "use an arena pointer only before the arena is destroyed",
+      "title": "Arena pointer used after arena_destroy",
+      "contracts": [
+        "@arena",
+        "@borrows"
+      ],
+      "file": "CWE825_Expired_Pointer__arena_use_after_destroy_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE833_Deadlock__double_lock_01",
+      "cwe": "CWE-833",
+      "class": [
+        "DOUBLE_LOCK"
+      ],
+      "axis": "concurrency",
+      "intent": "never re-acquire a held non-recursive mutex",
+      "title": "Acquiring the same mutex twice (self-deadlock)",
+      "contracts": [
+        "@threadsafe"
+      ],
+      "file": "CWE833_Deadlock__double_lock_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE833_Deadlock__lock_order_02",
+      "cwe": "CWE-833",
+      "class": [
+        "LOCK_ORDER_VIOLATION"
+      ],
+      "axis": "concurrency",
+      "intent": "acquire locks in a consistent declared order",
+      "title": "Acquiring two locks against the declared @lock_order",
+      "contracts": [
+        "@threadsafe",
+        "@lock_order"
+      ],
+      "file": "CWE833_Deadlock__lock_order_02.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE843_Type_Confusion__tagged_union_01",
+      "cwe": "CWE-843",
+      "class": [
+        "TYPE_CONFUSION"
+      ],
+      "axis": "typecheck",
+      "intent": "check the discriminant before reading a union member",
+      "title": "Reading a @variant member without the matching tag",
+      "contracts": [
+        "@typecheck",
+        "@variant"
+      ],
+      "file": "CWE843_Type_Confusion__tagged_union_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE415_Double_Free__frees_handoff_03",
+      "cwe": "CWE-415",
+      "class": [
+        "DOUBLE_FREE"
+      ],
+      "axis": "ownership",
+      "intent": "hand ownership to a callee that frees it",
+      "title": "Caller frees a buffer it already handed to a @frees callee",
+      "contracts": [
+        "@mem",
+        "@frees"
+      ],
+      "file": "CWE415_Double_Free__frees_handoff_03.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE125_Out_of_Bounds_Read__unvalidated_index_07",
+      "cwe": "CWE-125",
+      "class": [
+        "UNVALIDATED_INDEX"
+      ],
+      "axis": "spatial",
+      "intent": "bound the untrusted index that is actually used",
+      "title": "Index reaches a buffer with no covering bound check",
+      "contracts": [
+        "@spatial",
+        "@counted_by"
+      ],
+      "file": "CWE125_Out_of_Bounds_Read__unvalidated_index_07.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE120_Buffer_Overflow__unvalidated_size_01",
+      "cwe": "CWE-120",
+      "class": [
+        "UNVALIDATED_SIZE"
+      ],
+      "axis": "spatial",
+      "intent": "bound an untrusted length before a bulk copy",
+      "title": "Untrusted length reaches memcpy with no bound",
+      "contracts": [
+        "@spatial"
+      ],
+      "file": "CWE120_Buffer_Overflow__unvalidated_size_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE416_Use_After_Free__curl_cve_2018_16840_03",
+      "cwe": "CWE-416",
+      "class": [
+        "USE_AFTER_FREE"
+      ],
+      "axis": "ownership",
+      "intent": "clean up an owned handle, then never touch it",
+      "title": "A cleaned-up handle is used again (curl CVE-2018-16840)",
+      "contracts": [
+        "@mem",
+        "@frees"
+      ],
+      "file": "CWE416_Use_After_Free__curl_cve_2018_16840_03.c",
+      "provenance": {
+        "cve": "CVE-2018-16840",
+        "project": "curl",
+        "fixCommit": "81d135d67155c5295b1033679c606165d4e28f3f",
+        "url": "https://github.com/curl/curl/commit/81d135d67155c5295b1033679c606165d4e28f3f",
+        "note": "Minimal reproduction of the Curl_close use-after-free: curl_multi_cleanup frees the multi handle and a later path uses it. The upstream fix nulls data->multi_easy after cleanup; state C uses the handle before cleanup (equivalent safe ordering)."
+      }
+    },
+    {
+      "id": "CWE125_Out_of_Bounds_Read__heartbleed_cve_2014_0160_08",
+      "cwe": "CWE-125",
+      "class": [
+        "UNVALIDATED_SIZE"
+      ],
+      "axis": "spatial",
+      "intent": "bound a copy length against the SOURCE buffer's size, not just the destination",
+      "title": "memcpy over-reads a short source (Heartbleed CVE-2014-0160)",
+      "contracts": [
+        "@spatial",
+        "@counted_by"
+      ],
+      "file": "CWE125_Out_of_Bounds_Read__heartbleed_cve_2014_0160_08.c",
+      "provenance": {
+        "cve": "CVE-2014-0160",
+        "project": "OpenSSL",
+        "fixCommit": "96db9023b881d7cd9f379b0c154650d6c108e9a3",
+        "url": "https://github.com/openssl/openssl/commit/96db9023b881d7cd9f379b0c154650d6c108e9a3",
+        "note": "Minimal reproduction of tls1_process_heartbeat: payload (a 16-bit peer length) bytes are copied from the record pl, which holds only rrec_length. Upstream fix adds `1+2+payload+16 > rrec.length`; state C uses the overflow-safe `rrec_length >= 19 && payload <= rrec_length - 19`."
+      }
+    },
+    {
+      "id": "CWE672_Double_Move__move_twice_02",
+      "cwe": "CWE-672",
+      "class": [
+        "DOUBLE_MOVE"
+      ],
+      "axis": "ownership",
+      "intent": "move an owned value at most once",
+      "title": "A value is moved twice",
+      "contracts": [
+        "@mem",
+        "@moves"
+      ],
+      "file": "CWE672_Double_Move__move_twice_02.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE404_Contract_Not_Honored__frees_no_free_01",
+      "cwe": "CWE-404",
+      "class": [
+        "CONTRACT_NOT_HONORED"
+      ],
+      "axis": "ownership",
+      "intent": "honour a @frees contract by actually freeing",
+      "title": "A @frees function never frees its argument",
+      "contracts": [
+        "@frees"
+      ],
+      "file": "CWE404_Contract_Not_Honored__frees_no_free_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE1284_Unguarded_Invariant_Write__protected_field_01",
+      "cwe": "CWE-1284",
+      "class": [
+        "UNGUARDED_INVARIANT_WRITE"
+      ],
+      "axis": "spatial",
+      "intent": "declare the effect of a write to an invariant field",
+      "title": "Unannotated write to a @invariant-protected field",
+      "contracts": [
+        "@spatial",
+        "@invariant"
+      ],
+      "file": "CWE1284_Unguarded_Invariant_Write__protected_field_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE667_Lock_Leaked__error_path_02",
+      "cwe": "CWE-667",
+      "class": [
+        "LOCK_LEAKED"
+      ],
+      "axis": "concurrency",
+      "intent": "release a lock on every exit path",
+      "title": "A lock is held on an error-return path",
+      "contracts": [
+        "@threadsafe"
+      ],
+      "file": "CWE667_Lock_Leaked__error_path_02.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE667_Unlock_Without_Lock__double_unlock_03",
+      "cwe": "CWE-667",
+      "class": [
+        "UNLOCK_WITHOUT_LOCK"
+      ],
+      "axis": "concurrency",
+      "intent": "release a lock only when it is held",
+      "title": "A lock is released when nothing is held (double-unlock)",
+      "contracts": [
+        "@threadsafe"
+      ],
+      "file": "CWE667_Unlock_Without_Lock__double_unlock_03.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE667_Lock_Not_Acquired__acquires_contract_01",
+      "cwe": "CWE-667",
+      "class": [
+        "LOCK_NOT_ACQUIRED"
+      ],
+      "axis": "concurrency",
+      "intent": "establish an @acquires lock on every exit",
+      "title": "An @acquires function does not hold the lock on all paths",
+      "contracts": [
+        "@threadsafe",
+        "@acquires"
+      ],
+      "file": "CWE667_Lock_Not_Acquired__acquires_contract_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE833_Same_Class_No_Order__two_accounts_03",
+      "cwe": "CWE-833",
+      "class": [
+        "SAME_CLASS_NO_ORDER"
+      ],
+      "axis": "concurrency",
+      "intent": "acquire two same-class locks in a canonical order",
+      "title": "Two same-class locks with no canonical order (AB-BA)",
+      "contracts": [
+        "@threadsafe",
+        "@lock_class"
+      ],
+      "file": "CWE833_Same_Class_No_Order__two_accounts_03.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE362_Guarded_Escape__address_of_field_02",
+      "cwe": "CWE-362",
+      "class": [
+        "GUARDED_ESCAPE"
+      ],
+      "axis": "concurrency",
+      "intent": "keep a guarded field inline — never take its address",
+      "title": "The address of a @guarded_by field escapes",
+      "contracts": [
+        "@threadsafe",
+        "@guarded_by"
+      ],
+      "file": "CWE362_Guarded_Escape__address_of_field_02.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE667_Undeclared_Indirect_Call__under_lock_01",
+      "cwe": "CWE-667",
+      "class": [
+        "UNDECLARED_INDIRECT_CALL"
+      ],
+      "axis": "concurrency",
+      "intent": "declare the targets of a function pointer called under a lock",
+      "title": "Indirect call with undeclared targets under a lock",
+      "contracts": [
+        "@threadsafe",
+        "@calls"
+      ],
+      "file": "CWE667_Undeclared_Indirect_Call__under_lock_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE667_Undeclared_Fn_Target__wrong_assignment_01",
+      "cwe": "CWE-667",
+      "class": [
+        "UNDECLARED_FN_TARGET"
+      ],
+      "axis": "concurrency",
+      "intent": "assign a function pointer only its declared targets",
+      "title": "A function pointer is assigned an undeclared target",
+      "contracts": [
+        "@threadsafe",
+        "@calls"
+      ],
+      "file": "CWE667_Undeclared_Fn_Target__wrong_assignment_01.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE401_Memory_Leak__escape_handoff_32",
+      "cwe": "CWE-401",
+      "class": [
+        "ESCAPE_UNCHECKED"
+      ],
+      "axis": "ownership",
+      "intent": "hand a heap buffer off to an external owner you cannot follow",
+      "title": "Ownership stored into an opaque slot — declare the hand-off with @escapes",
+      "contracts": [
+        "@mem",
+        "@escapes"
+      ],
+      "file": "CWE401_Memory_Leak__escape_handoff_32.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE415_Double_Free__possible_handoff_54",
+      "cwe": "CWE-415",
+      "class": [
+        "DOUBLE_FREE",
+        "POSSIBLE_DOUBLE_FREE"
+      ],
+      "axis": "ownership",
+      "intent": "free once when a callee already frees the handoff",
+      "title": "Caller frees after an uncontracted callee frees — POSSIBLE, confirmed by @frees",
+      "contracts": [
+        "@mem",
+        "@frees"
+      ],
+      "file": "CWE415_Double_Free__possible_handoff_54.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE416_Use_After_Free__possible_handoff_54",
+      "cwe": "CWE-416",
+      "class": [
+        "USE_AFTER_FREE",
+        "POSSIBLE_USE_AFTER_FREE"
+      ],
+      "axis": "ownership",
+      "intent": "use a buffer only before a callee frees it",
+      "title": "Caller uses a buffer after an uncontracted callee frees it — POSSIBLE, confirmed by @frees",
+      "contracts": [
+        "@mem",
+        "@frees"
+      ],
+      "file": "CWE416_Use_After_Free__possible_handoff_54.c",
+      "provenance": null
+    },
+    {
+      "id": "CWE415_Double_Free__curl_krb5_cve_2016_8619_02",
+      "cwe": "CWE-415",
+      "class": [
+        "DOUBLE_FREE"
+      ],
+      "axis": "ownership",
+      "intent": "release a field's buffer exactly once across a realloc(0) edge",
+      "title": "curl krb5 read_data: realloc(0) frees buf->data, then cleanup frees it again",
+      "contracts": [
+        "@mem"
+      ],
+      "file": "CWE415_Double_Free__curl_krb5_cve_2016_8619_02.c",
+      "provenance": {
+        "cve": "CVE-2016-8619",
+        "project": "curl",
+        "fixCommit": "3d6460edeee21d7d790ec570d0887bed1f4366dd",
+        "url": "https://github.com/curl/curl/commit/3d6460edeee21d7d790ec570d0887bed1f4366dd",
+        "note": "Minimal reproduction of the curl krb5 read_data double-free: realloc(buf->data, len) with an attacker-controlled len==0 acts as free(buf->data) and returns NULL; read_data returns error without clearing buf->data, so the krb5 connection cleanup frees the field a second time. The realloc(0)=free edge is modelled as an explicit free(buf->data); state C mirrors the upstream fix (guard the realloc on a non-zero length)."
+      }
+    },
+    {
+      "id": "CWE401_Memory_Leak__exception_path_01",
+      "cwe": "CWE-401",
+      "class": [
+        "LEAK_ON_THROW"
+      ],
+      "axis": "ownership",
+      "intent": "hold an owner across a call that may throw (C++)",
+      "title": "A raw `new` is lost when `process` unwinds before the `delete`",
+      "contracts": [
+        "@mem",
+        "@borrows"
+      ],
+      "file": "CWE401_Memory_Leak__exception_path_01.cpp",
+      "provenance": null
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "kind": "protocols",
+  "id": "synthetic.dma.device-a",
+  "version": "1",
+  "machines": [
+    {
+      "id": "dma",
+      "states": ["stopped", "ready", "busy", "stopping", "failed"],
+      "initial": "stopped",
+      "terminal": ["stopped", "ready"],
+      "operations": [
+        {"symbol": "c:@F@dma_configure", "argument": 1, "from": ["stopped"], "to": "ready"},
+        {"symbol": "c:@F@dma_start_tx", "argument": 1, "from": ["ready"], "outcomes": [
+          {"result": "zero", "to": "busy", "borrow": {"argument": 2, "mode": "read", "lengthArgument": 3,
+            "minBytes": 64, "alignment": 4, "requireMarks": ["cache_clean"]}},
+          {"result": "nonzero", "to": "ready"}]},
+        {"symbol": "c:@F@dma_start_rx", "argument": 1, "from": ["ready"], "outcomes": [
+          {"result": "zero", "to": "busy", "borrow": {"argument": 2, "mode": "write", "lengthArgument": 3,
+            "minBytes": 64, "alignment": 4, "marksOnRelease": ["cache_stale"]}},
+          {"result": "nonzero", "to": "ready"}]},
+        {"symbol": "c:@F@dma_complete", "argument": 1, "from": ["busy"], "outcomes": [
+          {"result": "zero", "to": "ready", "releaseBorrow": true},
+          {"result": "nonzero", "to": "failed", "releaseBorrow": true}]},
+        {"symbol": "c:@F@dma_cancel", "argument": 1, "from": ["busy"], "to": "stopping"},
+        {"symbol": "c:@F@dma_wait_stopped", "argument": 1, "from": ["stopping"], "to": "ready", "releaseBorrow": true},
+        {"symbol": "c:@F@dma_reset", "argument": 1, "from": ["failed"], "to": "ready"}
+      ]
+    }
+  ]
+}

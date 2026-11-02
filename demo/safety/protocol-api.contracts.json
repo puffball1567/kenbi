@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "kind": "contracts",
+  "id": "synthetic.protocol-api",
+  "version": "1",
+  "functions": [
+    {
+      "symbol": "c:@F@device_init",
+      "effects": [],
+      "assumption": "synthetic.device.behavior"
+    },
+    {
+      "symbol": "c:@F@device_start",
+      "effects": [],
+      "assumption": "synthetic.device.behavior"
+    },
+    {
+      "symbol": "c:@F@device_finish",
+      "effects": [],
+      "assumption": "synthetic.device.behavior"
+    }
+  ]
+}

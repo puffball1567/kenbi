@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 1,
+  "kind": "project",
+  "id": "synthetic.dma.project-a",
+  "sources": [
+    "dma_driver.c"
+  ],
+  "contracts": [
+    "board.contracts.json",
+    "dma-api.contracts.json"
+  ],
+  "protocols": [
+    "device-a.protocols.json"
+  ],
+  "contexts": {
+    "interrupt": {
+      "forbid": [
+        "heap_allocate"
+      ]
+    }
+  },
+  "profiles": {
+    "driver": {
+      "protocols": [
+        "dma"
+      ],
+      "memoryAccess": true
+    },
+    "irq": {
+      "context": "interrupt",
+      "forbid": [
+        "heap_allocate"
+      ]
+    }
+  },
+  "checks": [
+    {
+      "file": "dma_driver.c",
+      "function": "tx_normal",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "heap_tx_normal",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "rx_normal",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "tx_cancelled",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "start_before_configure",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "start_while_busy",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "cpu_write_during_tx",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "cpu_read_during_rx",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "buffer_dies_during_tx",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "free_during_tx",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "buffer_too_small",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "misaligned_offset",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "buffer_alignment_unknown",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "tx_without_cache_clean",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "write_after_cache_clean",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "partial_cache_clean",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "rx_read_without_invalidate",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "failure_not_reset",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "early_return_while_busy",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "cancel_without_ack",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "complete_on_one_branch",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "restart_in_loop",
+      "profile": "driver"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "dma_irq_handler",
+      "profile": "irq"
+    },
+    {
+      "file": "dma_driver.c",
+      "function": "uses_uncontracted_api",
+      "profile": "driver"
+    }
+  ],
+  "acceptedAssumptions": [
+    "dma.device.behaviour",
+    "dma.cache.behaviour",
+    "dma.board",
+    "libc"
+  ]
+}

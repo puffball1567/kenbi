@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "kind": "protocols",
+  "id": "synthetic.strict",
+  "version": "1",
+  "machines": [
+    {
+      "id": "transfer",
+      "states": [
+        "new",
+        "ready",
+        "busy"
+      ],
+      "initial": "new",
+      "terminal": [
+        "new",
+        "ready"
+      ],
+      "operations": [
+        {
+          "symbol": "c:@F@device_init",
+          "argument": 1,
+          "from": [
+            "new",
+            "ready"
+          ],
+          "to": "ready"
+        },
+        {
+          "symbol": "c:@F@device_start",
+          "argument": 1,
+          "from": [
+            "ready"
+          ],
+          "to": "busy"
+        },
+        {
+          "symbol": "c:@F@device_finish",
+          "argument": 1,
+          "from": [
+            "busy"
+          ],
+          "to": "ready"
+        }
+      ]
+    }
+  ]
+}

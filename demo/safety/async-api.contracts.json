@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "kind": "contracts",
+  "id": "synthetic.async-api",
+  "version": "1",
+  "functions": [
+    {
+      "symbol": "c:@F@transfer_init",
+      "effects": [],
+      "assumption": "synthetic.transfer.behavior",
+      "accesses": []
+    },
+    {
+      "symbol": "c:@F@transfer_start",
+      "effects": [],
+      "assumption": "synthetic.transfer.behavior",
+      "accesses": []
+    },
+    {
+      "symbol": "c:@F@transfer_finish",
+      "effects": [],
+      "assumption": "synthetic.transfer.behavior",
+      "accesses": []
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "kind": "project",
+  "id": "synthetic.context.thread",
+  "sources": [
+    "context-driver.c"
+  ],
+  "contracts": [
+    "context.contracts.json"
+  ],
+  "contexts": {
+    "thread": {
+      "forbid": []
+    },
+    "interrupt": {
+      "forbid": [
+        "heap_allocate",
+        "block",
+        "wait"
+      ]
+    }
+  },
+  "profiles": {
+    "driver": {
+      "context": "thread"
+    }
+  },
+  "checks": [
+    {
+      "file": "context-driver.c",
+      "function": "service_event",
+      "profile": "driver"
+    },
+    {
+      "file": "context-driver.c",
+      "function": "configure_entry",
+      "profile": "driver"
+    },
+    {
+      "file": "context-driver.c",
+      "function": "blocking_entry",
+      "profile": "driver"
+    }
+  ],
+  "acceptedAssumptions": [
+    "synthetic.context.model"
+  ]
+}

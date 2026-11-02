@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "kind": "contracts",
+  "id": "synthetic.context.api",
+  "version": "1",
+  "functions": [
+    {
+      "symbol": "c:@F@acknowledge_event",
+      "effects": [],
+      "contexts": [
+        "thread",
+        "interrupt"
+      ],
+      "assumption": "synthetic.context.model"
+    },
+    {
+      "symbol": "c:@F@wait_for_event",
+      "effects": [
+        "wait",
+        "block"
+      ],
+      "contexts": [
+        "thread"
+      ],
+      "assumption": "synthetic.context.model"
+    },
+    {
+      "symbol": "c:@F@configure_resource",
+      "effects": [],
+      "contexts": [
+        "thread"
+      ],
+      "assumption": "synthetic.context.model"
+    }
+  ]
+}

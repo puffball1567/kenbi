@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "kind": "contracts",
+  "id": "synthetic.dma.api",
+  "version": "1",
+  "marks": [
+    {"id": "cache_clean", "clearedBy": ["write"]},
+    {"id": "cache_stale", "forbids": ["read"]}
+  ],
+  "functions": [
+    {"symbol": "c:@F@dma_configure", "effects": [], "assumption": "dma.device.behaviour", "accesses": []},
+    {"symbol": "c:@F@dma_start_tx", "effects": [], "assumption": "dma.device.behaviour", "accesses": []},
+    {"symbol": "c:@F@dma_start_rx", "effects": [], "assumption": "dma.device.behaviour", "accesses": []},
+    {"symbol": "c:@F@dma_complete", "effects": [], "assumption": "dma.device.behaviour", "accesses": []},
+    {"symbol": "c:@F@dma_cancel", "effects": [], "assumption": "dma.device.behaviour", "accesses": []},
+    {"symbol": "c:@F@dma_wait_stopped", "effects": [], "assumption": "dma.device.behaviour", "accesses": []},
+    {"symbol": "c:@F@dma_reset", "effects": [], "assumption": "dma.device.behaviour", "accesses": []},
+    {"symbol": "c:@F@cache_clean", "effects": [], "assumption": "dma.cache.behaviour",
+     "preservesProtocols": true, "accesses": [{"argument": 1, "mode": "read"}],
+     "marks": [{"argument": 1, "lengthArgument": 2, "set": ["cache_clean"]}]},
+    {"symbol": "c:@F@cache_invalidate", "effects": [], "assumption": "dma.cache.behaviour",
+     "preservesProtocols": true, "accesses": [],
+     "marks": [{"argument": 1, "lengthArgument": 2, "clear": ["cache_stale"]}]},
+    {"symbol": "c:@F@log_value", "effects": [], "assumption": "dma.board",
+     "preservesProtocols": true, "accesses": []},
+    {"symbol": "c:@F@malloc", "effects": ["heap_allocate"], "assumption": "libc",
+     "preservesProtocols": true, "accesses": [],
+     "allocates": {"sizeArgument": 1, "alignment": 16, "nullable": true, "releasedBy": ["c:@F@free"],
+                   "region": "sram"}},
+    {"symbol": "c:@F@free", "effects": [], "assumption": "libc",
+     "preservesProtocols": true, "accesses": [{"argument": 1, "mode": "release"}]}
+  ]
+}

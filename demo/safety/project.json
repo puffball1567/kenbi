@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "kind": "project",
+  "id": "example.irq",
+  "sources": ["driver.c"],
+  "contracts": ["board.contracts.json"],
+  "acceptedAssumptions": ["board.wait.contract"],
+  "profiles": {
+    "interrupt": {"forbid": ["heap_allocate", "block", "wait"]}
+  },
+  "checks": [
+    {"file": "driver.c", "function": "pure_entry", "profile": "interrupt"},
+    {"file": "driver.c", "function": "irq_entry", "profile": "interrupt"}
+  ]
+}

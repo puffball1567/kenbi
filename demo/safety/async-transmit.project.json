@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "kind": "project",
+  "id": "synthetic.project.transmit",
+  "sources": [
+    "async_driver.c"
+  ],
+  "contracts": [
+    "async-api.contracts.json"
+  ],
+  "protocols": [
+    "transmit.protocols.json"
+  ],
+  "profiles": {
+    "driver": {
+      "forbid": [
+        "heap_allocate",
+        "block",
+        "wait"
+      ],
+      "protocols": [
+        "transfer"
+      ]
+    }
+  },
+  "checks": [
+    {
+      "file": "async_driver.c",
+      "function": "completed",
+      "profile": "driver"
+    },
+    {
+      "file": "async_driver.c",
+      "function": "read_during_transfer",
+      "profile": "driver"
+    }
+  ],
+  "acceptedAssumptions": [
+    "synthetic.transfer.behavior"
+  ]
+}

@@ -1,0 +1,45 @@
+name: CI
+
+# kenbi's own continuous integration: build the checker and run every test
+# suite (mini-format engine, the libclang C/C++ front-end, --safety, the MCP server). The C/C++ fixtures
+# deliberately contain bugs, so this validates kenbi, it does not gate kenbi on
+# its own fixtures — see integrations/ci/kenbi-review.yml for the workflow a
+# consumer project uses to gate *their* code.
+
+on:
+  push:
+    branches: [main, devel]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nim
+        uses: jiro4989/setup-nim-action@v1
+        with:
+          nim-version: 'stable'   # >= 2.2
+
+      - name: Install libclang
+        # The runtime library (loaded by soname) and clang's builtin headers (stddef.h, ...),
+        # which Debian packages separately; without them the fixtures that include one do not
+        # parse. The suites' expectations were measured with libclang 14.
+        run: sudo apt-get update && sudo apt-get install -y libclang1-14 libclang-common-14-dev
+
+      - name: Build
+        run: nimble build -d:release -y && ./kenbi --version
+
+      - name: Test (engine, C/C++ and --safety suites)
+        run: nimble testall
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test (MCP server)
+        working-directory: mcp
+        run: npm ci && npm run build && npm test

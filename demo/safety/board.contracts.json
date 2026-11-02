@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "kind": "contracts",
+  "id": "example.board",
+  "version": "1",
+  "functions": [
+    {
+      "symbol": "c:@F@board_wait",
+      "effects": ["block", "wait"],
+      "assumption": "board.wait.contract"
+    }
+  ]
+}

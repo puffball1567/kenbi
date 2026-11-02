@@ -1,0 +1,67 @@
+# kenbi memory-safety review — GitHub Actions workflow (TEMPLATE).
+#
+# Copy this into YOUR C/C++ repository as .github/workflows/kenbi-review.yml.
+# It builds kenbi from source and runs the deterministic checker over your code
+# on every pull request.
+#
+# Gate vs. advisory (design choice):
+#   - DETERMINISTIC CORE is sound enough to gate: kenbi exits 1 when it finds
+#     issues, which fails the job and blocks the PR. This is the default below.
+#   - To run it as a non-blocking "neutral check" instead (recommended until you
+#     have tuned annotations on your codebase), set `continue-on-error: true` on
+#     the "Run kenbi" step, or pass findings to a reviewer comment.
+#
+# Prerequisites in your repo:
+#   - a compile_commands.json (most CMake/Bazel/Meson builds can emit one;
+#     for CMake: cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -S . -B build).
+#   - kenbi ownership annotations on the code you want checked (unannotated
+#     resources carry no verdict — that is by design, not a miss).
+
+name: kenbi memory-safety review
+
+on:
+  pull_request:
+
+jobs:
+  kenbi:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout your code
+        uses: actions/checkout@v4
+
+      - name: Install Nim
+        uses: jiro4989/setup-nim-action@v1
+        with:
+          nim-version: 'stable'
+
+      - name: Install libclang
+        # The library and clang's builtin headers (stddef.h, ...), which Debian packages
+        # separately; a file that includes one does not parse without them.
+        run: sudo apt-get update && sudo apt-get install -y libclang1-14 libclang-common-14-dev
+
+      - name: Build kenbi
+        run: |
+          git clone --depth 1 --branch main https://github.com/puffball1567/kenbi.git "$RUNNER_TEMP/kenbi"
+          cd "$RUNNER_TEMP/kenbi"
+          nimble build -d:release -y
+          echo "$RUNNER_TEMP/kenbi" >> "$GITHUB_PATH"
+
+      # TODO: replace with your build that emits compile_commands.json
+      - name: Configure (emit compile_commands.json)
+        run: cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -S . -B build
+
+      - name: Run kenbi
+        # Adjust the file selection to the sources you want gated.
+        # Exit code: 0 clean, 1 findings (fails the job), 2 usage/parse error.
+        run: |
+          files=$(git ls-files 'src/**/*.c' 'src/**/*.cc' 'src/**/*.cpp')
+          [ -z "$files" ] && { echo "no C/C++ sources matched"; exit 0; }
+          kenbi --format=json --compile-commands=build/compile_commands.json $files \
+            | tee kenbi-findings.json
+
+      - name: Upload findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kenbi-findings
+          path: kenbi-findings.json
