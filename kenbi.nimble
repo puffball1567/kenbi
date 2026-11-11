@@ -18,6 +18,7 @@ task testc, "run the libclang front-end suite on real C / C++ (needs libclang)":
   exec "nim r --hints:off -d:release tests/run_tests_c.nim"
 
 task testsafety, "build and test configured effect and protocol verification":
+  mkDir "tmp"   # the suites write their scratch files under tmp/, which a fresh clone lacks
   exec "nim c --hints:off -d:release -o:kenbi src/kenbi.nim"
   exec "python3 tests/run_tests_safety.py"
   exec "python3 tests/run_tests_protocols.py"
@@ -90,6 +91,7 @@ task testsafety, "build and test configured effect and protocol verification":
   exec "python3 tests/run_tests_dma_acceptance.py"
 
 task testall, "run every test suite":
+  mkDir "tmp"
   exec "nim r --hints:off -d:release tests/run_tests.nim"
   exec "nim r --hints:off -d:release tests/run_tests_c.nim"
   exec "nim r --hints:off -d:release tests/run_tests_loop_bindings.nim"
