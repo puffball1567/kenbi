@@ -1,6 +1,6 @@
 {
   "name": "kenbi-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "MCP server exposing the kenbi deterministic memory-safety checker as a callable tool",
   "license": "Apache-2.0",

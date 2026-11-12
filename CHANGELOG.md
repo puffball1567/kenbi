@@ -5,7 +5,7 @@ All notable changes to kenbi are recorded here. The format follows
 [Semantic Versioning](https://semver.org/); before 1.0 the interfaces, the annotation vocabulary
 and the JSON output may change in any minor version.
 
-## [Unreleased]
+## [0.1.1] - 2026-11-13
 
 ### Added
 
@@ -55,5 +55,5 @@ Also: `--project` closure over a `compile_commands.json`, `--emit-contracts`, `k
 which checks ran on which functions, and what a result without findings rests on without
 having checked it.
 
-[Unreleased]: https://github.com/puffball1567/kenbi/compare/v0.1.0...HEAD
+[0.1.1]: https://github.com/puffball1567/kenbi/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/puffball1567/kenbi/releases/tag/v0.1.0

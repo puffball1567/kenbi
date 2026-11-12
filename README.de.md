@@ -6,7 +6,7 @@
 
 **Gebaut, um C/C++ mit KI-Agenten zu schreiben.** Über seinen [MCP-Server](#mit-ki-coding-agenten-mcp) prüft ein Agent das C/C++, das er gerade geschrieben hat, fragt, warum ein Befund auftritt und wie die Korrektur aussieht, und wiederholt das, bis die Prüfungen nichts mehr melden. Speichersicherheit wird so Teil der Schreibschleife des Agenten statt einer nachträglichen Review, und die Annotationen, die er schreibt, bleiben als Regeln im Code, die kenbi weiter prüft.
 
-> Status: **v0.1.0**, frühe Entwicklungsphase. Die Schnittstellen, das Annotationsvokabular und
+> Status: **v0.1.1**, frühe Entwicklungsphase. Die Schnittstellen, das Annotationsvokabular und
 > die JSON-Ausgabe können sich noch ändern.
 
 ## Ein erster Blick

@@ -1,6 +1,7 @@
 ## Required source-effect checks. Every call is traversed, including scalar-only
 ## helpers. External contracts remain explicit assumptions, never proof badges.
 import std/[json, os, sets, tables, algorithm, strutils, sequtils]
+import version
 import checksums/sha1
 import ir, frontend_c, safety_config, clang, protocol_check
 
@@ -710,7 +711,7 @@ proc checkSafety*(cfg: SafetyConfig): tuple[report: JsonNode, exitCode: int] =
       "source": binding.source, "requiredTriple": binding.triple,
       "requiredPointerWidth": binding.pointerWidth, "unit": "bits", "checkedSources": cfg.sources}
   result.report = %*{"schemaVersion": 1, "kind": "safety-result", "project": cfg.id,
-    "tool": "kenbi", "toolVersion": "0.1.0", "capability": effectCapability, "capabilities": capabilities,
+    "tool": "kenbi", "toolVersion": kenbiVersion, "capability": effectCapability, "capabilities": capabilities,
     "clangVersion": clangVersion, "workingDirectory": getCurrentDir(),
     "phase": "source", "status": overall, "accepted": accepted,
     "obligations": obligations, "findings": allFindings, "inputs": inputs,

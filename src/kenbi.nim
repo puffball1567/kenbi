@@ -19,6 +19,7 @@
 ## carrying what this run established about the implementation behind it. See emitContracts.
 
 import std/[os, strutils, json, sets, tables, algorithm]
+import version
 import ir, parse, analyze, frontend_c, cfront_core, compile_db
 import strip, cfront_annotations, clang
 import safety_check
@@ -522,16 +523,6 @@ proc stripMain() =
     echo "── kenbi strip: ", verb, " ", totalRemoved, " annotation(s) in ",
          changedFiles, " of ", files.len, " file(s)"
 
-const kenbiVersion = block:
-  ## The package version, read from kenbi.nimble at compile time so the two cannot disagree.
-  var v = ""
-  for line in staticRead("../kenbi.nimble").splitLines:
-    let l = line.strip
-    if l.startsWith("version") and '"' in l:
-      v = l.split('"')[1]
-      break
-  doAssert v.len > 0, "kenbi.nimble declares no version"
-  v
 
 proc main() =
   if paramCount() >= 1 and paramStr(1) == "strip":

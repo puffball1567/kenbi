@@ -6,7 +6,7 @@
 
 **Conçu pour écrire du C/C++ avec des agents IA.** Grâce à son [serveur MCP](#avec-des-agents-de-programmation-ia-mcp), un agent vérifie le C/C++ qu'il vient d'écrire, demande pourquoi un constat apparaît et à quoi ressemble la correction, et recommence jusqu'à ce que les vérifications ne signalent plus rien. La sûreté mémoire devient une partie de la boucle d'écriture de l'agent plutôt qu'une revue après coup, et les annotations qu'il écrit restent dans le code comme des règles que kenbi continue de vérifier.
 
-> Statut : **v0.1.0**, développement précoce. Les interfaces, le vocabulaire d'annotations et la
+> Statut : **v0.1.1**, développement précoce. Les interfaces, le vocabulaire d'annotations et la
 > sortie JSON peuvent encore changer.
 
 ## Un premier aperçu

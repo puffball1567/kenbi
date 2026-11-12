@@ -13,7 +13,7 @@ looks like, and repeats until the checks report nothing. Memory safety becomes p
 agent's write loop rather than a review after the fact, and the annotations it writes stay in
 the code as rules kenbi keeps checking.
 
-> Status: **v0.1.0**, early development. The interfaces, the annotation vocabulary and the
+> Status: **v0.1.1**, early development. The interfaces, the annotation vocabulary and the
 > JSON output may still change.
 
 ## A first look
