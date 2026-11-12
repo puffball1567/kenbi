@@ -233,8 +233,11 @@ proc renderText(results: seq[FileResult]) =
     if incomplete.len > 0:
       echo "  flows needing work        : ", incomplete.len, " of ", c.flows.len
       for fl in incomplete:
+        var own = "its own findings"     # a flow with nothing left to walk: the entry itself
+        for v in c.unsafeVouches:
+          if v.fn == fl.entry: own = "its own `@unsafe`"
         echo "      ", fl.entry, "  ← blocked by: ",
-             (if fl.blockers.len > 0: fl.blockers.join(", ") else: "its own `@unsafe`")
+             (if fl.blockers.len > 0: fl.blockers.join(", ") else: own)
     if c.adopted == 0 and c.blocks == 0:
       echo "  (no @kenbi markers — add one to adopt a function/file and start raising coverage)"
 
