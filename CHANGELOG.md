@@ -5,7 +5,24 @@ All notable changes to kenbi are recorded here. The format follows
 [Semantic Versioning](https://semver.org/); before 1.0 the interfaces, the annotation vocabulary
 and the JSON output may change in any minor version.
 
-## [0.1.0] - Unreleased
+## [Unreleased]
+
+### Fixed
+
+- With libclang 17 or later, `--safety` crashed on a project whose `clangArgs` use relative
+  include paths, and a function's file could be misidentified: those libclang versions name such
+  a file relative to the parse's working directory. File names are now resolved the same way
+  with every libclang.
+
+### Changed
+
+- SHA-1 comes from the `checksums` package instead of the deprecated `std/sha1` (a new nimble
+  dependency, installed by `nimble build`).
+- CI also runs the suites against libclang 15 to 18, and `nimble testall` now includes the
+  project coverage suite.
+- Issue templates for false positives, bugs and ideas.
+
+## [0.1.0] - 2026-11-11
 
 First version. Checks, each opted into separately:
 
@@ -25,4 +42,5 @@ Also: `--project` closure over a `compile_commands.json`, `--emit-contracts`, `k
 which checks ran on which functions, and what a result without findings rests on without
 having checked it.
 
+[Unreleased]: https://github.com/puffball1567/kenbi/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/puffball1567/kenbi/releases/tag/v0.1.0

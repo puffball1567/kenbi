@@ -1,6 +1,7 @@
 ## Required source-effect checks. Every call is traversed, including scalar-only
 ## helpers. External contracts remain explicit assumptions, never proof badges.
-import std/[json, os, sets, tables, algorithm, strutils, sha1, sequtils]
+import std/[json, os, sets, tables, algorithm, strutils, sequtils]
+import checksums/sha1
 import ir, frontend_c, safety_config, clang, protocol_check
 
 const effectCapability = "source-effects.c.v1"

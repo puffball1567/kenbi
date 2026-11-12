@@ -10,6 +10,7 @@ bin           = @["kenbi"]
 # Dependencies
 
 requires "nim >= 2.2.0"
+requires "checksums >= 0.2.2"   # SHA-1 of input files, for evidence and artifact pinning
 
 task test, "run the mini-format engine test suite":
   exec "nim r --hints:off -d:release tests/run_tests.nim"
@@ -96,6 +97,7 @@ task testall, "run every test suite":
   exec "nim r --hints:off -d:release tests/run_tests_c.nim"
   exec "nim r --hints:off -d:release tests/run_tests_loop_bindings.nim"
   exec "nim c --hints:off -d:release -o:kenbi src/kenbi.nim"
+  exec "nim r --hints:off -d:release tests/run_tests_project.nim"   # uses ./kenbi for the --project checks
   exec "python3 tests/run_tests_safety.py"
   exec "python3 tests/run_tests_protocols.py"
   exec "python3 tests/run_tests_borrows.py"

@@ -1,5 +1,6 @@
 ## Full call inventory, deliberately independent of ownership-relevant call edges.
-import std/[os, sets, algorithm, sha1, strutils]
+import std/[os, sets, algorithm, strutils]
+import checksums/sha1
 import ir, clang, cfront_core, protocol_facts
 
 proc symbol(c: CXCursor): string =
@@ -118,7 +119,7 @@ proc collectEffectFacts*(tu: CXTranslationUnit, cpp: bool,
   proc inclusion(f: CXFile, stack: ptr CXSourceLocation, n: cuint,
                  data: CXClientData) {.cdecl.} =
     if not f.isNil:
-      let path = $clang_getFileName(f)
+      let path = fileName(f)
       if path.len > 0: cast[ptr HashSet[string]](data)[].incl absolutePath(path)
   clang_getInclusions(tu, inclusion, addr paths)
   var ordered: seq[string]
@@ -132,7 +133,9 @@ proc collectEffectFacts*(tu: CXTranslationUnit, cpp: bool,
       result.inputs.add (path, $secureHash(original.text))
       continue
     var size: csize_t
-    let content = clang_getFileContents(tu, clang_getFile(tu, path.cstring), addr size)
+    let file = clang_getFile(tu, path.cstring)
+    # libclang 17 and later crash on a nil file here; 14 returned nil
+    let content = (if file.isNil: nil else: clang_getFileContents(tu, file, addr size))
     if content.isNil:
       result.unsupported.add "cannot snapshot parsed input: " & path
     else:

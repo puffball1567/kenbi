@@ -165,7 +165,7 @@ A libclang é carregada pelo seu soname em tempo de execução; a lista de busca
 substitua-o em tempo de compilação:
 
 ```sh
-nim c -d:kenbiLibclang=/full/path/to/libclang.so -o:kenbi src/kenbi.nim
+nimble build -d:release -d:kenbiLibclang=/full/path/to/libclang.so
 ```
 
 ## Compilação e testes
@@ -193,7 +193,7 @@ sudo apt-get install libclang1-14 libclang-common-14-dev
 # libclang-common-14-dev holds clang's builtin headers (stddef.h, stdarg.h, ...). Without
 # them every file that includes one fails to parse, and kenbi reports it unanalysed (exit 2).
 # If unresolved, point at it explicitly:
-nim c -d:kenbiLibclang=/usr/lib/llvm-14/lib/libclang.so -o:kenbi src/kenbi.nim
+nimble build -d:release -d:kenbiLibclang=/usr/lib/llvm-14/lib/libclang.so
 ```
 
 **Fedora / RHEL**
@@ -209,8 +209,7 @@ sudo pacman -S clang                      # /usr/lib/libclang.so
 **macOS** (LLVM do Homebrew, ou as Xcode Command Line Tools)
 ```sh
 brew install llvm
-nim c -d:kenbiLibclang="$(brew --prefix llvm)/lib/libclang.dylib" \
-      -o:kenbi src/kenbi.nim
+nimble build -d:release -d:kenbiLibclang="$(brew --prefix llvm)/lib/libclang.dylib"
 # Apple's Command Line Tools also ship a libclang at
 #   /Library/Developer/CommandLineTools/usr/lib/libclang.dylib
 ```
@@ -218,7 +217,7 @@ nim c -d:kenbiLibclang="$(brew --prefix llvm)/lib/libclang.dylib" \
 **Windows** (MSVC + release do LLVM)
 ```bat
 :: install LLVM from https://releases.llvm.org and ensure libclang.dll is on PATH
-nim c -d:kenbiLibclang=libclang.dll -o:kenbi.exe src\kenbi.nim
+nimble build -d:release -d:kenbiLibclang=libclang.dll
 ```
 
 ## Uso

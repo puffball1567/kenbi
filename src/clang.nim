@@ -9,6 +9,8 @@
 ## Loaded dynamically so the binary needs no link-time libclang; override the
 ## library name via `-d:kenbiLibclang=...` if your soname differs.
 
+import std/os
+
 const libclang {.strdefine: "kenbiLibclang".} =
   "(libclang.so|libclang.so.1|libclang-18.so|libclang-17.so|libclang-16.so|" &
   "libclang-15.so|libclang-14.so|libclang-14.so.1|libclang-13.so)"
@@ -368,12 +370,26 @@ proc lineOf*(loc: CXSourceLocation): int =
   clang_getSpellingLocation(loc, nil, addr line, addr col, addr off)
   int(line)
 
+var workingDirectory*: string
+  ## The `-working-directory` the translation unit being analysed was parsed with ("" when
+  ## none). libclang 17 and later name a file reached through a relative include path
+  ## relative to it, where libclang 14 named it absolutely.
+
+proc fileName*(f: CXFile): string =
+  ## The path of a file in the translation unit, the same with every libclang: a name libclang
+  ## gives relative to the working directory it parsed with is resolved against that directory,
+  ## not against kenbi's own.
+  if f.isNil: return ""
+  result = $clang_getFileName(f)
+  if result.len > 0 and workingDirectory.len > 0 and not result.isAbsolute:
+    result = workingDirectory / result
+
 proc fileOf*(loc: CXSourceLocation): string =
   ## The file path a location belongs to (so cross-file contract binding doesn't
   ## confuse same line numbers in different files).
   var f: CXFile
   clang_getSpellingLocation(loc, addr f, nil, nil, nil)
-  if f.isNil: "" else: $clang_getFileName(f)
+  fileName(f)
 
 proc startLine*(c: CXCursor): int =
   ## The first line of the cursor's extent. libclang-14 gives some expressions no valid extent

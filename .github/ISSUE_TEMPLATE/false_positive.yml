@@ -1,0 +1,51 @@
+name: False positive
+description: kenbi reports a finding on code that keeps the rule it names.
+labels: ["false positive"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. kenbi reports what it cannot show to be safe, so some findings on
+        correct code are intended: an allocation with no `@mem`, a call into a function with no
+        contract (`UNCONTRACTED_ESCAPE`), or a construct kenbi reports as unsupported. Please check
+        the finding against the annotation reference first; if the code and its annotations are
+        right and kenbi still reports it, that is a false positive we want to fix.
+  - type: input
+    id: version
+    attributes:
+      label: kenbi version
+      description: The output of `kenbi --version` (it includes the libclang that was loaded).
+    validations:
+      required: true
+  - type: input
+    id: code
+    attributes:
+      label: Finding code
+      description: For example `LEAK`, `UNVALIDATED_INDEX`, `NULL_DEREF`.
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: Minimal source
+      description: >-
+        The smallest file that still shows the finding, with its annotations. It is used as a
+        static-analysis input only.
+      render: c
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and output
+      description: The command line (or `compile_commands.json` entry) and kenbi's full output.
+      render: console
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why the code is correct
+      description: Which path or property kenbi got wrong, and why the rule holds on it.
+    validations:
+      required: true

@@ -1,0 +1,45 @@
+name: Bug report
+description: A crash, a hang, a build or install problem, wrong output, or a problem with the MCP server.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a finding on correct code, use the **False positive** template. For code kenbi passes
+        although it has a defect of a class that was checked, please report privately (see
+        SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: kenbi version
+      description: The output of `kenbi --version`, or the commit you built.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Nim version, and for the MCP server the Node version and MCP client.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Commands, and a minimal source file if one is involved (used as a static-analysis input only).
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The full output or error message.
+      render: console
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
