@@ -214,6 +214,8 @@ type
                                      ## a leak is reported once even if it survives several exits)
     throwReported: HashSet[int]      ## origins already reported LEAK_ON_THROW (dedup: once per
                                      ## origin, at its FIRST unwinding exposure)
+    longjmpReported: HashSet[int]    ## origins already reported LEAK_ON_LONGJMP (same dedup)
+    skippedReported: HashSet[string] ## locals already reported LONGJMP_SKIPS_DESTRUCTOR
     movedHandles: Table[string, int] ## owner HANDLES moved-from by an ikRaiiMove (var key ->
                                      ## the origin it held then): the resource is still owned,
                                      ## by the destination; using / moving / freeing / returning
@@ -317,7 +319,7 @@ type
     originDisp: Table[int, string]
     fieldBase: Table[int, string]
     baseEscaped: HashSet[string]
-    contractOrigins, borrowedOrigins, leakedOrigins, throwReported, arenaObjects, raiiOrigins: HashSet[int]
+    contractOrigins, borrowedOrigins, leakedOrigins, throwReported, longjmpReported, arenaObjects, raiiOrigins: HashSet[int]
     fieldOrigins, undeclaredParams, adoptedOrigins: HashSet[int]
     arenaOf: Table[int, int]
     maybeFreedBy: Table[int, tuple[callee: string, line: int]]
@@ -355,6 +357,7 @@ proc captureWorld(a: Analyzer): OriginWorld =
     fieldBase: a.fieldBase, baseEscaped: a.baseEscaped,
     contractOrigins: a.contractOrigins, borrowedOrigins: a.borrowedOrigins,
     leakedOrigins: a.leakedOrigins, throwReported: a.throwReported,
+    longjmpReported: a.longjmpReported,
     arenaObjects: a.arenaObjects, raiiOrigins: a.raiiOrigins,
     fieldOrigins: a.fieldOrigins,
     undeclaredParams: a.undeclaredParams, adoptedOrigins: a.adoptedOrigins,
@@ -377,6 +380,7 @@ proc restoreWorld(a: var Analyzer, w: OriginWorld) =
   a.contractOrigins = w.contractOrigins; a.borrowedOrigins = w.borrowedOrigins
   a.leakedOrigins = w.leakedOrigins; a.arenaObjects = w.arenaObjects
   a.throwReported = w.throwReported
+  a.longjmpReported = w.longjmpReported
   a.raiiOrigins = w.raiiOrigins
   a.fieldOrigins = w.fieldOrigins
   a.undeclaredParams = w.undeclaredParams; a.adoptedOrigins = w.adoptedOrigins
@@ -425,7 +429,7 @@ proc sameOriginKind(a: Analyzer, o1, o2: int): bool =
   ## per-origin property sets agree, so unifying them at a join loses no check.
   for s in [a.borrowedOrigins, a.arenaObjects, a.contractOrigins, a.raiiOrigins,
             a.undeclaredParams, a.fieldOrigins, a.adoptedOrigins,
-            a.leakedOrigins, a.throwReported]:
+            a.leakedOrigins, a.throwReported, a.longjmpReported]:
     if (o1 in s) != (o2 in s): return false
   (o1 in a.arenaOf) == (o2 in a.arenaOf)
 
@@ -546,6 +550,60 @@ proc scanThrowLeaks(a: var Analyzer, s: Stmt, st: StateMap) =
         "path it is never released. Hold it in an RAII owner (unique_ptr / an `@raii` class), " &
         "release it before the call, or prove the callee cannot throw (`noexcept`, or vouch " &
         "it `@nothrow`; `-fno-exceptions` turns the axis off for a no-exception build).")
+
+proc scanLongjmp(a: var Analyzer, s: Stmt, st: StateMap) =
+  ## ikMayLongjmp: control may leave the function here by a non-local jump. Nothing runs on the
+  ## way out — no cleanup code, no destructor — so, unlike an unwinding exit, an RAII owner is
+  ## lost too. Reported as two codes: every RAW owner still held (a declared resource or an
+  ## undischarged `@frees` obligation, with the exit leak scan's exclusions) is LEAK_ON_LONGJMP,
+  ## once per origin; every in-scope automatic object with a non-trivial destructor (an RAII
+  ## owner among them, which is why RAII origins are left to this second report) is
+  ## LONGJMP_SKIPS_DESTRUCTOR, once per object. A function that calls `setjmp` is the landing
+  ## site, not an exit (its refusal, ikSetjmp, keeps it RED until landing sites are modelled).
+  if (s.off and 4) != 0: return
+  let callee = s.a
+  let always = (s.off and 1) != 0
+  let jumps = (if always: "'" & callee & "' jumps out of this function"
+               else: "'" & callee & "' may longjmp")
+  if (s.off and 2) == 0 and a.curCovered:
+    a.addDiag(s.line, "UNDECLARED_LONGJMP",
+      (if always: "this function calls '" & callee & "'" else: jumps) &
+      ", so a call to this function may longjmp, but it is not declared `@longjmps`. Declare " &
+      "it, so that every caller treats a call to it as a possible jump (or catch the jump here " &
+      "with setjmp).")
+  for o in 0 ..< a.nextOrigin:
+    if o notin st or asOwned notin st[o]: continue
+    if o in a.leakedOrigins or o in a.longjmpReported: continue
+    if o in a.borrowedOrigins or asMaybeFreed in st[o] or
+       o in a.undeclaredParams or o in a.raiiOrigins or o in a.fieldOrigins or
+       o in a.arenaObjects:
+      continue
+    let disp = a.originDisp.getOrDefault(o, "?")
+    if o in a.contractOrigins:
+      a.longjmpReported.incl o
+      a.addDiag(s.line, "LEAK_ON_LONGJMP",
+        "'" & disp & "' is declared `@frees` but is still owned when " & jumps & " — " &
+        "on that path it is never freed and the contract is not honoured. Release it " &
+        "before the call.")
+    else:
+      let resName = a.originRes.getOrDefault(o, "")
+      if resName notin a.prog.resources: continue   # undeclared: UNKNOWN_RESOURCE already said so
+      a.longjmpReported.incl o
+      a.addDiag(s.line, "LEAK_ON_LONGJMP",
+        "'" & resName & "' (" & disp & ") is owned here but " & jumps & " — " &
+        "on that path it is never released. Release it before the call.")
+  if not a.curCovered: return
+  for entry in s.b.splitLines:
+    let f = entry.split('\t')
+    if f.len != 3: continue        # name, the type as written, line
+    let id = f[0] & "@" & f[2]
+    if id in a.skippedReported: continue
+    a.skippedReported.incl id
+    a.addDiag(s.line, "LONGJMP_SKIPS_DESTRUCTOR",
+      "'" & f[0] & "' (" & f[1] & ", line " & f[2] & ") is in scope when " & jumps &
+      ": the jump skips its destructor, which C++ makes undefined behaviour. " &
+      "Keep objects with a destructor out of the scopes a longjmp can leave, or report the " &
+      "error with an exception instead.")
 
 proc predSays(a: Analyzer, key: string): tuple[known: bool, nonZero: bool] =
   ## What this path already knows about the truth of a stable scalar, if anything.
@@ -694,7 +752,7 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
     a.originDisp[o] = s.a
     a.borrowedOrigins.incl o
     st[o] = {asOwned}
-  of ikGoto, ikBreak, ikContinue, ikThrow, ikOwnsOut:
+  of ikGoto, ikBreak, ikContinue, ikThrow, ikOwnsOut, ikMayLongjmp:
     # control-flow instructions: handled in analyzeBody (deposit/route + divergence).
     # Never reached here — applyInstr is only called for non-control instructions.
     discard
@@ -861,6 +919,22 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
           "undefined behaviour and the derived destructor never runs; kenbi cannot see which " &
           "class it is. Declare '" & s.b & "''s destructor virtual, or delete through the type the " &
           "object was created as.")
+  of ikSetjmp:
+    # a landing site: a later longjmp re-enters the function here, with the locals it changed
+    # since indeterminate unless they are volatile. Not modelled yet, so refused.
+    if a.curCovered:
+      a.addDiag(s.line, "UNSUPPORTED_SETJMP",
+        "this function calls setjmp, so a longjmp can return into it here; kenbi does not " &
+        "model that re-entry yet, so its ownership cannot be verified. Move the setjmp into a " &
+        "small function that holds no resources, or mark the line @unsafe if you take " &
+        "responsibility.")
+  of ikLongjmpUnmodeled:
+    if a.curCovered:
+      a.addDiag(s.line, "UNSUPPORTED_CONSTRUCT",
+        "'" & s.a & "' may longjmp, but it is called where kenbi does not follow control flow " &
+        "(for example inside a lambda handed to another function), so what the jump skips " &
+        "cannot be checked. Call it from the function body directly, or mark the line @unsafe " &
+        "if you take responsibility.")
   of ikUnsupportedConstruct:
     # a construct kenbi does not model that CONTAINS an allocation / release: refuse rather than
     # drop it (a free kenbi cannot see can never be caught as a double free / leak later).
@@ -1827,6 +1901,9 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
         if a.tryFrames.len > 0: a.tryFrames[^1].add (st, nst, s.b)   # b = the thrown type
         else: a.scanLeaks(st)
         gone = true
+      elif s.ik == ikMayLongjmp:
+        a.scanLongjmp(s, st)
+        if (s.off and 1) != 0: gone = true   # `longjmp` itself: nothing after it runs
       elif s.ik == ikBreak:
         a.breakStates.add (st, nst, a.varOrigin, a.interiorVar, a.interiorOff, a.unknownOrigin, a.ambiguousHandles, a.reallocTie, a.staleAfterRealloc)  # routed to the loop/switch exit join
         gone = true
@@ -2388,6 +2465,8 @@ proc analyzeFunc(a: var Analyzer, fn: Func, covered: bool) =
   a.borrowedOrigins = initHashSet[int]()
   a.leakedOrigins = initHashSet[int]()
   a.throwReported = initHashSet[int]()
+  a.longjmpReported = initHashSet[int]()
+  a.skippedReported = initHashSet[string]()
   a.arenaObjects = initHashSet[int]()
   a.raiiOrigins = initHashSet[int]()
   a.arenaOf = initTable[int, int]()

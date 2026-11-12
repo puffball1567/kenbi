@@ -128,6 +128,19 @@ type
                  ## a `@frees` obligation; not an RAII owner, whose destructor runs during
                  ## unwinding — is lost on that path: LEAK_ON_THROW. `a` = the callee. Emitted
                  ## for C++ with exceptions on only (never for C or under `-fno-exceptions`).
+    ikMayLongjmp ## control MAY leave the function here by a non-local jump: a call to `longjmp`
+                 ## / `siglongjmp` (always jumps) or to a function declared `@longjmps` (may
+                 ## jump). Unlike unwinding, nothing runs on the way out: a raw owner still held is
+                 ## LEAK_ON_LONGJMP, and an automatic object with a non-trivial destructor is
+                 ## LONGJMP_SKIPS_DESTRUCTOR — C++ makes that jump undefined behaviour. `a` = the
+                 ## callee; `b` = the in-scope locals whose destructors would be skipped, one
+                 ## `name<TAB>type<TAB>line` per line; `off` = flags: 1 the call always jumps,
+                 ## 2 the enclosing function is declared `@longjmps`, 4 it calls `setjmp`.
+    ikSetjmp     ## a call to `setjmp` / `sigsetjmp`: the function is a landing site, re-entered
+                 ## by a later `longjmp`. Not modelled yet — refused in covered scope.
+    ikLongjmpUnmodeled ## a call that may longjmp, in an expression position the front-end does
+                 ## not lower (e.g. inside a lambda passed to a callee): refused in covered scope
+                 ## rather than dropped. `a` = the callee.
     ikSetNull    ## <var> is assigned a NULL constant (`p = NULL`, or the result of a release
                  ## declared to return NULL). It owns nothing from here, and RELEASING it is a
                  ## no-op — `free(NULL)` is defined to do nothing in C, and `free(p); p = NULL;`

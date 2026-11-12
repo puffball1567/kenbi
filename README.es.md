@@ -473,6 +473,25 @@ virtual es `DELETE_NONVIRTUAL_BASE`. Se modelan `std::unique_ptr` / `std::shared
 `noexcept` / `// @nothrow`). La referencia completa la sirve el servidor MCP como
 `kenbi://annotations` ([fuente](mcp/src/annotations.ts)).
 
+### Saltos no locales (`setjmp` / `longjmp`)
+
+`longjmp` sale de una función sin ejecutar nada de lo que sigue: ni código de limpieza ni, en C++,
+destructores. kenbi trata una llamada a `longjmp` / `siglongjmp` como una salida así, y una llamada
+a una función declarada `// @longjmps` como una salida posible:
+
+- un propietario crudo aún retenido ahí es `LEAK_ON_LONGJMP`;
+- en C++, un objeto en ámbito con un destructor no trivial es `LONGJMP_SKIPS_DESTRUCTOR` (C++ hace
+  de ese salto un comportamiento indefinido). Si un destructor es trivial se le pregunta a clang:
+  `std::string` se reporta y `std::array<int, 3>` no;
+- una función que puede llegar a un longjmp, directamente o a través de un callee `@longjmps`, sin
+  declarar ella misma `@longjmps` es `UNDECLARED_LONGJMP`, de modo que la declaración sube hasta
+  cada llamador.
+
+Una función de biblioteca que no puede editar se declara por nombre en una cabecera overlay:
+`// @longjmps(png_error)` o `// @contract png_error { longjmps }`. Una función que llama a `setjmp`
+es donde aterriza el salto; esa reentrada aún no está modelada, así que se reporta como
+`UNSUPPORTED_SETJMP`.
+
 ### Anotaciones de concurrencia (verificadas bajo `@threadsafe`, consultivas fuera de él)
 
 En un ámbito `@threadsafe` (función o archivo) estas se **verifican**, con default-red, mediante la
@@ -526,6 +545,10 @@ iteraciones, rechazado en lugar de juzgado con una vista incompleta),
 nothrow — o un `new` simple — puede desenrollar; los propietarios RAII están exentos,
 `noexcept` / `@nothrow` / `-fno-exceptions` son las pruebas; dentro de un `try` las salidas
 por desenrollado llegan a los manejadores, que se comprueban desde su unión),
+`LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP` (un propietario crudo, o en C++
+un objeto con destructor no trivial, aún en ámbito donde una llamada puede hacer `longjmp`; una
+función que puede llegar a un longjmp sin declarar `@longjmps`), `UNSUPPORTED_SETJMP` (un punto de
+aterrizaje de `setjmp`, aún no modelado),
 `FINALLY_BYPASSED` (una salida con posesión que evita un embudo `@goto_finally` declarado),
 `FREE_NONHEAP` (un `free` de un puntero a la pila u otro almacenamiento no heap), `BORROW_MOVED` /
 `UNCONTRACTED_MOVE` (un move fuera de un préstamo, o hacia un callee que no declara recepción),

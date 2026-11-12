@@ -476,6 +476,25 @@ destructeur virtuel est `DELETE_NONVIRTUAL_BASE`. `std::unique_ptr` / `std::shar
 `catch`, `noexcept` / `// @nothrow`) sont modélisés. La référence complète est servie par le
 serveur MCP sous le nom `kenbi://annotations` ([source](mcp/src/annotations.ts)).
 
+### Sauts non locaux (`setjmp` / `longjmp`)
+
+`longjmp` quitte une fonction sans rien exécuter de ce qui suit : ni code de nettoyage, ni, en
+C++, destructeurs. kenbi traite un appel à `longjmp` / `siglongjmp` comme une telle sortie, et un
+appel à une fonction déclarée `// @longjmps` comme une sortie possible :
+
+- un propriétaire brut encore détenu à cet endroit est `LEAK_ON_LONGJMP` ;
+- en C++, un objet en portée doté d'un destructeur non trivial est `LONGJMP_SKIPS_DESTRUCTOR`
+  (C++ fait de ce saut un comportement indéfini). Savoir si un destructeur est trivial est demandé
+  à clang : `std::string` est signalé, `std::array<int, 3>` ne l'est pas ;
+- une fonction qui peut atteindre un longjmp, directement ou via un appelé `@longjmps`, sans
+  déclarer elle-même `@longjmps` est `UNDECLARED_LONGJMP` : la déclaration remonte ainsi jusqu'à
+  chaque appelant.
+
+Une fonction de bibliothèque que vous ne pouvez pas modifier se déclare par son nom dans un en-tête
+overlay : `// @longjmps(png_error)` ou `// @contract png_error { longjmps }`. Une fonction qui
+appelle `setjmp` est le point d'arrivée du saut ; la réentrée n'y est pas encore modélisée, elle
+est donc signalée comme `UNSUPPORTED_SETJMP`.
+
 ### Annotations de concurrence (vérifiées sous `@threadsafe`, consultatives en dehors)
 
 Dans une portée `@threadsafe` (fonction ou fichier), elles sont **vérifiées**, en default-red,
@@ -531,6 +550,10 @@ refusée plutôt que jugée sur une vue incomplète),
 exemptés, `noexcept` / `@nothrow` / `-fno-exceptions` en sont les preuves ; à l'intérieur d'un
 `try`, les sorties par déroulement aboutissent dans les gestionnaires, qui sont vérifiés à partir
 de leur jonction),
+`LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP` (un propriétaire brut, ou en
+C++ un objet à destructeur non trivial, encore en portée là où un appel peut faire un `longjmp` ;
+une fonction qui peut atteindre un longjmp sans déclarer `@longjmps`), `UNSUPPORTED_SETJMP` (un
+point d'arrivée de `setjmp`, pas encore modélisé),
 `FINALLY_BYPASSED` (une sortie possédante contourne un entonnoir `@goto_finally` déclaré),
 `FREE_NONHEAP` (un `free` d'un pointeur vers la pile ou un autre stockage hors tas),
 `BORROW_MOVED` / `UNCONTRACTED_MOVE` (un move hors d'un emprunt, ou vers un appelé qui ne déclare

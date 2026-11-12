@@ -469,6 +469,24 @@ virtual é `DELETE_NONVIRTUAL_BASE`. `std::unique_ptr` / `std::shared_ptr`, `std
 `noexcept` / `// @nothrow`) são modelados. A referência completa é servida pelo servidor MCP como
 `kenbi://annotations` ([fonte](mcp/src/annotations.ts)).
 
+### Saltos não locais (`setjmp` / `longjmp`)
+
+`longjmp` sai de uma função sem executar nada do que vem depois: nenhum código de limpeza e, em
+C++, nenhum destrutor. O kenbi trata uma chamada a `longjmp` / `siglongjmp` como uma saída assim, e
+uma chamada a uma função declarada `// @longjmps` como uma saída possível:
+
+- um proprietário bruto ainda mantido ali é `LEAK_ON_LONGJMP`;
+- em C++, um objeto em escopo com destrutor não trivial é `LONGJMP_SKIPS_DESTRUCTOR` (o C++ torna
+  esse salto comportamento indefinido). Se um destrutor é trivial é perguntado ao clang:
+  `std::string` é reportado e `std::array<int, 3>` não;
+- uma função que pode chegar a um longjmp, diretamente ou por um chamado `@longjmps`, sem declarar
+  ela mesma `@longjmps` é `UNDECLARED_LONGJMP`, de modo que a declaração sobe até cada chamador.
+
+Uma função de biblioteca que você não pode editar é declarada pelo nome em um cabeçalho overlay:
+`// @longjmps(png_error)` ou `// @contract png_error { longjmps }`. Uma função que chama `setjmp` é
+onde o salto aterrissa; essa reentrada ainda não é modelada, então é reportada como
+`UNSUPPORTED_SETJMP`.
+
 ### Anotações de concorrência (verificadas sob `@threadsafe`, consultivas fora dele)
 
 Em um escopo `@threadsafe` (função ou arquivo) elas são **verificadas**, default-red, pela
@@ -521,6 +539,10 @@ em vez de julgado com uma visão incompleta),
 nothrow — ou um `new` simples — pode desempilhar; proprietários RAII estão isentos, `noexcept` /
 `@nothrow` / `-fno-exceptions` são as provas; dentro de um `try`, as saídas por desempilhamento
 chegam aos handlers, que são verificados a partir de sua junção),
+`LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP` (um proprietário bruto, ou em
+C++ um objeto com destrutor não trivial, ainda em escopo onde uma chamada pode fazer `longjmp`; uma
+função que pode chegar a um longjmp sem declarar `@longjmps`), `UNSUPPORTED_SETJMP` (um ponto de
+aterrissagem de `setjmp`, ainda não modelado),
 `FINALLY_BYPASSED` (uma saída possuidora contorna um funil `@goto_finally` declarado),
 `FREE_NONHEAP` (um `free` de um ponteiro para a pilha ou outro armazenamento fora do heap),
 `BORROW_MOVED` / `UNCONTRACTED_MOVE` (um move a partir de um empréstimo, ou para um chamado que

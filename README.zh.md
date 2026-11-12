@@ -444,6 +444,22 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 （`LEAK_ON_THROW`、`try` / `catch`、`noexcept` / `// @nothrow`）均被建模。完整参考由 MCP
 服务器以 `kenbi://annotations` 提供（[源文件](mcp/src/annotations.ts)）。
 
+### 非局部跳转（`setjmp` / `longjmp`）
+
+`longjmp` 离开函数时不会执行其后的任何代码：没有清理代码，在 C++ 中也没有析构函数。kenbi 把对
+`longjmp` / `siglongjmp` 的调用视为这样的出口，把对声明了 `// @longjmps` 的函数的调用视为可能的出口：
+
+- 此处仍持有的原始所有者是 `LEAK_ON_LONGJMP`；
+- 在 C++ 中，作用域内带有非平凡析构函数的对象是 `LONGJMP_SKIPS_DESTRUCTOR`（C++ 规定这种跳转是
+  未定义行为）。析构函数是否平凡由 clang 判定，因此 `std::string` 会被报告，`std::array<int, 3>`
+  不会；
+- 能够直接或经由 `@longjmps` 被调用者到达 longjmp、自身却没有声明 `@longjmps` 的函数是
+  `UNDECLARED_LONGJMP`，因此该声明会一路传递到每个调用者。
+
+无法修改的库函数在覆盖头文件中按名称声明：`// @longjmps(png_error)` 或
+`// @contract png_error { longjmps }`。调用 `setjmp` 的函数是跳转的落点；对它的重新进入尚未建模，
+因此报告为 `UNSUPPORTED_SETJMP`。
+
 ### 并发注解（在 `@threadsafe` 下验证，在其外为建议性）
 
 在 `@threadsafe` 作用域（函数或文件）中，这些注解由持锁 typestate 分析阶段以 default-red
@@ -492,6 +508,9 @@ use <var> | free <var> | move <var> | if / else / endif
 `LEAK_ON_THROW`（C++：在一个没有 nothrow 保证的被调用者 —— 或一个普通的 `new` —— 可能
 展开栈的位置，仍持有裸所有者；RAII 所有者豁免，`noexcept` / `@nothrow` / `-fno-exceptions`
 即为证明；在 `try` 内部，展开的出口落入处理程序，处理程序从其汇合点开始检查）、
+`LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP`（在可能 `longjmp` 的调用处
+仍在作用域内的原始所有者，或 C++ 中带有非平凡析构函数的对象；能到达 longjmp 却未声明 `@longjmps`
+的函数）、`UNSUPPORTED_SETJMP`（`setjmp` 落点，尚未建模）、
 `FINALLY_BYPASSED`（一个持有资源的出口绕过了声明的 `@goto_finally` 漏斗）、
 `FREE_NONHEAP`（对指向栈或其他非堆存储的指针执行 `free`）、`BORROW_MOVED` /
 `UNCONTRACTED_MOVE`（从借用中移出，或移入一个未声明接收的被调用者）、

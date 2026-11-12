@@ -487,6 +487,25 @@ Destruktor mit `delete` freizugeben, ist `DELETE_NONVIRTUAL_BASE`. `std::unique_
 (`LEAK_ON_THROW`, `try` / `catch`, `noexcept` / `// @nothrow`) werden modelliert. Die vollständige
 Referenz stellt der MCP-Server als `kenbi://annotations` bereit ([Quelle](mcp/src/annotations.ts)).
 
+### Nicht-lokale Sprünge (`setjmp` / `longjmp`)
+
+`longjmp` verlässt eine Funktion, ohne irgendetwas danach auszuführen: keinen Aufräumcode und in
+C++ keine Destruktoren. kenbi behandelt einen Aufruf von `longjmp` / `siglongjmp` als einen solchen
+Ausgang und einen Aufruf einer mit `// @longjmps` deklarierten Funktion als möglichen:
+
+- ein dort noch gehaltener roher Eigentümer ist `LEAK_ON_LONGJMP`;
+- in C++ ist ein Objekt im Gültigkeitsbereich mit nicht-trivialem Destruktor
+  `LONGJMP_SKIPS_DESTRUCTOR` (C++ macht den Sprung zu undefiniertem Verhalten). Ob ein Destruktor
+  trivial ist, wird clang gefragt: `std::string` wird gemeldet, `std::array<int, 3>` nicht;
+- eine Funktion, die direkt oder über einen `@longjmps`-Callee einen longjmp erreichen kann, ohne
+  selbst `@longjmps` zu deklarieren, ist `UNDECLARED_LONGJMP` — so wandert die Deklaration bis zu
+  jedem Aufrufer hinauf.
+
+Eine Bibliotheksfunktion, die Sie nicht ändern können, wird in einem Overlay-Header per Namen
+deklariert: `// @longjmps(png_error)` oder `// @contract png_error { longjmps }`. Eine Funktion,
+die `setjmp` aufruft, ist der Landepunkt des Sprungs; der Wiedereintritt dort ist noch nicht
+modelliert und wird daher als `UNSUPPORTED_SETJMP` gemeldet.
+
 ### Nebenläufigkeits-Annotationen (verifiziert unter `@threadsafe`, Advisory außerhalb)
 
 In einem `@threadsafe`-Bereich (Funktion oder Datei) werden diese durch den
@@ -542,6 +561,10 @@ unvollständigen Sicht beurteilt),
 nothrow-Garantie — oder ein einfaches `new` — abwickeln kann; RAII-Eigentümer sind ausgenommen,
 `noexcept` / `@nothrow` / `-fno-exceptions` sind die Beweise; innerhalb eines `try` landen die
 abwickelnden Ausgänge in den Handlern, die ab ihrer Vereinigung geprüft werden),
+`LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP` (ein roher Eigentümer oder in
+C++ ein Objekt mit nicht-trivialem Destruktor, das noch im Gültigkeitsbereich ist, wo ein Aufruf
+`longjmp`en kann; eine Funktion, die einen longjmp erreichen kann, ohne `@longjmps` zu deklarieren),
+`UNSUPPORTED_SETJMP` (ein `setjmp`-Landepunkt, noch nicht modelliert),
 `FINALLY_BYPASSED` (ein besitzender Ausgang umgeht einen deklarierten `@goto_finally`-Trichter),
 `FREE_NONHEAP` (ein `free` eines Zeigers in Stack- oder anderen Nicht-Heap-Speicher),
 `BORROW_MOVED` / `UNCONTRACTED_MOVE` (ein Move aus einem Borrow heraus oder in einen Callee, der

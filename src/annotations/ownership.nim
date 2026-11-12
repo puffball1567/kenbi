@@ -39,6 +39,13 @@
 ##                   by NAME without binding to a declaration (`@nothrow(operator*)`);
 ##                   `@nothrow(new)` declares the allocation-failure policy — OOM
 ##                   terminates, a plain `new` never unwinds (else it is a may-throw point).
+##   `@longjmps`    — the function may leave its caller by `longjmp` (directly or through a
+##                   callee). A call to it is a possible non-local jump: what the caller still
+##                   holds is LEAK_ON_LONGJMP, an object whose destructor the jump skips is
+##                   LONGJMP_SKIPS_DESTRUCTOR. Checked against the body: a function that can
+##                   reach a longjmp without declaring it is UNDECLARED_LONGJMP. `@longjmps(name)`
+##                   and `@contract name { longjmps }` declare a function by NAME — the form for a
+##                   library you cannot edit (libpng's `png_error`, …), in an overlay header.
 
 import registry, ../cfront_core, ../ir
 
@@ -54,3 +61,4 @@ proc registerOwnership* =
   registerReturnContract("@arena_alloc", rcArenaFromArg) # return: borrows from arg-1 arena
   registerFuncFlag("@must_use")                       # flag: discarding the result is a finding
   registerFuncFlag("@nothrow", "nothrow")             # flag (C++): a call is not an unwinding exit
+  registerFuncFlag("@longjmps", "longjmps")           # flag: a call may jump out of the caller

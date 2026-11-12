@@ -62,6 +62,7 @@ const contractKeys = {
   "owns_out":  "@owns",        ## with a value: the callee allocates INTO that parameter
   "must_use":  "@must_use",
   "nothrow":   "@nothrow",
+  "longjmps":  "@longjmps",
 }.toTable
 
 proc parseContractsForComment(ctx: var Ctx, text: string, file: string, line: int) =
@@ -118,7 +119,7 @@ proc parseContractComment(ctx: var Ctx, text: string, line: int) =
     if key notin contractKeys:
       ctx.prog.advisories.add Advisory(line: line, code: "UNKNOWN_CONTRACT_KEY",
         msg: "`@contract " & fn & "` names '" & key & "', which is not a contract kenbi " &
-             "knows. Keys: frees, borrows, moves, owns, owns_out, must_use, nothrow.")
+             "knows. Keys: frees, borrows, moves, adopts, owns, owns_out, must_use, nothrow, longjmps.")
       continue
     let kw = contractKeys[key]
     if kv.len == 1 or kv[1].strip().len == 0:
