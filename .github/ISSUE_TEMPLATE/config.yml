@@ -1,0 +1,7 @@
+blank_issues_enabled: false
+contact_links:
+  - name: A false GREEN, or a vulnerability in kenbi
+    url: https://github.com/puffball1567/kenbi/security/advisories/new
+    about: >-
+      Code kenbi passes although it has a defect of a class that was checked, or a security issue
+      in kenbi or its MCP server. Please report these privately; see SECURITY.md.
