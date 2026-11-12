@@ -391,7 +391,7 @@ proc collectAnnotations*(ctx: var Ctx) =
     if included.isNil: return
     let st = cast[ptr tuple[tu: CXTranslationUnit, files: ptr HashSet[string]]](client)
     if clang_Location_isInSystemHeader(clang_getLocationForOffset(st.tu, included, 0)) != 0: return
-    let name = $clang_getFileName(included)
+    let name = fileName(included)
     if name.len > 0: st.files[].incl name
   clang_getInclusions(ctx.tu, inclusion, addr incState)
   for path in files:

@@ -7,7 +7,7 @@
 ## and escape via `@move`-annotated calls. The goal is to run the t01–t17 cases
 ## on real C and reproduce the engine's verdicts.
 
-import std/[tables, strutils, sets]
+import std/[tables, strutils, sets, os]
 import ir, clang, cfront_core, cfront_annotations
 import annotations/registry   # generic contract lookups for the resolver
 import effect_facts
@@ -5278,6 +5278,11 @@ proc parseCFile*(path: string, extraArgs: seq[string] = @[], collectEffects = fa
   let isCpp = lower.endsWith(".cpp") or lower.endsWith(".cc") or
               lower.endsWith(".cxx") or lower.endsWith(".hpp") or lower.endsWith(".hh")
   var args = (if isCpp: @["-x", "c++", "-std=c++17"] else: @["-std=c11"]) & extraArgs
+  workingDirectory = ""
+  for i, a in args:
+    if a.startsWith("-working-directory="): workingDirectory = a["-working-directory=".len .. ^1]
+    elif a == "-working-directory" and i + 1 < args.len: workingDirectory = args[i + 1]
+  if workingDirectory.len > 0: workingDirectory = absolutePath(workingDirectory)
   var cargs = allocCStringArray(args)
   defer: deallocCStringArray(cargs)
   # A parallel directive hides the loop it wraps from the cursor API (blankParallelPragmas):
