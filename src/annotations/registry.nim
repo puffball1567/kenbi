@@ -13,7 +13,7 @@
 ##     frontend_c then binds raw sites to functions generically (no per-annotation
 ##     resolve proc). Adding an ownership contract is one line here, no engine edit.
 
-import std/[tables, sets]
+import std/tables
 import ../cfront_core, ../ir
 
 type

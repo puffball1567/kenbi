@@ -10,6 +10,7 @@ bin           = @["kenbi"]
 # Dependencies
 
 requires "nim >= 2.2.0"
+requires "checksums >= 0.2.2"   # SHA-1 of input files, for evidence and artifact pinning
 
 task test, "run the mini-format engine test suite":
   exec "nim r --hints:off -d:release tests/run_tests.nim"

@@ -1,6 +1,7 @@
 ## Strict, versioned configuration for source-level effect requirements.
 ## The parser rejects duplicate keys BEFORE constructing JSON objects.
-import std/[json, strutils, tables, sets, os, sha1, unicode, algorithm]
+import std/[json, strutils, tables, sets, os, unicode, algorithm]
+import checksums/sha1
 
 type
   SafetyConfigError* = object of CatchableError

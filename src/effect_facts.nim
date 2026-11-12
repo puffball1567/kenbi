@@ -1,5 +1,6 @@
 ## Full call inventory, deliberately independent of ownership-relevant call edges.
-import std/[os, sets, algorithm, sha1, strutils]
+import std/[os, sets, algorithm, strutils]
+import checksums/sha1
 import ir, clang, cfront_core, protocol_facts
 
 proc symbol(c: CXCursor): string =
