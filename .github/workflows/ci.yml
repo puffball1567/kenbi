@@ -43,3 +43,37 @@ jobs:
       - name: Test (MCP server)
         working-directory: mcp
         run: npm ci && npm run build && npm test
+
+  # The expectations above were measured with libclang 14. This job runs the same suites against
+  # newer libclang releases to show whether any expectation depends on the version. It does not
+  # gate a change: a difference here is something to look into, not a failed build.
+  libclang-versions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        llvm: ['15', '16', '17', '18']
+    name: libclang ${{ matrix.llvm }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nim
+        uses: jiro4989/setup-nim-action@v1
+        with:
+          nim-version: 'stable'
+
+      - name: Install libclang ${{ matrix.llvm }}
+        run: sudo apt-get update && sudo apt-get install -y libclang1-${{ matrix.llvm }} libclang-common-${{ matrix.llvm }}-dev
+
+      - name: Select libclang ${{ matrix.llvm }}
+        # Several versions can be present on the runner; name the one under test explicitly, for
+        # every compile the suites make (config.nims at the root applies to all of them).
+        run: echo 'switch("define", "kenbiLibclang=/usr/lib/llvm-${{ matrix.llvm }}/lib/libclang.so.1")' > config.nims
+
+      - name: Build
+        run: nimble build -d:release -y && ./kenbi --version
+
+      - name: Test (engine, C/C++ and --safety suites)
+        run: nimble testall
