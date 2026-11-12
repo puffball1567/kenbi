@@ -5,7 +5,7 @@ All notable changes to kenbi are recorded here. The format follows
 [Semantic Versioning](https://semver.org/); before 1.0 the interfaces, the annotation vocabulary
 and the JSON output may change in any minor version.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-12
 
 First version. Checks, each opted into separately:
 
