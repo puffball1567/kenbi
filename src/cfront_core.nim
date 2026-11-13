@@ -34,6 +34,17 @@ type Ctx* = object  ## module-local state during a single parse (all fields publ
                                     ## a call without a nothrow guarantee is an unwinding exit
   nothrowFuncs*: HashSet[string]    ## callees vouched `@nothrow` (by name). `noexcept` itself is
                                     ## read from the declaration — no annotation needed for it
+  isCpp*: bool                      ## the translation unit is C++ (destructors exist)
+  longjmpFuncs*: HashSet[string]    ## functions declared `@longjmps` (by name): a call to one is
+                                    ## a possible non-local jump out of the caller
+  curFnLongjmps*: bool              ## the function being lowered is itself declared `@longjmps`
+  curFnSetjmp*: bool                ## ... calls `setjmp` (a landing site, not an exit)
+  longjmpEmitted*: HashSet[int]     ## offsets of the calls already lowered as ikMayLongjmp
+  liveLocals*: seq[tuple[name, typ, disp: string, line: int]] ## C++: the automatic objects of class
+                                    ## type in scope at this point of the function (their
+                                    ## destructors are what a longjmp would skip)
+  pendingLocal*: seq[tuple[name, typ, disp: string, line: int]] ## declared by the statement being
+                                    ## lowered: in scope only once its initializer has run
   ownsOut*: Table[string, seq[tuple[idx: int, accessor: string]]] ## funcname -> its `@owns(p)` /
                                     ## `@owns(*p)` out-parameters (index, "" = the param itself
                                     ## (a reference), "*" = its pointee)

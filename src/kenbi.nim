@@ -19,6 +19,7 @@
 ## carrying what this run established about the implementation behind it. See emitContracts.
 
 import std/[os, strutils, json, sets, tables, algorithm]
+import version
 import ir, parse, analyze, frontend_c, cfront_core, compile_db
 import strip, cfront_annotations, clang
 import safety_check
@@ -233,8 +234,11 @@ proc renderText(results: seq[FileResult]) =
     if incomplete.len > 0:
       echo "  flows needing work        : ", incomplete.len, " of ", c.flows.len
       for fl in incomplete:
+        var own = "its own findings"     # a flow with nothing left to walk: the entry itself
+        for v in c.unsafeVouches:
+          if v.fn == fl.entry: own = "its own `@unsafe`"
         echo "      ", fl.entry, "  ← blocked by: ",
-             (if fl.blockers.len > 0: fl.blockers.join(", ") else: "its own `@unsafe`")
+             (if fl.blockers.len > 0: fl.blockers.join(", ") else: own)
     if c.adopted == 0 and c.blocks == 0:
       echo "  (no @kenbi markers — add one to adopt a function/file and start raising coverage)"
 
@@ -519,16 +523,6 @@ proc stripMain() =
     echo "── kenbi strip: ", verb, " ", totalRemoved, " annotation(s) in ",
          changedFiles, " of ", files.len, " file(s)"
 
-const kenbiVersion = block:
-  ## The package version, read from kenbi.nimble at compile time so the two cannot disagree.
-  var v = ""
-  for line in staticRead("../kenbi.nimble").splitLines:
-    let l = line.strip
-    if l.startsWith("version") and '"' in l:
-      v = l.split('"')[1]
-      break
-  doAssert v.len > 0, "kenbi.nimble declares no version"
-  v
 
 proc main() =
   if paramCount() >= 1 and paramStr(1) == "strip":

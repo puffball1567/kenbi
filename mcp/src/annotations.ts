@@ -148,6 +148,17 @@ the declared intent and reports where they disagree.
   \`// @nothrow(new)\` declares the allocation-failure policy (OOM terminates, \`new\`
   never unwinds); \`-fno-exceptions\` in the compile args turns the axis off. C files
   never carry it.
+- \`longjmp\` is an exit that runs NOTHING on the way out (C and C++). A call to
+  \`longjmp\` / \`siglongjmp\` always leaves; a call to a function declared \`// @longjmps\`
+  may. A raw owner still held there is \`LEAK_ON_LONGJMP\`; in C++ an object in scope with a
+  non-trivial destructor is \`LONGJMP_SKIPS_DESTRUCTOR\` (undefined behaviour; triviality is
+  clang's answer, so \`std::string\` counts and \`std::array<int, 3>\` does not). A function
+  that can reach a longjmp — directly or through a \`@longjmps\` callee — must declare
+  \`// @longjmps\` itself, else \`UNDECLARED_LONGJMP\`: the declaration travels up to every
+  caller. A library function is declared by name (\`// @longjmps(png_error)\`, or
+  \`longjmps\` in \`@contract\`). A function that calls \`setjmp\` is the landing site, not
+  modelled yet: \`UNSUPPORTED_SETJMP\`. Fix: release before the call, keep objects with a
+  destructor out of the scopes a jump can leave, or report the error another way.
 - A LAMBDA body runs where it is CALLED: \`auto v = [..]{..};\` defines it, each \`v()\`
   runs it (so calling a cleanup lambda twice is a \`DOUBLE_FREE\`, and never calling it leaves
   the \`LEAK\`). A lambda handed to a callee or kept in a \`std::function\` runs at a time
@@ -245,14 +256,14 @@ the declared intent and reports where they disagree.
   is not a use-after-free risk.
 
 ## Declaring a contract from OUTSIDE the file
-- \`// @contract <Fn> { frees: p, borrows: q r, moves: s, owns, owns_out: t, must_use, nothrow }\`
+- \`// @contract <Fn> { frees: p, borrows: q r, moves: s, owns, owns_out: t, must_use, nothrow, longjmps }\`
   — the same ownership contracts as the inline annotations, but attached to a function BY NAME.
   The inline forms have to sit above a declaration, which a project you may not edit does not
   offer; this form lives in a force-included, comment-only overlay header, next to
   \`@allocator\` and \`@list\`.
 - Keys may repeat and may list several parameters (\`borrows: image exception\`). A key with no
   value is the whole-function form (\`owns\` = the RETURN is a fresh owned object; \`must_use\`;
-  \`nothrow\`). Accessor forms work as inline (\`*p\`, \`p->f\`, \`arr[2]\`).
+  \`nothrow\`; \`longjmps\`). Accessor forms work as inline (\`*p\`, \`p->f\`, \`arr[2]\`).
 - Parameters may be named by POSITION — \`$1\`, 1-based — which is usually what you need: C
   headers commonly declare parameters unnamed, and the call sites that need the contract see
   only that prototype.

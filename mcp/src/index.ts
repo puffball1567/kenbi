@@ -14,7 +14,7 @@ import { ANNOTATIONS } from "./annotations.js";
 import { PATTERNS } from "./patterns.js";
 import { FINDINGS, type FindingEntry } from "./generated/findings.js";
 
-const server = new McpServer({ name: "kenbi-mcp", version: "0.1.0" });
+const server = new McpServer({ name: "kenbi-mcp", version: "0.1.1" });
 
 server.registerTool(
   "check_memory_safety",

@@ -6,7 +6,7 @@
 
 **AI エージェントと C/C++ を書くために作りました。** [MCP サーバ](#ai-コーディングエージェントと使う-mcp)を通して、エージェントは書いたばかりの C/C++ を検査し、指摘が出た理由と直し方を確かめ、検査が何も報告しなくなるまで繰り返します。メモリ安全性は、書いた後のレビューではなく、エージェントが書く流れの一部になります。エージェントが書いた注釈は、kenbi が検査し続ける規則としてコードに残ります。
 
-> ステータス: **v0.1.0**、開発初期段階です。インタフェース、注釈の語彙、
+> ステータス: **v0.1.1**、開発初期段階です。インタフェース、注釈の語彙、
 > JSON 出力は今後も変わる可能性があります。
 
 ## 最初の例
@@ -461,6 +461,25 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 完全なリファレンスは MCP サーバが `kenbi://annotations` として提供しています
 （[ソース](mcp/src/annotations.ts)）。
 
+### 非局所ジャンプ（`setjmp` / `longjmp`）
+
+`longjmp` は、その後ろを何も実行せずに関数を抜けます。後始末のコードも、C++ のデストラクタも
+実行されません。kenbi は `longjmp` / `siglongjmp` の呼び出しをそうした出口として、
+`// @longjmps` を宣言した関数の呼び出しをそうなりうる出口として扱います。
+
+- そこでまだ保持している生の所有者は `LEAK_ON_LONGJMP` です。
+- C++ では、スコープ内にある自明でないデストラクタを持つオブジェクトは
+  `LONGJMP_SKIPS_DESTRUCTOR` です（C++ ではこのジャンプは未定義動作です）。デストラクタが
+  自明かどうかは clang に問い合わせるので、`std::string` は報告され、`std::array<int, 3>` は
+  報告されません。
+- 直接、または `@longjmps` の callee を通して longjmp に到達しうるのに、自身は `@longjmps` を
+  宣言していない関数は `UNDECLARED_LONGJMP` です。こうして宣言はすべての呼び出し元へ伝わります。
+
+編集できないライブラリの関数は、overlay ヘッダで名前を指定して宣言します:
+`// @longjmps(png_error)` または `// @contract png_error { longjmps }`。`setjmp` を呼ぶ関数は
+ジャンプの着地点です。そこへの再進入はまだモデル化していないため、`UNSUPPORTED_SETJMP` として
+報告します。
+
 ### 並行性注釈（`@threadsafe` の下では検証、その外では advisory）
 
 `@threadsafe` スコープ（関数またはファイル）では、これらはロック保持 typestate パスによって
@@ -511,6 +530,9 @@ use <var> | free <var> | move <var> | if / else / endif
 生の owner がまだ保持されている。RAII owner は対象外で、`noexcept` / `@nothrow` /
 `-fno-exceptions` が証明となる。`try` 内では巻き戻しによる exit はハンドラに着地し、
 ハンドラはその合流点から検査される）、
+`LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP`（`longjmp` しうる呼び出しの
+時点でスコープに残る生の所有者、C++ では自明でないデストラクタを持つオブジェクト。`@longjmps` を
+宣言せずに longjmp に到達しうる関数）、`UNSUPPORTED_SETJMP`（`setjmp` の着地点。未モデル化）、
 `FINALLY_BYPASSED`（所有したまま出る exit が、宣言された `@goto_finally` ファネルを迂回する）、
 `FREE_NONHEAP`（スタックなどヒープ以外の記憶域を指すポインタの `free`）、`BORROW_MOVED` /
 `UNCONTRACTED_MOVE`（借用からの move、または受け取りを宣言しない callee への move）、

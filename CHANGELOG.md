@@ -5,9 +5,22 @@ All notable changes to kenbi are recorded here. The format follows
 [Semantic Versioning](https://semver.org/); before 1.0 the interfaces, the annotation vocabulary
 and the JSON output may change in any minor version.
 
-## [Unreleased]
+## [0.1.1] - 2026-11-13
+
+### Added
+
+- Non-local jumps. A call to `longjmp` / `siglongjmp` is an exit that runs nothing on the way
+  out, and a call to a function declared `@longjmps` a possible one: a raw owner still held there
+  is `LEAK_ON_LONGJMP`, and in C++ an object in scope with a non-trivial destructor is
+  `LONGJMP_SKIPS_DESTRUCTOR`. A function that can reach a longjmp without declaring `@longjmps` is
+  `UNDECLARED_LONGJMP`, so the declaration travels up the call chain; a library function is
+  declared by name (`@longjmps(name)`, or `longjmps` in `@contract`). A function that calls
+  `setjmp` is reported as `UNSUPPORTED_SETJMP` until landing sites are modelled.
 
 ### Fixed
+
+- `longjmp` was treated as a call that returns, so an allocation or a destructor it skipped was
+  not reported (0.1.0 passed such code).
 
 - With libclang 17 or later, `--safety` crashed on a project whose `clangArgs` use relative
   include paths, and a function's file could be misidentified: those libclang versions name such
@@ -42,5 +55,5 @@ Also: `--project` closure over a `compile_commands.json`, `--emit-contracts`, `k
 which checks ran on which functions, and what a result without findings rests on without
 having checked it.
 
-[Unreleased]: https://github.com/puffball1567/kenbi/compare/v0.1.0...HEAD
+[0.1.1]: https://github.com/puffball1567/kenbi/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/puffball1567/kenbi/releases/tag/v0.1.0

@@ -13,7 +13,7 @@ looks like, and repeats until the checks report nothing. Memory safety becomes p
 agent's write loop rather than a review after the fact, and the annotations it writes stay in
 the code as rules kenbi keeps checking.
 
-> Status: **v0.1.0**, early development. The interfaces, the annotation vocabulary and the
+> Status: **v0.1.1**, early development. The interfaces, the annotation vocabulary and the
 > JSON output may still change.
 
 ## A first look
@@ -488,6 +488,25 @@ destructor is `DELETE_NONVIRTUAL_BASE`. `std::unique_ptr` / `std::shared_ptr`, `
 `noexcept` / `// @nothrow`) are modelled. The complete reference is served by the MCP server as
 `kenbi://annotations` ([source](mcp/src/annotations.ts)).
 
+### Non-local jumps (`setjmp` / `longjmp`)
+
+`longjmp` leaves a function without running anything after it: no cleanup code and, in C++, no
+destructors. kenbi treats a call to `longjmp` / `siglongjmp` as such an exit, and a call to a
+function declared `// @longjmps` as a possible one:
+
+- a raw owner still held there is `LEAK_ON_LONGJMP`;
+- in C++, an object in scope with a non-trivial destructor is `LONGJMP_SKIPS_DESTRUCTOR` (C++
+  makes the jump undefined behaviour). Whether a destructor is trivial is asked of clang, so
+  `std::string` is reported and `std::array<int, 3>` is not;
+- a function that can reach a longjmp, directly or through a `@longjmps` callee, without
+  declaring `@longjmps` itself is `UNDECLARED_LONGJMP`, so the declaration travels up to every
+  caller.
+
+A library function you cannot edit is declared by name in an overlay header:
+`// @longjmps(png_error)` or `// @contract png_error { longjmps }`. A function that calls `setjmp`
+is where the jump lands; that re-entry is not modelled yet, so it is reported as
+`UNSUPPORTED_SETJMP`.
+
 ### Concurrency annotations (verified under `@threadsafe`, advisory outside it)
 
 In a `@threadsafe` scope (function or file) these are **verified**, default-red, by the
@@ -538,6 +557,10 @@ rather than judged from an incomplete view),
 guarantee — or a plain `new` — may unwind; RAII owners are exempt, `noexcept` /
 `@nothrow` / `-fno-exceptions` are the proofs; inside a `try` the unwinding exits
 land in the handlers, which are checked from their join),
+`LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP` (a raw owner, or in C++ an
+object with a non-trivial destructor, still in scope where a call may `longjmp`; a function that
+can reach a longjmp without declaring `@longjmps`), `UNSUPPORTED_SETJMP` (a `setjmp` landing
+site, not modelled yet),
 `FINALLY_BYPASSED` (an owning exit bypasses a declared `@goto_finally` funnel),
 `FREE_NONHEAP` (a `free` of a pointer into stack or other non-heap storage), `BORROW_MOVED` /
 `UNCONTRACTED_MOVE` (a move out of a borrow, or into a callee that declares no intake),

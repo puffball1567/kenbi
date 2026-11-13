@@ -138,6 +138,7 @@ const
 # --- Type kinds (CXTypeKind, ABI-stable) — the array kinds decay to a pointer
 #     into their storage, so returning a local one of these escapes the stack ---
 const
+  tyRecord*              = 105
   tyEnum*                = 106
   tyPointer*             = 101
   tyConstantArray*       = 112

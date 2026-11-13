@@ -896,6 +896,101 @@ proc indirectFnptr(call: CXCursor): tuple[isIndirect: bool, usr, disp: string] =
   else: discard
   (false, "", "")
 
+proc isFuncLikeKind(k: auto): bool =
+  ## Every cursor kind that is a function-like DEFINITION carrying a body: a free function, a
+  ## member function (ctor / dtor / method / conversion), or a function template (its
+  ## uninstantiated body is still a real AST and lowers like any other). Anything here that
+  ## the collector skipped would be a body kenbi never looked at — silently GREEN.
+  k == ckFunctionDecl or k == ckCXXMethod or k == ckConstructor or k == ckDestructor or
+  k == ckConversionFunction or k == ckFunctionTemplate
+
+const
+  longjmpCallees = ["longjmp", "_longjmp", "siglongjmp", "__builtin_longjmp", "__longjmp_chk"]
+    ## the C library's non-local jumps (glibc's fortified `longjmp` is `__longjmp_chk`)
+  setjmpCallees = ["setjmp", "_setjmp", "sigsetjmp", "__sigsetjmp", "__builtin_setjmp"]
+    ## ... and the calls that set a landing site (glibc's `setjmp` macro expands to `_setjmp`)
+
+proc longjmpKind(ctx: Ctx, call: CXCursor): int =
+  ## Can control leave the caller through this call by a non-local jump? 2: always (`longjmp`
+  ## itself); 1: it may (the callee is declared `@longjmps`, by name or on its declaration, or
+  ## a function pointer whose `@calls` targets include one); 0: no. Declared, not inferred:
+  ## an undeclared callee is taken to return, and its own body is what must declare it.
+  let r = clang_getCursorReferenced(call)
+  let name = spelling(call)
+  if name in longjmpCallees or spelling(r) in longjmpCallees: return 2
+  if name in ctx.longjmpFuncs or spelling(r) in ctx.longjmpFuncs or
+     qualName(r) in ctx.longjmpFuncs:
+    return 1
+  let ind = indirectFnptr(call)
+  if ind.isIndirect:
+    for t in ctx.fnptrTargets.getOrDefault(ind.usr):
+      if t in ctx.longjmpFuncs or t in longjmpCallees: return 1
+  0
+
+proc emitLongjmp(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt]) =
+  ## The possible non-local jump of one call, emitted once (several lowering paths reach the
+  ## same call). It carries the C++ objects in scope here: the jump skips their destructors.
+  ## A `setjmp` call marks the function as a landing site instead.
+  let u = unwrap(call)
+  if clang_getCursorKind(u) != ckCallExpr: return
+  let at = startOffset(u)
+  if at in ctx.longjmpEmitted: return
+  if spelling(u) in setjmpCallees or spelling(clang_getCursorReferenced(u)) in setjmpCallees:
+    ctx.longjmpEmitted.incl at
+    outp.add emit(ikSetjmp, line, a = spelling(u))
+    return
+  let kind = ctx.longjmpKind(u)
+  if kind == 0: return
+  ctx.longjmpEmitted.incl at
+  var locals = ""
+  for l in ctx.liveLocals:
+    locals.add l.name & "\t" & l.typ & "\t" & $l.line & "\t" & l.disp & "\n"
+  let flags = (if kind == 2: 1 else: 0) or (if ctx.curFnLongjmps: 2 else: 0) or
+              (if ctx.curFnSetjmp: 4 else: 0)
+  outp.add emit(ikMayLongjmp, line, a = spelling(u), b = locals, off = flags)
+
+proc destructibleType(ctx: Ctx, d: CXCursor): string =
+  ## C++: the canonical spelling of the type of local or parameter `d` when it is a class type
+  ## or an array of one — the types that can have a destructor a longjmp would skip. "" for
+  ## anything else (a scalar, a pointer, a reference). A type that cannot be named at file
+  ## scope (a function-local or unnamed class) is prefixed `!`: whether its destructor is
+  ## trivial is not asked, so it counts as non-trivial.
+  if not ctx.isCpp: return ""
+  let t = clang_getCanonicalType(clang_getCursorType(d))
+  var e = t
+  while e.kind == tyConstantArray: e = clang_getCanonicalType(clang_getArrayElementType(e))
+  if e.kind != tyRecord: return ""
+  result = $clang_getTypeSpelling(t)
+  let decl = clang_getTypeDeclaration(e)
+  let parentKind = clang_getCursorKind(clang_getCursorSemanticParent(decl))
+  if isFuncLikeKind(parentKind) or "(anonymous" in result or "(unnamed" in result or
+     "(lambda" in result:
+    result = "!" & result
+
+proc flushPendingLocals(ctx: var Ctx) =
+  for l in ctx.pendingLocal: ctx.liveLocals.add l
+  ctx.pendingLocal.setLen(0)
+
+proc unloweredLongjmps(ctx: Ctx, c: CXCursor, found: var seq[tuple[line: int, callee: string]],
+                       seen: var HashSet[int]) =
+  ## Every call in a function body that may longjmp but was never lowered (in a position the
+  ## lowering does not follow): each is refused rather than silently treated as returning.
+  let u = unwrap(c)
+  if clang_getCursorKind(u) == ckCallExpr and startOffset(u) notin ctx.longjmpEmitted and
+     startOffset(u) notin seen and (ctx.longjmpKind(u) > 0 or spelling(u) in setjmpCallees):
+    seen.incl startOffset(u)
+    found.add (startLine(u), spelling(u))
+  for ch in collectChildren(c): ctx.unloweredLongjmps(ch, found, seen)
+
+proc scanLongjmpCalls(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
+  ## The possible jumps inside a C++ object's initializer — constructor arguments, which the
+  ## ownership lowering does not visit (`std::string s(f(), 'x')`). Arguments are evaluated
+  ## before the call that takes them, so they come first. A lambda's body runs later, not here.
+  let u = unwrap(c)
+  if clang_getCursorKind(u) == ckLambdaExpr: return
+  for ch in collectChildren(u): ctx.scanLongjmpCalls(ch, outp)
+  if clang_getCursorKind(u) == ckCallExpr: ctx.emitLongjmp(u, startLine(u), outp)
+
 proc effectiveCallee(ctx: Ctx, call: CXCursor): string =
   ## The name a call is known by for the ALLOCATOR vocabulary. A project that injects its
   ## allocator through a struct — `(*(strm->zalloc))(opaque, n, size)`, zlib's ZALLOC and the
@@ -947,6 +1042,7 @@ proc lowerAssignInner(ctx: var Ctx, targetName, targetKey: string, value: CXCurs
                else: ctx.resourceFor(targetName, line))
     if clang_getCursorKind(unwrap(value)) == ckCallExpr and ctx.mayThrow(unwrap(value)):
       outp.add emit(ikMayThrow, line, a = spelling(unwrap(value)))  # a throwing copy assigns nothing
+    ctx.emitLongjmp(value, line, outp)                                # ... nor does a jumping one
     outp.add emit(ikAlloc, line, a = targetName, b = res, aKey = targetKey)
     ctx.tracked[targetKey] = true
     return
@@ -979,6 +1075,7 @@ proc lowerAssignInner(ctx: var Ctx, targetName, targetKey: string, value: CXCurs
   # p a region-owned object borrowed from R (shares R's lifetime).
   if vk == ckCallExpr and spelling(v) in ctx.arenaCreate:
     if ctx.mayThrow(v): outp.add emit(ikMayThrow, line, a = spelling(v))
+    ctx.emitLongjmp(v, line, outp)
     outp.add emit(ikAlloc, line, a = targetName, b = ctx.arenaCreate[spelling(v)], aKey = targetKey)
     ctx.tracked[targetKey] = true
     return
@@ -1027,6 +1124,7 @@ proc lowerAssignInner(ctx: var Ctx, targetName, targetKey: string, value: CXCurs
         (srcKey, srcDisp) = fieldPath(arg)
       if srcKey.len > 0 and ctx.tracked.getOrDefault(srcKey, false):
         if ctx.mayThrow(v): outp.add emit(ikMayThrow, line, a = spelling(v))
+        ctx.emitLongjmp(v, line, outp)
         if targetKey == srcKey:
           # SELF-reassign `p = realloc(p, n)`: the success model (alias the result to the source
           # origin) hides the failure path — on OOM the NULL result overwrites the only handle to
@@ -1065,6 +1163,7 @@ proc lowerAssignInner(ctx: var Ctx, targetName, targetKey: string, value: CXCurs
     # what that path loses is every raw owner already held, never this one (C++ only).
     if (vk == ckCXXNewExpr and ctx.newMayThrow(v)) or (vk == ckCallExpr and ctx.mayThrow(v)):
       outp.add emit(ikMayThrow, line, a = (if vk == ckCXXNewExpr: "new" else: spelling(v)))
+    if vk == ckCallExpr: ctx.emitLongjmp(v, line, outp)
     outp.add emit(ikAlloc, line, a = targetName, b = res, aKey = targetKey,
                   cKey = ctx.collectionLink(res, targetKey))
     ctx.tracked[targetKey] = true
@@ -1859,6 +1958,7 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
         # a throwing source assigns nothing: its unwinding exit precedes the new obligation
         if not ctx.throwEmitted and ctx.mayThrow(call):
           outp.add emit(ikMayThrow, line, a = spelling(call)); ctx.throwEmitted = true
+        ctx.emitLongjmp(call, line, outp)
         outp.add emit(ikAlloc, line, a = spelling(target),
                       b = ctx.resourceFor(spelling(target), line), aKey = tk)
         ctx.tracked[tk] = true
@@ -2114,6 +2214,7 @@ proc lowerCall(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt]) =
   if not ctx.throwEmitted and ctx.mayThrow(call):
     outp.add emit(ikMayThrow, line, a = spelling(call))
   ctx.throwEmitted = false
+  ctx.emitLongjmp(call, line, outp)   # after the effects, as for unwinding
 
 proc lowerExprCalls(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
   ## Lower the argument side-effects (escape / `@frees` / `@moves` / borrow, plus lock
@@ -3025,10 +3126,30 @@ proc ownerTypeName(ctx: Ctx, c: CXCursor): tuple[name, raw: string] =
 
 proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
   let k = clang_getCursorKind(c)
+  # SCOPE (C++, for longjmp): a declaration puts its objects in scope for the rest of the
+  # enclosing block; every other statement — a block, a loop, an `if` with an init — ends the
+  # scope of whatever was declared inside it.
+  ctx.flushPendingLocals()
+  let scopeMark = ctx.liveLocals.len
+  defer:
+    if k == ckDeclStmt: ctx.flushPendingLocals()
+    elif k notin [ckLabelStmt, ckCaseStmt, ckDefaultStmt] and ctx.liveLocals.len > scopeMark:
+      ctx.pendingLocal.setLen(0)
+      ctx.liveLocals.setLen(scopeMark)
   case k
   of ckDeclStmt:
     for d in collectChildren(c):
       if clang_getCursorKind(d) == ckVarDecl:
+        # an object is in scope once its initializer has run (`T a = f();` — a jump out of f
+        # skips nothing of a): the previous declarator of this statement is, this one is not yet
+        ctx.flushPendingLocals()
+        if hasAutomaticStorage(d):
+          let ty = ctx.destructibleType(d)
+          if ty.len > 0:
+            let init = collectChildren(d)
+            if init.len > 0: ctx.scanLongjmpCalls(init[^1], outp)
+            ctx.pendingLocal.add (spelling(d), ty, $clang_getTypeSpelling(clang_getCursorType(d)),
+                                  startLine(d))
         # record stack locals so a later `&d` / `return d` escape is decidable.
         if hasAutomaticStorage(d):
           ctx.localVars.incl usr(d)
@@ -3755,6 +3876,77 @@ proc lowerBody(ctx: var Ctx, body: seq[CXCursor]): seq[Stmt] =
 
 # --- driver -----------------------------------------------------------------
 
+proc collectLongjmps(body: seq[Stmt], acc: var seq[Stmt]) =
+  ## Every ikMayLongjmp in a lowered body that carries in-scope objects.
+  for s in body:
+    case s.kind
+    of stInstr:
+      if s.ik == ikMayLongjmp and s.b.len > 0: acc.add s
+    of stIf: collectLongjmps(s.thenBody, acc); collectLongjmps(s.elseBody, acc)
+    of stLoop: collectLongjmps(s.loopBody, acc)
+    of stSwitch:
+      for cs in s.cases: collectLongjmps(cs, acc)
+    of stTry:
+      collectLongjmps(s.tryBody, acc)
+      for h in s.handlers: collectLongjmps(h, acc)
+    of stLabel: discard
+
+proc trivialDestructors(idx: CXIndex, path: string, args: seq[string], text: string,
+                        types: seq[string]): HashSet[string] =
+  ## Which of these class types have a trivial destructor, answered by clang itself: the file is
+  ## parsed again with one `__is_trivially_destructible(T)` constant per type appended, and each
+  ## constant is evaluated. libclang does not expose the members of a template instantiation
+  ## (`std::vector<int>`), so a structural answer would have to guess. A type whose constant
+  ## does not evaluate is left out — it counts as non-trivial.
+  var probe = text & "\nnamespace __kenbi_probe {\n"
+  for i, t in types:
+    probe.add "constexpr bool t" & $i & " = __is_trivially_destructible(" & t & ");\n"
+  probe.add "}\n"
+  var unsaved = CXUnsavedFile(filename: path.cstring, contents: probe.cstring,
+                              length: probe.len.culong)
+  var cargs = allocCStringArray(args)
+  defer: deallocCStringArray(cargs)
+  let tu = clang_parseTranslationUnit(idx, path.cstring, cargs, args.len.cint, addr unsaved, 1, 0)
+  if tu.isNil: return
+  defer: clang_disposeTranslationUnit(tu)
+  for ns in collectChildren(clang_getTranslationUnitCursor(tu)):
+    if spelling(ns) != "__kenbi_probe": continue
+    for v in collectChildren(ns):
+      let name = spelling(v)
+      if name.len < 2 or name[0] != 't': continue
+      var i = -1
+      try: i = parseInt(name[1 .. ^1])
+      except ValueError: continue
+      if i < 0 or i >= types.len: continue
+      let r = clang_Cursor_Evaluate(v)
+      if r.isNil: continue
+      if int(clang_EvalResult_getKind(r)) == 1 and clang_EvalResult_getAsLongLong(r) == 1:
+        result.incl types[i]
+      clang_EvalResult_dispose(r)
+
+proc keepNontrivialLocals(ctx: Ctx, idx: CXIndex, path: string, args: seq[string],
+                          text: string) =
+  ## Drop, from every possible longjmp, the in-scope objects whose destructor is trivial — a jump
+  ## that skips nothing is not undefined behaviour. What remains is what the jump skips.
+  var sites: seq[Stmt]
+  for f in ctx.prog.funcs: collectLongjmps(f.body, sites)
+  for b in ctx.lambdaBodies.values: collectLongjmps(b, sites)
+  if sites.len == 0: return
+  var types: seq[string]
+  for s in sites:
+    for entry in s.b.splitLines:
+      let f = entry.split('\t')
+      if f.len == 4 and not f[1].startsWith("!") and f[1] notin types: types.add f[1]
+  let trivial = (if types.len > 0: trivialDestructors(idx, path, args, text, types)
+                 else: initHashSet[string]())
+  for s in sites:
+    var kept = ""
+    for entry in s.b.splitLines:
+      let f = entry.split('\t')
+      if f.len != 4 or f[1] in trivial: continue
+      kept.add f[0] & "\t" & f[3] & "\t" & f[2] & "\n"   # what the user wrote, for the message
+    s.b = kept
+
 proc funcParams(c: CXCursor): seq[tuple[name, key: string]] =
   ## Ordered parameter (display name, USR) pairs of a function declaration.
   for k in collectChildren(c):
@@ -3883,6 +4075,7 @@ proc applyContract(ctx: var Ctx, fn: FuncSig, kw, param: string,
   if rc.has and not boundOut: ctx.returnContracts[fkey] = ReturnContract(kind: rc.kind)
   if fl.has:
     if fl.name == "nothrow": ctx.nothrowFuncs.incl fkey
+    elif fl.name == "longjmps": ctx.longjmpFuncs.incl fkey
     else: ctx.funcFlags.incl fkey
   if param.len == 0: result = true   # a whole-function contract has no parameter to match
   if result: ctx.recordContractDecl(fn, fkey, kw, param, viaOverlay)
@@ -3928,6 +4121,9 @@ proc resolveContracts(ctx: var Ctx) =
       if fl.has and fl.name == "nothrow" and site.param.len > 0:
         ctx.nothrowFuncs.incl site.param.strip   # `@nothrow(name)`: vouch by name, no binding
         continue
+      if fl.has and fl.name == "longjmps" and site.param.len > 0:
+        ctx.longjmpFuncs.incl site.param.strip   # `@longjmps(name)`: declare by name, no binding
+        continue
       var bestLine = high(int)
       var best = -1
       for i, fn in ctx.funcSigs:
@@ -3958,6 +4154,9 @@ proc resolveNamedContracts(ctx: var Ctx) =
   for nc in ctx.namedContracts:
     if nc.kw == "@nothrow" and nc.param.len == 0:
       ctx.nothrowFuncs.incl nc.fn          # vouch by name; no signature needed
+      continue
+    if nc.kw == "@longjmps" and nc.param.len == 0:
+      ctx.longjmpFuncs.incl nc.fn          # a library function, declared by name
       continue
     var sawFn = false
     var matched = false
@@ -4554,13 +4753,6 @@ proc rewriteBackwardLoop(body: seq[Stmt]): seq[Stmt] =
   result.add Stmt(line: body[hi].line, kind: stLoop, loopBody: loopBody, doWhile: true)
   for i in gi+1 ..< body.len: result.add body[i]
 
-proc isFuncLikeKind(k: auto): bool =
-  ## Every cursor kind that is a function-like DEFINITION carrying a body: a free function, a
-  ## member function (ctor / dtor / method / conversion), or a function template (its
-  ## uninstantiated body is still a real AST and lowers like any other). Anything here that
-  ## the collector skipped would be a body kenbi never looked at — silently GREEN.
-  k == ckFunctionDecl or k == ckCXXMethod or k == ckConstructor or k == ckDestructor or
-  k == ckConversionFunction or k == ckFunctionTemplate
 
 proc isFuncContainer(c: CXCursor): bool =
   ## A declaration that NESTS function-like definitions as its children: a namespace, an
@@ -4906,6 +5098,29 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
     let fnKey = (let q = qualName(c); if q.len > 0 and (ctx.bodyContracts.hasKey(q) or ctx.ownsOut.hasKey(q) or
                  ctx.countedBy.hasKey(q) or ctx.invariants.hasKey(q) or ctx.guardedBy.hasKey(q)): q else: spelling(c))
     ctx.callEdges = @[]   # accumulate this function's ownership-flow call edges
+    # LONGJMP: what this function declares, whether it is a landing site, and the objects in
+    # scope from the start — its by-value class parameters, whose destructors run on return.
+    ctx.curFnLongjmps = spelling(c) in ctx.longjmpFuncs or qualName(c) in ctx.longjmpFuncs
+    ctx.curFnSetjmp = false
+    block findSetjmp:
+      var found: seq[tuple[line: int, callee: string]]
+      proc scanSj(n: CXCursor, found: var seq[tuple[line: int, callee: string]]) =
+        let u = unwrap(n)
+        if clang_getCursorKind(u) == ckCallExpr and
+           (spelling(u) in setjmpCallees or spelling(clang_getCursorReferenced(u)) in setjmpCallees):
+          found.add (startLine(u), spelling(u))
+        for ch in collectChildren(n): scanSj(ch, found)
+      scanSj(body, found)
+      ctx.curFnSetjmp = found.len > 0
+    ctx.longjmpEmitted = initHashSet[int]()
+    ctx.liveLocals = @[]
+    ctx.pendingLocal = @[]
+    for p in collectChildren(c):
+      if clang_getCursorKind(p) == ckParmDecl:
+        let ty = ctx[].destructibleType(p)
+        if ty.len > 0:
+          ctx.liveLocals.add (spelling(p), ty, $clang_getTypeSpelling(clang_getCursorType(p)),
+                              startLine(p))
     # body param seeds (generic): @frees -> ikObligation (must be discharged ->
     # CONTRACT_NOT_HONORED), @borrows -> ikBorrow (non-owning; a stray free is
     # BORROW_FREED). Tracking is enabled so the body's free(p) is recognised.
@@ -5064,6 +5279,16 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
           fn.body.add emit(ikRaiiAlloc, startLine(c), a = "this->" & f.name, b = f.cls, aKey = fk)
     for child in collectChildren(body):
       ctx[].lowerStmt(child, fn.body)
+    # a call that may longjmp in a position the lowering never reached is refused, not dropped
+    var unlowered: seq[tuple[line: int, callee: string]]
+    var unloweredSeen = initHashSet[int]()
+    ctx[].unloweredLongjmps(body, unlowered, unloweredSeen)
+    for i in countdown(unlowered.high, 0):
+      let u = unlowered[i]
+      fn.body.insert(emit((if u.callee in setjmpCallees: ikSetjmp else: ikLongjmpUnmodeled),
+                          u.line, a = u.callee), 0)
+    ctx.liveLocals = @[]
+    ctx.pendingLocal = @[]
     fn.body = rewriteBackwardLoop(fn.body)   # declared goto-loops -> stLoop (fixpoint)
     fn.calls = ctx.callEdges
     ctx.prog.funcs.add fn
@@ -5332,7 +5557,9 @@ proc parseCFile*(path: string, extraArgs: seq[string] = @[], collectEffects = fa
   # C++ with exceptions on: a call without a nothrow guarantee is an unwinding exit
   # (ikMayThrow). C has none; `-fno-exceptions` in the compile args turns them off.
   ctx.exceptionsOn = isCpp and "-fno-exceptions" notin args
+  ctx.isCpp = isCpp
   ctx.nothrowFuncs = initHashSet[string]()
+  ctx.longjmpFuncs = initHashSet[string]()
   ctx.ownsOut = initTable[string, seq[tuple[idx: int, accessor: string]]]()
   ctx.addrOf = initTable[string, tuple[key, disp: string]]()
   ctx.pointeeAlias = initTable[string, string]()
@@ -5420,6 +5647,8 @@ proc parseCFile*(path: string, extraArgs: seq[string] = @[], collectEffects = fa
   ctx.returnsFreed = initHashSet[string]()
   discard clang_visitChildren(root, freeSummaryVisitor, addr ctx) # pass 1.5: visible-free summary
   discard clang_visitChildren(root, fnVisitor, addr ctx)        # pass 2: lower bodies
+  if isCpp:                                                     # what a longjmp would skip
+    ctx.keepNontrivialLocals(idx, path, args, (if nUnsaved > 0: srcText else: originalText))
   if collectEffects:
     var effectsCpp = isCpp
     for arg in args:
