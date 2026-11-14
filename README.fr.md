@@ -491,9 +491,26 @@ appel à une fonction déclarée `// @longjmps` comme une sortie possible :
   chaque appelant.
 
 Une fonction de bibliothèque que vous ne pouvez pas modifier se déclare par son nom dans un en-tête
-overlay : `// @longjmps(png_error)` ou `// @contract png_error { longjmps }`. Une fonction qui
-appelle `setjmp` est le point d'arrivée du saut ; la réentrée n'y est pas encore modélisée, elle
-est donc signalée comme `UNSUPPORTED_SETJMP`.
+overlay : `// @longjmps(png_error)` ou `// @contract png_error { longjmps }`.
+
+`if (setjmp(b))` au niveau supérieur d'une fonction est le point d'arrivée d'un longjmp vers `b`
+(de même `!setjmp(b)` et `setjmp(b) == 0` / `!= 0`). Chaque appel ultérieur qui peut sauter vers
+`b` est un chemin vers la branche d'arrivée, et kenbi analyse cette branche, et ce qui la suit, à
+partir de tous ces chemins : une libération qui ne correspond pas sur l'un d'eux est signalée comme
+sur tout autre chemin, par exemple un `DOUBLE_FREE` quand le saut survient après la libération.
+Savoir si un saut va vers `b` se lit dans son jmp_buf déclaré, écrit comme une expression où `$N`
+ou un nom de paramètre représente l'argument de l'appel :
+
+```c
+/* @contract png_error { longjmps: png_jmpbuf($1) } */   // dans un en-tête overlay
+// @longjmps_to(parse_fail)                               // en ligne, au-dessus d'une déclaration
+```
+
+Un saut vers un autre tampon quitte la fonction ; un saut dont le tampon n'est pas déclaré est
+`UNKNOWN_LONGJMP_TARGET`, et un tampon déclaré vers lequel le corps ne saute pas est
+`LONGJMP_TARGET_MISMATCH`. Une variable locale non `volatile`, modifiée après le setjmp et lue dans
+la branche d'arrivée, est `SETJMP_CLOBBERED` : sa valeur y est indéterminée. Un setjmp sous toute
+autre forme est `UNSUPPORTED_SETJMP`.
 
 ### Annotations de concurrence (vérifiées sous `@threadsafe`, consultatives en dehors)
 
@@ -552,8 +569,9 @@ exemptés, `noexcept` / `@nothrow` / `-fno-exceptions` en sont les preuves ; à 
 de leur jonction),
 `LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP` (un propriétaire brut, ou en
 C++ un objet à destructeur non trivial, encore en portée là où un appel peut faire un `longjmp` ;
-une fonction qui peut atteindre un longjmp sans déclarer `@longjmps`), `UNSUPPORTED_SETJMP` (un
-point d'arrivée de `setjmp`, pas encore modélisé),
+une fonction qui peut atteindre un longjmp sans déclarer `@longjmps`), `UNKNOWN_LONGJMP_TARGET` / `LONGJMP_TARGET_MISMATCH` (un saut dont le jmp_buf n'est pas déclaré,
+ou n'est pas celui déclaré), `SETJMP_CLOBBERED` (une variable locale non volatile lue là où un
+longjmp arrive), `UNSUPPORTED_SETJMP` (un `setjmp` sous une forme que kenbi ne modélise pas),
 `FINALLY_BYPASSED` (une sortie possédante contourne un entonnoir `@goto_finally` déclaré),
 `FREE_NONHEAP` (un `free` d'un pointeur vers la pile ou un autre stockage hors tas),
 `BORROW_MOVED` / `UNCONTRACTED_MOVE` (un move hors d'un emprunt, ou vers un appelé qui ne déclare

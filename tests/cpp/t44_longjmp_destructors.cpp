@@ -20,6 +20,9 @@ struct Pod { int a; double b; };
 // @longjmps
 void fail(int c) { if (c) std::longjmp(env, 1); }
 
+// @longjmps_to(env)
+void fail_env(int c) { if (c) std::longjmp(env, 1); }
+
 // @longjmps
 int fail_value(int c) { fail(c); return c; }
 
@@ -65,6 +68,15 @@ void array_of_objects(int c) {
 void smart_pointer(int c) {
   std::unique_ptr<int> up(new int(1));
   fail(c);                                      //EXPECT LONGJMP_SKIPS_DESTRUCTOR
+}
+
+// a jump back to this function's own setjmp: the objects declared before it are still in scope
+// where it lands; the ones declared after it are left, and their destructors skipped
+void own_landing(int c) {
+  std::string before = "kept";
+  if (setjmp(env)) return;
+  std::string after = "lost";
+  fail_env(c);                                  //EXPECT LONGJMP_SKIPS_DESTRUCTOR
 }
 
 // a jump from a lambda handed to another function: kenbi does not follow when it runs — refused

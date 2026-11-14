@@ -207,6 +207,7 @@ proc clang_getCursorExceptionSpecificationType*(c: CXCursor): cint
 proc clang_getTypeSpelling*(t: CXType): CXString   ## `kir_owned_scalar<std::uint32_t>` etc. — used
                                                     ## to match a local's type against `@raii` owners
 proc clang_isConstQualifiedType*(t: CXType): cuint
+proc clang_isVolatileQualifiedType*(t: CXType): cuint
 proc clang_getTypeDeclaration*(t: CXType): CXCursor
 proc clang_getCursorDefinition*(c: CXCursor): CXCursor
 proc clang_CXXMethod_isVirtual*(c: CXCursor): cuint

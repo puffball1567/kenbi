@@ -6,7 +6,7 @@
 // callee declared `@longjmps` — must declare it too (UNDECLARED_LONGJMP), so the obligation travels
 // up the call chain to every caller. A library function is declared by name (`@longjmps(name)` or
 // `@contract name { longjmps }`), the form an overlay header uses for code you cannot edit. A
-// function that calls `setjmp` is a landing site, which is not modelled yet (UNSUPPORTED_SETJMP).
+// function that calls `setjmp` is a landing site, covered in t308.
 
 static jmp_buf env;
 
@@ -75,9 +75,11 @@ void library_undeclared(void) {
 // nothing held, nothing reaching a jump: clean
 int plain(int c) { return c + 1; }
 
+// after a setjmp, a jump whose target is not declared may return here or leave: kenbi cannot
+// tell which, so it asks for `@longjmps_to` (landing sites are covered in t308)
 int landing(void) {
-  if (setjmp(env)) return 1;                    //EXPECT UNSUPPORTED_SETJMP
-  fail_through(1);
+  if (setjmp(env)) return 1;
+  fail_through(1);                              //EXPECT UNKNOWN_LONGJMP_TARGET
   return 0;
 }
 // @kenbi

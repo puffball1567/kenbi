@@ -502,9 +502,26 @@ Ausgang und einen Aufruf einer mit `// @longjmps` deklarierten Funktion als mög
   jedem Aufrufer hinauf.
 
 Eine Bibliotheksfunktion, die Sie nicht ändern können, wird in einem Overlay-Header per Namen
-deklariert: `// @longjmps(png_error)` oder `// @contract png_error { longjmps }`. Eine Funktion,
-die `setjmp` aufruft, ist der Landepunkt des Sprungs; der Wiedereintritt dort ist noch nicht
-modelliert und wird daher als `UNSUPPORTED_SETJMP` gemeldet.
+deklariert: `// @longjmps(png_error)` oder `// @contract png_error { longjmps }`.
+
+`if (setjmp(b))` auf oberster Ebene einer Funktion ist der Landepunkt eines longjmp nach `b`
+(ebenso `!setjmp(b)` und `setjmp(b) == 0` / `!= 0`). Jeder spätere Aufruf, der nach `b` springen
+kann, ist ein Pfad in den Landezweig, und kenbi analysiert diesen Zweig und was ihm folgt von all
+diesen Pfaden aus: Eine Freigabe, die auf einem davon nicht passt, wird gemeldet wie auf jedem
+anderen Pfad, etwa ein `DOUBLE_FREE`, wenn der Sprung erst nach der Freigabe erfolgt. Ob ein
+Sprung nach `b` geht, wird aus seinem deklarierten jmp_buf gelesen, geschrieben als Ausdruck, in
+dem `$N` oder ein Parametername für das Argument des Aufrufs steht:
+
+```c
+/* @contract png_error { longjmps: png_jmpbuf($1) } */   // in einem Overlay-Header
+// @longjmps_to(parse_fail)                               // inline, über einer Deklaration
+```
+
+Ein Sprung zu einem anderen Puffer verlässt stattdessen die Funktion; ein Sprung ohne deklarierten
+Puffer ist `UNKNOWN_LONGJMP_TARGET`, und ein deklarierter Puffer, zu dem der Rumpf nicht springt,
+ist `LONGJMP_TARGET_MISMATCH`. Eine lokale Variable, die nicht `volatile` ist, nach dem setjmp
+geändert und im Landezweig gelesen wird, ist `SETJMP_CLOBBERED`: Ihr Wert ist dort unbestimmt.
+Ein setjmp in jeder anderen Form ist `UNSUPPORTED_SETJMP`.
 
 ### Nebenläufigkeits-Annotationen (verifiziert unter `@threadsafe`, Advisory außerhalb)
 
@@ -564,7 +581,9 @@ abwickelnden Ausgänge in den Handlern, die ab ihrer Vereinigung geprüft werden
 `LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP` (ein roher Eigentümer oder in
 C++ ein Objekt mit nicht-trivialem Destruktor, das noch im Gültigkeitsbereich ist, wo ein Aufruf
 `longjmp`en kann; eine Funktion, die einen longjmp erreichen kann, ohne `@longjmps` zu deklarieren),
-`UNSUPPORTED_SETJMP` (ein `setjmp`-Landepunkt, noch nicht modelliert),
+`UNKNOWN_LONGJMP_TARGET` / `LONGJMP_TARGET_MISMATCH` (ein Sprung mit undeklariertem oder nicht
+dem deklarierten jmp_buf), `SETJMP_CLOBBERED` (eine nicht-volatile lokale Variable, gelesen wo ein
+longjmp landet), `UNSUPPORTED_SETJMP` (ein `setjmp` in einer Form, die kenbi nicht modelliert),
 `FINALLY_BYPASSED` (ein besitzender Ausgang umgeht einen deklarierten `@goto_finally`-Trichter),
 `FREE_NONHEAP` (ein `free` eines Zeigers in Stack- oder anderen Nicht-Heap-Speicher),
 `BORROW_MOVED` / `UNCONTRACTED_MOVE` (ein Move aus einem Borrow heraus oder in einen Callee, der

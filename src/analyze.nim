@@ -215,6 +215,8 @@ type
     throwReported: HashSet[int]      ## origins already reported LEAK_ON_THROW (dedup: once per
                                      ## origin, at its FIRST unwinding exposure)
     longjmpReported: HashSet[int]    ## origins already reported LEAK_ON_LONGJMP (same dedup)
+    landingDeposits: Table[int, seq[PathState]] ## landing site -> the path state at every call
+                                     ## that may longjmp into it (its incoming edges)
     skippedReported: HashSet[string] ## locals already reported LONGJMP_SKIPS_DESTRUCTOR
     movedHandles: Table[string, int] ## owner HANDLES moved-from by an ikRaiiMove (var key ->
                                      ## the origin it held then): the resource is still owned,
@@ -551,7 +553,9 @@ proc scanThrowLeaks(a: var Analyzer, s: Stmt, st: StateMap) =
         "release it before the call, or prove the callee cannot throw (`noexcept`, or vouch " &
         "it `@nothrow`; `-fno-exceptions` turns the axis off for a no-exception build).")
 
-proc scanLongjmp(a: var Analyzer, s: Stmt, st: StateMap) =
+proc reportSkippedDestructors(a: var Analyzer, s: Stmt, jumps: string)
+
+proc scanLongjmp(a: var Analyzer, s: Stmt, st: StateMap, nst: NullState) =
   ## ikMayLongjmp: control may leave the function here by a non-local jump. Nothing runs on the
   ## way out — no cleanup code, no destructor — so, unlike an unwinding exit, an RAII owner is
   ## lost too. Reported as two codes: every RAW owner still held (a declared resource or an
@@ -560,11 +564,28 @@ proc scanLongjmp(a: var Analyzer, s: Stmt, st: StateMap) =
   ## owner among them, which is why RAII origins are left to this second report) is
   ## LONGJMP_SKIPS_DESTRUCTOR, once per object. A function that calls `setjmp` is the landing
   ## site, not an exit (its refusal, ikSetjmp, keeps it RED until landing sites are modelled).
-  if (s.off and 4) != 0: return
   let callee = s.a
+  if (s.off and 4) != 0:
+    # a jump back into this function's landing site: an incoming edge of that site, not an exit
+    if (s.off and 8) != 0 and a.curCovered:
+      a.addDiag(s.line, "UNKNOWN_LONGJMP_TARGET",
+        "'" & callee & "' may longjmp, but kenbi cannot tell whether it jumps back to this " &
+        "function's setjmp or out of it. Declare where it jumps: `@longjmps_to(<jmp_buf>)` on " &
+        "its declaration, or `longjmps: <jmp_buf>` in `@contract`.")
+    a.landingDeposits.mgetOrPut(s.off2, @[]).add (st, nst, a.varOrigin, a.interiorVar,
+      a.interiorOff, a.unknownOrigin, a.ambiguousHandles, a.reallocTie, a.staleAfterRealloc)
+    a.reportSkippedDestructors(s, "'" & callee & "' may longjmp back to this function's setjmp")
+    return
   let always = (s.off and 1) != 0
   let jumps = (if always: "'" & callee & "' jumps out of this function"
                else: "'" & callee & "' may longjmp")
+  if (s.off and 16) != 0 and a.curCovered:
+    let t = s.cKey.split('\t')
+    a.addDiag(s.line, "LONGJMP_TARGET_MISMATCH",
+      "this function is declared to longjmp to `" & t[0] & "`, but " &
+      (if always: "'" & callee & "' jumps" else: "'" & callee & "' may jump") & " to " &
+      (if t.len > 1 and t[1].len > 0: "`" & t[1] & "`" else: "a target it does not declare") &
+      ". Correct the declaration, or the jump.")
   if (s.off and 2) == 0 and a.curCovered:
     a.addDiag(s.line, "UNDECLARED_LONGJMP",
       (if always: "this function calls '" & callee & "'" else: jumps) &
@@ -592,7 +613,13 @@ proc scanLongjmp(a: var Analyzer, s: Stmt, st: StateMap) =
       a.addDiag(s.line, "LEAK_ON_LONGJMP",
         "'" & resName & "' (" & disp & ") is owned here but " & jumps & " — " &
         "on that path it is never released. Release it before the call.")
-  if not a.curCovered: return
+  a.reportSkippedDestructors(s, jumps)
+
+proc reportSkippedDestructors(a: var Analyzer, s: Stmt, jumps: string) =
+  ## The objects in `s.b` — in scope at the jump, with a non-trivial destructor the jump skips.
+  ## Recorded as reported only on a reporting pass: a silent dry run (a loop or landing-site
+  ## fixpoint) must not use up the one report.
+  if not a.curCovered or a.silent: return
   for entry in s.b.splitLines:
     let f = entry.split('\t')
     if f.len != 3: continue        # name, the type as written, line
@@ -924,10 +951,16 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
     # since indeterminate unless they are volatile. Not modelled yet, so refused.
     if a.curCovered:
       a.addDiag(s.line, "UNSUPPORTED_SETJMP",
-        "this function calls setjmp, so a longjmp can return into it here; kenbi does not " &
-        "model that re-entry yet, so its ownership cannot be verified. Move the setjmp into a " &
-        "small function that holds no resources, or mark the line @unsafe if you take " &
-        "responsibility.")
+        "a longjmp can return into this function here, and kenbi models that only for a setjmp " &
+        "that is the whole condition of an `if` at the function's top level (`if (setjmp(b))`, " &
+        "`if (!setjmp(b))`, `if (setjmp(b) == 0)`). Move it into that form, or mark the line " &
+        "@unsafe if you take responsibility.")
+  of ikSetjmpClobbered:
+    if a.curCovered:
+      a.addDiag(s.line, "SETJMP_CLOBBERED",
+        "'" & s.a & "' is changed after the setjmp on line " & $s.off & " and is not volatile: " &
+        "when a longjmp returns there, its value is indeterminate, so this use may not see what " &
+        "was stored. Declare it volatile.")
   of ikLongjmpUnmodeled:
     if a.curCovered:
       a.addDiag(s.line, "UNSUPPORTED_CONSTRUCT",
@@ -1902,7 +1935,7 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
         else: a.scanLeaks(st)
         gone = true
       elif s.ik == ikMayLongjmp:
-        a.scanLongjmp(s, st)
+        a.scanLongjmp(s, st, nst)
         if (s.off and 1) != 0: gone = true   # `longjmp` itself: nothing after it runs
       elif s.ik == ikBreak:
         a.breakStates.add (st, nst, a.varOrigin, a.interiorVar, a.interiorOff, a.unknownOrigin, a.ambiguousHandles, a.reallocTie, a.staleAfterRealloc)  # routed to the loop/switch exit join
@@ -1930,6 +1963,12 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
       # pruned branch is a path the program cannot take, so nothing checkable is lost, and
       # keeping it cost real findings: `if (want) p = malloc(…); … if (want) free(p);` read as a
       # leak because the merge kept the never-allocated and never-freed combinations alive.
+      if s.landingId > 0:
+        # a setjmp: on its first return only the non-landing branch runs. The landing branch is
+        # reached by a longjmp, from states later in the function — analysed after it.
+        let first = (if s.landingThen: s.elseBody else: s.thenBody)
+        if a.analyzeBody(first, st, nst): gone = true
+        continue
       let known = a.predSays(s.predKey)
       if known.known:
         let liveIsThen = (known.nonZero == s.predThenNonZero)
@@ -2407,6 +2446,62 @@ proc modelledGotos(body: seq[Stmt], noreturn: HashSet[string]): tuple[ok: bool, 
   scan(body, -1, true)
   result.gotos = found
 
+proc analyzeLandings(a: var Analyzer, fn: Func) =
+  ## The paths a longjmp takes back into this function. A landing site is an `if (setjmp(b))`
+  ## at the top level of the body; every call after it that may jump to `b` deposited its path
+  ## state while the body was analysed. From the join of those states the landing branch runs,
+  ## then — if it falls through — the rest of the body after the `if`, exactly as on a first
+  ## pass: a leak, a double free or a use after free on any of those paths is reported like
+  ## any other. Calls on these paths may jump back again, so the entry is iterated to a
+  ## fixpoint (silent dry runs, then one reporting pass), as a loop head is.
+  for i, site in fn.body:
+    if site.kind != stIf or site.landingId == 0: continue
+    let id = site.landingId
+    if a.landingDeposits.getOrDefault(id, @[]).len == 0: continue   # nothing jumps here
+    var tail = (if site.landingThen: site.thenBody else: site.elseBody)
+    for j in i + 1 ..< fn.body.len: tail.add fn.body[j]
+    let post = a.captureWorld()
+    proc enter(a: var Analyzer, deps: seq[PathState], st: var StateMap, nst: var NullState) =
+      a.restoreWorld(post)
+      st = deps[0].st
+      nst = deps[0].nst
+      a.varOrigin = deps[0].vo; a.interiorVar = deps[0].iv; a.interiorOff = deps[0].io
+      a.unknownOrigin = deps[0].uo; a.ambiguousHandles = deps[0].amb
+      a.reallocTie = deps[0].tie; a.staleAfterRealloc = deps[0].stale
+      for k in 1 ..< deps.len:
+        mergeStateInto(st, deps[k].st)
+        mergeNullInto(nst, deps[k].nst)
+        a.joinBindings(st, deps[k].vo, deps[k].iv, deps[k].io, deps[k].uo, deps[k].amb,
+                       deps[k].tie, deps[k].stale)
+    var deps = a.landingDeposits[id]
+    const cap = 16
+    var converged = false
+    for _ in 0 ..< cap:
+      var st: StateMap
+      var nst: NullState
+      a.enter(deps, st, nst)
+      a.landingDeposits[id] = @[]
+      let savedSilent = a.silent
+      a.silent = true
+      discard a.analyzeBody(tail, st, nst)
+      a.silent = savedSilent
+      let again = a.landingDeposits.getOrDefault(id, @[])
+      var grown = false
+      for d in again:
+        if d notin deps: deps.add d; grown = true
+      if not grown:
+        converged = true
+        break
+    if not converged and a.curCovered:
+      a.addDiag(site.line, "LOOP_FIXPOINT_LIMIT", "the paths a longjmp takes back into this " &
+        "setjmp did not converge within " & $cap & " iterations, so the findings on them are " &
+        "incomplete. Hold fewer resources across the calls that may jump here.")
+    var st: StateMap
+    var nst: NullState
+    a.enter(deps, st, nst)
+    a.landingDeposits[id] = @[]
+    if not a.analyzeBody(tail, st, nst): a.scanLeaks(st)
+
 proc analyzeFunc(a: var Analyzer, fn: Func, covered: bool) =
   ## Analyze one function with its own fresh origin/null/flow state, then scan
   ## for leaks. Per-function isolation matters now that `return` divergence and
@@ -2486,6 +2581,7 @@ proc analyzeFunc(a: var Analyzer, fn: Func, covered: bool) =
   a.nextOrigin = 0
   var st: StateMap = initTable[int, set[AllocState]]()
   var nst: NullState = initTable[string, NullKind]()
+  a.landingDeposits = initTable[int, seq[PathState]]()
   let diverged = a.analyzeBody(fn.body, st, nst)
   # The fall-through end is one more exit: scan it for abandoned obligations.
   # But if every path already returned (diverged), each return was scanned at
@@ -2493,6 +2589,7 @@ proc analyzeFunc(a: var Analyzer, fn: Func, covered: bool) =
   # spurious leak for an obligation that was actually freed on all return paths.
   if not diverged:
     a.scanLeaks(st)
+  a.analyzeLandings(fn)
   # Uncovered (not under `@kenbi`) code is neutral — drop everything this function
   # produced so it never shows RED. Its declared contracts are still usable by
   # covered callers (they live in the front-end, not here); only its body findings

@@ -124,6 +124,8 @@ proc parseContractComment(ctx: var Ctx, text: string, line: int) =
     let kw = contractKeys[key]
     if kv.len == 1 or kv[1].strip().len == 0:
       ctx.namedContracts.add (fn, kw, "")           # whole-function form
+    elif key == "longjmps":
+      ctx.namedContracts.add (fn, kw, kv[1].strip())  # a jmp_buf expression, kept whole
     else:
       for p in kv[1].splitWhitespace():
         ctx.namedContracts.add (fn, kw, p)
