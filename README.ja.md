@@ -6,7 +6,7 @@
 
 **AI エージェントと C/C++ を書くために作りました。** [MCP サーバ](#ai-コーディングエージェントと使う-mcp)を通して、エージェントは書いたばかりの C/C++ を検査し、指摘が出た理由と直し方を確かめ、検査が何も報告しなくなるまで繰り返します。メモリ安全性は、書いた後のレビューではなく、エージェントが書く流れの一部になります。エージェントが書いた注釈は、kenbi が検査し続ける規則としてコードに残ります。
 
-> ステータス: **v0.1.1**、開発初期段階です。インタフェース、注釈の語彙、
+> ステータス: **v0.1.2**、開発初期段階です。インタフェース、注釈の語彙、
 > JSON 出力は今後も変わる可能性があります。
 
 ## 最初の例
@@ -476,9 +476,25 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
   宣言していない関数は `UNDECLARED_LONGJMP` です。こうして宣言はすべての呼び出し元へ伝わります。
 
 編集できないライブラリの関数は、overlay ヘッダで名前を指定して宣言します:
-`// @longjmps(png_error)` または `// @contract png_error { longjmps }`。`setjmp` を呼ぶ関数は
-ジャンプの着地点です。そこへの再進入はまだモデル化していないため、`UNSUPPORTED_SETJMP` として
-報告します。
+`// @longjmps(png_error)` または `// @contract png_error { longjmps }`。
+
+関数の最上位にある `if (setjmp(b))` は、`b` への longjmp が着地する場所です（`!setjmp(b)`、
+`setjmp(b) == 0` / `!= 0` も同様）。その後ろで `b` へ飛びうる呼び出しは、どれも着地側の分岐へ
+入る経路です。kenbi はそれらすべての経路から、着地側の分岐とその後ろを解析します。どれか一つの
+経路で解放が合わなければ、ほかの経路と同じように報告します。たとえば、すでに解放した後で飛ぶと
+`DOUBLE_FREE` になります。ジャンプが `b` へ向かうかどうかは、宣言された jmp_buf で判断します。
+宣言は式で書き、`$N` または引数名が呼び出しの実引数を表します:
+
+```c
+/* @contract png_error { longjmps: png_jmpbuf($1) } */   // overlay ヘッダに
+// @longjmps_to(parse_fail)                               // 宣言の直前に
+```
+
+別のバッファへのジャンプは、関数から抜ける経路として扱います。バッファを宣言していないジャンプは
+`UNKNOWN_LONGJMP_TARGET`、宣言したバッファへ本体が飛んでいなければ `LONGJMP_TARGET_MISMATCH`
+です。`volatile` でなく、setjmp の後で変更され、着地側の分岐で読まれる局所変数は
+`SETJMP_CLOBBERED` です（そこでの値は不定です）。これ以外の形の setjmp は `UNSUPPORTED_SETJMP`
+です。
 
 ### 並行性注釈（`@threadsafe` の下では検証、その外では advisory）
 
@@ -532,7 +548,9 @@ use <var> | free <var> | move <var> | if / else / endif
 ハンドラはその合流点から検査される）、
 `LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP`（`longjmp` しうる呼び出しの
 時点でスコープに残る生の所有者、C++ では自明でないデストラクタを持つオブジェクト。`@longjmps` を
-宣言せずに longjmp に到達しうる関数）、`UNSUPPORTED_SETJMP`（`setjmp` の着地点。未モデル化）、
+宣言せずに longjmp に到達しうる関数）、`UNKNOWN_LONGJMP_TARGET` / `LONGJMP_TARGET_MISMATCH`（jmp_buf が未宣言、または宣言と異なる
+ジャンプ）、`SETJMP_CLOBBERED`（longjmp の着地点で読まれる volatile でない局所変数）、
+`UNSUPPORTED_SETJMP`（kenbi がモデル化しない形の `setjmp`）、
 `FINALLY_BYPASSED`（所有したまま出る exit が、宣言された `@goto_finally` ファネルを迂回する）、
 `FREE_NONHEAP`（スタックなどヒープ以外の記憶域を指すポインタの `free`）、`BORROW_MOVED` /
 `UNCONTRACTED_MOVE`（借用からの move、または受け取りを宣言しない callee への move）、

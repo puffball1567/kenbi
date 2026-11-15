@@ -5,6 +5,26 @@ All notable changes to kenbi are recorded here. The format follows
 [Semantic Versioning](https://semver.org/); before 1.0 the interfaces, the annotation vocabulary
 and the JSON output may change in any minor version.
 
+## [0.1.2] - 2026-11-16
+
+### Added
+
+- Landing sites. `if (setjmp(b))` at the top level of a function (also `!setjmp(b)`,
+  `setjmp(b) == 0` / `!= 0`) is analysed as the place a longjmp to `b` returns: every later call
+  that may jump to `b` is a path into the landing branch, which is checked, with what follows it,
+  from all of those paths — a release that does not match on one of them is reported like any
+  other. A function's jmp_buf is declared with `@longjmps_to(<expr>)`, or `longjmps: <expr>` in
+  `@contract`, where `$N` or a parameter name stands for the call's argument. New codes:
+  `UNKNOWN_LONGJMP_TARGET` (a jump after a setjmp whose buffer is not declared),
+  `LONGJMP_TARGET_MISMATCH` (a body that jumps somewhere other than it declares),
+  `SETJMP_CLOBBERED` (a non-volatile local changed after the setjmp and read where the jump
+  lands). In C++, an object declared after the setjmp and in scope at a jump back to it is
+  `LONGJMP_SKIPS_DESTRUCTOR`.
+
+### Changed
+
+- `UNSUPPORTED_SETJMP` is now reported only for a setjmp in a form kenbi does not model.
+
 ## [0.1.1] - 2026-11-13
 
 ### Added
@@ -21,7 +41,8 @@ and the JSON output may change in any minor version.
 
 - `longjmp` was treated as a call that returns, so an allocation or a destructor it skipped was
   not reported (0.1.0 passed such code).
-
+- A flow whose entry has findings of its own was listed as blocked by "its own `@unsafe`"; it now
+  names its own findings unless an `@unsafe` on the entry is the reason.
 - With libclang 17 or later, `--safety` crashed on a project whose `clangArgs` use relative
   include paths, and a function's file could be misidentified: those libclang versions name such
   a file relative to the parse's working directory. File names are now resolved the same way
@@ -55,5 +76,6 @@ Also: `--project` closure over a `compile_commands.json`, `--emit-contracts`, `k
 which checks ran on which functions, and what a result without findings rests on without
 having checked it.
 
+[0.1.2]: https://github.com/puffball1567/kenbi/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/puffball1567/kenbi/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/puffball1567/kenbi/releases/tag/v0.1.0

@@ -6,7 +6,7 @@
 
 **Pensado para escribir C/C++ con agentes de IA.** A través de su [servidor MCP](#con-agentes-de-programación-con-ia-mcp), un agente comprueba el C/C++ que acaba de escribir, pregunta por qué aparece un hallazgo y cómo es la corrección, y repite hasta que las comprobaciones no informan de nada. La seguridad de memoria pasa a formar parte del ciclo de escritura del agente en lugar de una revisión posterior, y las anotaciones que escribe quedan en el código como reglas que kenbi sigue comprobando.
 
-> Estado: **v0.1.1**, desarrollo temprano. Las interfaces, el vocabulario de anotaciones y la
+> Estado: **v0.1.2**, desarrollo temprano. Las interfaces, el vocabulario de anotaciones y la
 > salida JSON aún pueden cambiar.
 
 ## Un primer vistazo
@@ -488,9 +488,26 @@ a una función declarada `// @longjmps` como una salida posible:
   cada llamador.
 
 Una función de biblioteca que no puede editar se declara por nombre en una cabecera overlay:
-`// @longjmps(png_error)` o `// @contract png_error { longjmps }`. Una función que llama a `setjmp`
-es donde aterriza el salto; esa reentrada aún no está modelada, así que se reporta como
-`UNSUPPORTED_SETJMP`.
+`// @longjmps(png_error)` o `// @contract png_error { longjmps }`.
+
+`if (setjmp(b))` en el nivel superior de una función es donde aterriza un longjmp a `b` (también
+`!setjmp(b)` y `setjmp(b) == 0` / `!= 0`). Cada llamada posterior que puede saltar a `b` es un
+camino hacia la rama de aterrizaje, y kenbi analiza esa rama, y lo que la sigue, desde todos esos
+caminos: una liberación que no cuadra en alguno de ellos se reporta como en cualquier otro camino,
+por ejemplo un `DOUBLE_FREE` cuando el salto llega después de liberar la memoria. Si un salto va a
+`b` se lee de su jmp_buf declarado, escrito como una expresión en la que `$N` o un nombre de
+parámetro representa el argumento de la llamada:
+
+```c
+/* @contract png_error { longjmps: png_jmpbuf($1) } */   // en una cabecera overlay
+// @longjmps_to(parse_fail)                               // en línea, sobre una declaración
+```
+
+Un salto a otro búfer sale de la función; un salto cuyo búfer no está declarado es
+`UNKNOWN_LONGJMP_TARGET`, y un búfer declarado al que el cuerpo no salta es
+`LONGJMP_TARGET_MISMATCH`. Una variable local no `volatile`, modificada después del setjmp y leída
+en la rama de aterrizaje, es `SETJMP_CLOBBERED`: su valor ahí es indeterminado. Un setjmp en
+cualquier otra forma es `UNSUPPORTED_SETJMP`.
 
 ### Anotaciones de concurrencia (verificadas bajo `@threadsafe`, consultivas fuera de él)
 
@@ -547,8 +564,9 @@ nothrow — o un `new` simple — puede desenrollar; los propietarios RAII está
 por desenrollado llegan a los manejadores, que se comprueban desde su unión),
 `LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP` (un propietario crudo, o en C++
 un objeto con destructor no trivial, aún en ámbito donde una llamada puede hacer `longjmp`; una
-función que puede llegar a un longjmp sin declarar `@longjmps`), `UNSUPPORTED_SETJMP` (un punto de
-aterrizaje de `setjmp`, aún no modelado),
+función que puede llegar a un longjmp sin declarar `@longjmps`), `UNKNOWN_LONGJMP_TARGET` / `LONGJMP_TARGET_MISMATCH` (un salto cuyo jmp_buf no está declarado, o
+no es el declarado), `SETJMP_CLOBBERED` (una variable local no volatile leída donde aterriza un
+longjmp), `UNSUPPORTED_SETJMP` (un `setjmp` en una forma que kenbi no modela),
 `FINALLY_BYPASSED` (una salida con posesión que evita un embudo `@goto_finally` declarado),
 `FREE_NONHEAP` (un `free` de un puntero a la pila u otro almacenamiento no heap), `BORROW_MOVED` /
 `UNCONTRACTED_MOVE` (un move fuera de un préstamo, o hacia un callee que no declara recepción),

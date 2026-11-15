@@ -46,6 +46,10 @@
 ##                   reach a longjmp without declaring it is UNDECLARED_LONGJMP. `@longjmps(name)`
 ##                   and `@contract name { longjmps }` declare a function by NAME — the form for a
 ##                   library you cannot edit (libpng's `png_error`, …), in an overlay header.
+##   `@longjmps_to(e)` — the same, naming the jmp_buf it jumps to (`$N` and parameter names
+##                   stand for the call's arguments; `longjmps: e` in `@contract`). After a
+##                   `setjmp(b)` in the caller, a call whose target is `b` is a path back into
+##                   that landing site; one whose target is undeclared is UNKNOWN_LONGJMP_TARGET.
 
 import registry, ../cfront_core, ../ir
 
@@ -62,3 +66,4 @@ proc registerOwnership* =
   registerFuncFlag("@must_use")                       # flag: discarding the result is a finding
   registerFuncFlag("@nothrow", "nothrow")             # flag (C++): a call is not an unwinding exit
   registerFuncFlag("@longjmps", "longjmps")           # flag: a call may jump out of the caller
+  registerFuncFlag("@longjmps_to", "longjmps_to")     # ... to the jmp_buf named in the parameter

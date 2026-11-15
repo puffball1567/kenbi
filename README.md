@@ -13,7 +13,7 @@ looks like, and repeats until the checks report nothing. Memory safety becomes p
 agent's write loop rather than a review after the fact, and the annotations it writes stay in
 the code as rules kenbi keeps checking.
 
-> Status: **v0.1.1**, early development. The interfaces, the annotation vocabulary and the
+> Status: **v0.1.2**, early development. The interfaces, the annotation vocabulary and the
 > JSON output may still change.
 
 ## A first look
@@ -503,9 +503,26 @@ function declared `// @longjmps` as a possible one:
   caller.
 
 A library function you cannot edit is declared by name in an overlay header:
-`// @longjmps(png_error)` or `// @contract png_error { longjmps }`. A function that calls `setjmp`
-is where the jump lands; that re-entry is not modelled yet, so it is reported as
-`UNSUPPORTED_SETJMP`.
+`// @longjmps(png_error)` or `// @contract png_error { longjmps }`.
+
+`if (setjmp(b))` at the top level of a function is where a longjmp to `b` lands (also
+`!setjmp(b)` and `setjmp(b) == 0` / `!= 0`). Every call after it that may jump to `b` is a path
+into the landing branch, and kenbi analyses that branch, and what follows it, from all of those
+paths: a release that does not match on one of them is reported as on any other path, for
+example a `DOUBLE_FREE` when the jump comes after the memory was already freed. Whether a jump
+goes to `b` is read from its declared jmp_buf, written as an expression in which `$N` or a
+parameter name stands for the call's argument:
+
+```c
+/* @contract png_error { longjmps: png_jmpbuf($1) } */   // in an overlay header
+// @longjmps_to(parse_fail)                               // inline, above a declaration
+```
+
+A jump to another buffer leaves the function instead; a jump whose buffer is not declared is
+`UNKNOWN_LONGJMP_TARGET`, and a declared buffer that the body does not jump to is
+`LONGJMP_TARGET_MISMATCH`. A local that is not `volatile`, changed after the setjmp and read in
+the landing branch, is `SETJMP_CLOBBERED`: its value is indeterminate there. A setjmp in any
+other form is `UNSUPPORTED_SETJMP`.
 
 ### Concurrency annotations (verified under `@threadsafe`, advisory outside it)
 
@@ -559,8 +576,9 @@ guarantee — or a plain `new` — may unwind; RAII owners are exempt, `noexcept
 land in the handlers, which are checked from their join),
 `LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP` (a raw owner, or in C++ an
 object with a non-trivial destructor, still in scope where a call may `longjmp`; a function that
-can reach a longjmp without declaring `@longjmps`), `UNSUPPORTED_SETJMP` (a `setjmp` landing
-site, not modelled yet),
+can reach a longjmp without declaring `@longjmps`), `UNKNOWN_LONGJMP_TARGET` / `LONGJMP_TARGET_MISMATCH` (a jump whose jmp_buf is undeclared, or
+not the declared one), `SETJMP_CLOBBERED` (a non-volatile local read where a longjmp lands),
+`UNSUPPORTED_SETJMP` (a `setjmp` in a form kenbi does not model),
 `FINALLY_BYPASSED` (an owning exit bypasses a declared `@goto_finally` funnel),
 `FREE_NONHEAP` (a `free` of a pointer into stack or other non-heap storage), `BORROW_MOVED` /
 `UNCONTRACTED_MOVE` (a move out of a borrow, or into a callee that declares no intake),

@@ -156,9 +156,19 @@ the declared intent and reports where they disagree.
   that can reach a longjmp — directly or through a \`@longjmps\` callee — must declare
   \`// @longjmps\` itself, else \`UNDECLARED_LONGJMP\`: the declaration travels up to every
   caller. A library function is declared by name (\`// @longjmps(png_error)\`, or
-  \`longjmps\` in \`@contract\`). A function that calls \`setjmp\` is the landing site, not
-  modelled yet: \`UNSUPPORTED_SETJMP\`. Fix: release before the call, keep objects with a
+  \`longjmps\` in \`@contract\`). Fix: release before the call, keep objects with a
   destructor out of the scopes a jump can leave, or report the error another way.
+- \`if (setjmp(b))\` at a function's top level (also \`!setjmp(b)\`, \`setjmp(b) == 0\`) is where a
+  longjmp to \`b\` LANDS. Every later call that may jump to \`b\` is a path into the landing
+  branch, analysed with what follows it: a release that does not match on one path is reported
+  (e.g. \`DOUBLE_FREE\` when the jump comes after the free). Whether a jump goes to \`b\` comes
+  from its DECLARED jmp_buf: \`// @longjmps_to(<expr>)\` above a declaration, or
+  \`longjmps: <expr>\` in \`@contract\` — \`$N\` / a parameter name stands for the call's argument
+  (\`@contract png_error { longjmps: png_jmpbuf($1) }\`); \`longjmp\`'s own first argument needs no
+  declaration. Another buffer = the jump leaves the function; undeclared = \`UNKNOWN_LONGJMP_TARGET\`
+  (RED until declared); a body jumping elsewhere than declared = \`LONGJMP_TARGET_MISMATCH\`. A
+  non-volatile local changed after the setjmp and read in the landing branch is
+  \`SETJMP_CLOBBERED\` (declare it \`volatile\`). Any other setjmp form: \`UNSUPPORTED_SETJMP\`.
 - A LAMBDA body runs where it is CALLED: \`auto v = [..]{..};\` defines it, each \`v()\`
   runs it (so calling a cleanup lambda twice is a \`DOUBLE_FREE\`, and never calling it leaves
   the \`LEAK\`). A lambda handed to a callee or kept in a \`std::function\` runs at a time
@@ -256,7 +266,7 @@ the declared intent and reports where they disagree.
   is not a use-after-free risk.
 
 ## Declaring a contract from OUTSIDE the file
-- \`// @contract <Fn> { frees: p, borrows: q r, moves: s, owns, owns_out: t, must_use, nothrow, longjmps }\`
+- \`// @contract <Fn> { frees: p, borrows: q r, moves: s, owns, owns_out: t, must_use, nothrow, longjmps: <jmp_buf> }\`
   — the same ownership contracts as the inline annotations, but attached to a function BY NAME.
   The inline forms have to sit above a declaration, which a project you may not edit does not
   offer; this form lives in a force-included, comment-only overlay header, next to

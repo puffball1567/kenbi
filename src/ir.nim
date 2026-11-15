@@ -135,9 +135,14 @@ type
                  ## LONGJMP_SKIPS_DESTRUCTOR — C++ makes that jump undefined behaviour. `a` = the
                  ## callee; `b` = the in-scope locals whose destructors would be skipped, one
                  ## `name<TAB>type<TAB>line` per line; `off` = flags: 1 the call always jumps,
-                 ## 2 the enclosing function is declared `@longjmps`, 4 it calls `setjmp`.
-    ikSetjmp     ## a call to `setjmp` / `sigsetjmp`: the function is a landing site, re-entered
-                 ## by a later `longjmp`. Not modelled yet — refused in covered scope.
+                 ## 2 the enclosing function is declared `@longjmps`, 4 the jump returns to the
+                 ## landing site `off2` of this function (a `setjmp` on the same jmp_buf), so it
+                 ## is a path into that site rather than an exit; 8 the jump's target is not
+                 ## declared, so kenbi cannot tell (UNKNOWN_LONGJMP_TARGET).
+    ikSetjmp     ## a call to `setjmp` / `sigsetjmp` in a form kenbi does not model (anywhere
+                 ## but the condition of an `if` at the function's top level): refused.
+    ikSetjmpClobbered ## the landing branch reads `a`, a non-volatile local changed after the
+                 ## `setjmp` on line `off`: after a longjmp its value is indeterminate.
     ikLongjmpUnmodeled ## a call that may longjmp, in an expression position the front-end does
                  ## not lower (e.g. inside a lambda passed to a callee): refused in covered scope
                  ## rather than dropped. `a` = the callee.
@@ -396,6 +401,11 @@ type
     of stIf:
       thenBody*: seq[Stmt]
       elseBody*: seq[Stmt]
+      landingId*: int        ## > 0: the condition is a `setjmp`, and this is landing site N —
+                             ## one branch runs when it first returns (0), the other each time
+                             ## a longjmp returns into it. The latter is analysed from the
+                             ## states of every call that may jump here, after the function.
+      landingThen*: bool     ## the THEN branch is the one a longjmp lands in
       condKey*: string     ## if the condition is a null-test of a var: its key ("" = none)
       condDisp*: string    ## display name of that var
       condThenNonNull*: bool ## true: the THEN branch implies the var is non-null

@@ -38,7 +38,16 @@ type Ctx* = object  ## module-local state during a single parse (all fields publ
   longjmpFuncs*: HashSet[string]    ## functions declared `@longjmps` (by name): a call to one is
                                     ## a possible non-local jump out of the caller
   curFnLongjmps*: bool              ## the function being lowered is itself declared `@longjmps`
-  curFnSetjmp*: bool                ## ... calls `setjmp` (a landing site, not an exit)
+  longjmpTargets*: Table[string, string] ## function -> the jmp_buf it jumps to, as declared
+                                    ## (`@longjmps_to(e)` / `longjmps: e`); `$N` and parameter
+                                    ## names stand for the call's arguments
+  curFnTarget*: string              ## the jmp_buf the function being lowered declares it jumps
+                                    ## to, in its own parameter names ("" = none declared)
+  curLanding*: int                  ## the landing site (`if (setjmp(b))` at the top level) whose
+                                    ## region is being lowered, 0 outside one
+  landingBuf*: string               ## ... and its jmp_buf, as written (whitespace dropped)
+  landingLine*: int                 ## ... and the line of its setjmp
+  landingCount*: int                ## landing sites numbered so far in this translation unit
   longjmpEmitted*: HashSet[int]     ## offsets of the calls already lowered as ikMayLongjmp
   liveLocals*: seq[tuple[name, typ, disp: string, line: int]] ## C++: the automatic objects of class
                                     ## type in scope at this point of the function (their

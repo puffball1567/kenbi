@@ -6,7 +6,7 @@
 
 **为与 AI agent 一起编写 C/C++ 而设计。** 通过它的 [MCP 服务器](#与-ai-编程-agent-一起使用-mcp)，agent 检查自己刚写的 C/C++，询问某个结果为何出现、修复应是什么样子，并反复进行，直到检查不再报告任何问题。内存安全由此成为 agent 编写循环的一部分，而不是事后的审查；agent 写下的注解留在代码中，作为 kenbi 持续检查的规则。
 
-> 状态：**v0.1.1**，早期开发阶段。接口、注解词汇以及 JSON 输出仍可能变化。
+> 状态：**v0.1.2**，早期开发阶段。接口、注解词汇以及 JSON 输出仍可能变化。
 
 ## 初次一览
 
@@ -457,8 +457,23 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
   `UNDECLARED_LONGJMP`，因此该声明会一路传递到每个调用者。
 
 无法修改的库函数在覆盖头文件中按名称声明：`// @longjmps(png_error)` 或
-`// @contract png_error { longjmps }`。调用 `setjmp` 的函数是跳转的落点；对它的重新进入尚未建模，
-因此报告为 `UNSUPPORTED_SETJMP`。
+`// @contract png_error { longjmps }`。
+
+函数顶层的 `if (setjmp(b))` 是跳转到 `b` 的 longjmp 的落点（`!setjmp(b)`、`setjmp(b) == 0` /
+`!= 0` 亦然）。其后每个可能跳转到 `b` 的调用都是进入落点分支的一条路径，kenbi 从所有这些路径出发
+分析该分支及其后续：只要其中一条路径上的释放不匹配，就像在其他路径上一样报告，例如在内存已被释放
+之后发生跳转时报告 `DOUBLE_FREE`。跳转是否去往 `b` 由其声明的 jmp_buf 判断，以表达式书写，其中
+`$N` 或参数名代表调用的实参：
+
+```c
+/* @contract png_error { longjmps: png_jmpbuf($1) } */   // 写在覆盖头文件中
+// @longjmps_to(parse_fail)                               // 内联，写在声明上方
+```
+
+跳转到其他缓冲区则视为离开函数；未声明缓冲区的跳转是 `UNKNOWN_LONGJMP_TARGET`，函数体并未跳转到
+所声明缓冲区的是 `LONGJMP_TARGET_MISMATCH`。非 `volatile`、在 setjmp 之后被修改且在落点分支中被
+读取的局部变量是 `SETJMP_CLOBBERED`：它在那里的值是不确定的。其他形式的 setjmp 是
+`UNSUPPORTED_SETJMP`。
 
 ### 并发注解（在 `@threadsafe` 下验证，在其外为建议性）
 
@@ -510,7 +525,9 @@ use <var> | free <var> | move <var> | if / else / endif
 即为证明；在 `try` 内部，展开的出口落入处理程序，处理程序从其汇合点开始检查）、
 `LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` / `UNDECLARED_LONGJMP`（在可能 `longjmp` 的调用处
 仍在作用域内的原始所有者，或 C++ 中带有非平凡析构函数的对象；能到达 longjmp 却未声明 `@longjmps`
-的函数）、`UNSUPPORTED_SETJMP`（`setjmp` 落点，尚未建模）、
+的函数）、`UNKNOWN_LONGJMP_TARGET` / `LONGJMP_TARGET_MISMATCH`（jmp_buf 未声明或与声明不符的跳转）、
+`SETJMP_CLOBBERED`（在 longjmp 落点读取的非 volatile 局部变量）、`UNSUPPORTED_SETJMP`（kenbi
+不建模的形式的 `setjmp`）、
 `FINALLY_BYPASSED`（一个持有资源的出口绕过了声明的 `@goto_finally` 漏斗）、
 `FREE_NONHEAP`（对指向栈或其他非堆存储的指针执行 `free`）、`BORROW_MOVED` /
 `UNCONTRACTED_MOVE`（从借用中移出，或移入一个未声明接收的被调用者）、
