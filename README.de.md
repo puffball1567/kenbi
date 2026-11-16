@@ -504,13 +504,19 @@ Ausgang und einen Aufruf einer mit `// @longjmps` deklarierten Funktion als mög
 Eine Bibliotheksfunktion, die Sie nicht ändern können, wird in einem Overlay-Header per Namen
 deklariert: `// @longjmps(png_error)` oder `// @contract png_error { longjmps }`.
 
-`if (setjmp(b))` auf oberster Ebene einer Funktion ist der Landepunkt eines longjmp nach `b`
-(ebenso `!setjmp(b)` und `setjmp(b) == 0` / `!= 0`). Jeder spätere Aufruf, der nach `b` springen
-kann, ist ein Pfad in den Landezweig, und kenbi analysiert diesen Zweig und was ihm folgt von all
+Ein `if` oder `switch`, dessen gesamte Bedingung ein setjmp ist, ist der Landepunkt eines longjmp
+nach `b`: `if (setjmp(b))`, `!setjmp(b)`, `setjmp(b) == 0` / `!= 0` oder `switch (setjmp(b))`,
+wobei case 0 die erste Rückkehr ist und die übrigen Fälle die Landepunkte eines Sprungs sind. Er
+darf in beliebiger Tiefe der Funktion stehen. Jeder Aufruf, der nach `b` springen kann, ist ein
+Pfad in den Code, in dem er landet, und kenbi analysiert diesen Code und was ihm folgt von all
 diesen Pfaden aus: Eine Freigabe, die auf einem davon nicht passt, wird gemeldet wie auf jedem
-anderen Pfad, etwa ein `DOUBLE_FREE`, wenn der Sprung erst nach der Freigabe erfolgt. Ob ein
-Sprung nach `b` geht, wird aus seinem deklarierten jmp_buf gelesen, geschrieben als Ausdruck, in
-dem `$N` oder ein Parametername für das Argument des Aufrufs steht:
+anderen Pfad, etwa ein `DOUBLE_FREE`, wenn der Sprung erst nach der Freigabe erfolgt. Ein Sprung
+kehrt zu einem setjmp zurück, der vor ihm ausgeführt wurde: weiter vorn im Quelltext oder weiter
+hinten in einer Schleife um beide. Ist kein solcher setjmp sicher ausgeführt (einer in einem
+`if`-Block oder der erste Durchlauf einer Schleife), kann der Sprung auch die Funktion verlassen
+und wird zusätzlich als Ausgang geprüft. Ob ein Sprung nach `b` geht, wird aus seinem deklarierten
+jmp_buf gelesen, geschrieben als Ausdruck, in dem `$N` oder ein Parametername für das Argument des
+Aufrufs steht:
 
 ```c
 /* @contract png_error { longjmps: png_jmpbuf($1) } */   // in einem Overlay-Header
@@ -521,7 +527,8 @@ Ein Sprung zu einem anderen Puffer verlässt stattdessen die Funktion; ein Sprun
 Puffer ist `UNKNOWN_LONGJMP_TARGET`, und ein deklarierter Puffer, zu dem der Rumpf nicht springt,
 ist `LONGJMP_TARGET_MISMATCH`. Eine lokale Variable, die nicht `volatile` ist, nach dem setjmp
 geändert und im Landezweig gelesen wird, ist `SETJMP_CLOBBERED`: Ihr Wert ist dort unbestimmt.
-Ein setjmp in jeder anderen Form ist `UNSUPPORTED_SETJMP`.
+Ein setjmp in jeder anderen Form (als Ausdrucksanweisung, als Schleifenbedingung, in einer
+Zuweisung oder in einem `try`-Block) ist `UNSUPPORTED_SETJMP`.
 
 ### Nebenläufigkeits-Annotationen (verifiziert unter `@threadsafe`, Advisory außerhalb)
 

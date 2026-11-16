@@ -1022,21 +1022,108 @@ proc landingCondition(ctx: Ctx, ifStmt: CXCursor): tuple[ok: bool, call: CXCurso
         if isSetjmpCall(call) and v.known and v.value == 0:
           return (true, unwrap(call), op == "!=")
 
-proc clobberedLocals(ctx: Ctx, fn, body, landing: CXCursor, sjOff: int): HashSet[string] =
-  ## The locals and parameters a longjmp back to the setjmp at offset `sjOff` leaves
-  ## indeterminate (C11 7.13.2.1): automatic, not volatile, declared before the setjmp and
-  ## changed after it — assigned, incremented, or exposed by `&` — outside the landing branch.
+proc switchSetjmp(c: CXCursor): tuple[ok: bool, call: CXCursor] =
+  ## Is this `switch` on a setjmp — `switch (setjmp(b))`, the call as its whole condition?
+  let kids = collectChildren(c)
+  if kids.len >= 2 and isSetjmpCall(kids[0]): return (true, unwrap(kids[0]))
+  (false, c)
+
+proc findLandingSites(ctx: var Ctx, body: CXCursor) =
+  ## The landing sites of one function body, numbered, with what decides where a jump goes:
+  ## the region each one dominates and the loops around it. A setjmp inside a `try` or a
+  ## lambda is not one (it stays refused where it is lowered).
+  ctx.landingSites = @[]
+  var labels = initTable[string, tuple[off, line: int]]()
+  var gotos: seq[tuple[off, last: int, name: string]]
+  proc walk(ctx: var Ctx, n: CXCursor, regionEnd: int, inTry, switchBody: bool,
+            loops: seq[tuple[first, last, line: int]],
+            labels: var Table[string, tuple[off, line: int]],
+            gotos: var seq[tuple[off, last: int, name: string]]) =
+    let k = clang_getCursorKind(n)
+    if k == ckLambdaExpr: return
+    if k == ckLabelStmt: labels[spelling(n)] = (startOffset(n), startLine(n))
+    if k == ckGotoStmt:
+      gotos.add (startOffset(n), endOffset(n), spelling(clang_getCursorReferenced(n)))
+    if not inTry and (k == ckIfStmt or k == ckSwitchStmt):
+      var ok = false
+      var call = n
+      var thenLands = false
+      if k == ckIfStmt:
+        let lc = ctx.landingCondition(n)
+        (ok, call, thenLands) = (lc.ok, lc.call, lc.thenLands)
+      else:
+        (ok, call) = switchSetjmp(n)
+      if ok:
+        # the jmp_buf as written: from the statement's own tokens — `setjmp` is usually a
+        # macro, and the expanded condition has no source extent of its own to read
+        let toks = ctx.cursorTokens(n)
+        var at = 0
+        while at < toks.len and toks[at] notin setjmpCallees: inc at
+        let args = argsAfter(toks, at)
+        inc ctx.landingCount
+        ctx.landingSites.add LandingSite(id: ctx.landingCount, stmtOff: startOffset(n),
+          callOff: startOffset(call), line: startLine(call),
+          buf: (if at < toks.len and args.len > 0: args[0] else: ""), thenLands: thenLands,
+          regionEnd: regionEnd, loops: loops)
+    var inner = loops
+    if k in [ckForStmt, ckWhileStmt, ckDoStmt, ckCXXForRangeStmt]:
+      inner.add (startOffset(n), endOffset(n), startLine(n))
+    let tryHere = inTry or k == ckCXXTryStmt
+    let kids = collectChildren(n)
+    if k == ckCompoundStmt:
+      # a statement runs before the rest of its block — in a switch body, up to the next case
+      # label, through which control can enter without it
+      for i, ch in kids:
+        var e = endOffset(n)
+        if switchBody:
+          for j in i + 1 ..< kids.len:
+            if clang_getCursorKind(kids[j]) in [ckCaseStmt, ckDefaultStmt]:
+              e = startOffset(kids[j]); break
+        ctx.walk(ch, e, tryHere, false, inner, labels, gotos)
+    elif k in [ckCaseStmt, ckDefaultStmt, ckLabelStmt]:
+      for ch in kids: ctx.walk(ch, regionEnd, tryHere, false, inner, labels, gotos)
+    else:
+      for ch in kids:
+        ctx.walk(ch, endOffset(ch), tryHere,
+                 k == ckSwitchStmt and clang_getCursorKind(ch) == ckCompoundStmt,
+                 inner, labels, gotos)
+  ctx.walk(body, endOffset(body), false, false, @[], labels, gotos)
+  for site in ctx.landingSites.mitems:
+    for g in gotos:
+      if g.name notin labels: continue
+      let l = labels[g.name]
+      # a goto back to a label before it is a loop, as `for` is
+      if l.off < g.off and site.callOff >= l.off and site.callOff < g.last:
+        site.loops.add (l.off, g.last, l.line)
+      # a goto from outside the region to a label inside it enters the region past the setjmp
+      if l.off > site.callOff and l.off < site.regionEnd and
+         (g.off < site.callOff or g.off >= site.regionEnd):
+        site.regionEnd = l.off
+
+proc clobberedLocals(ctx: Ctx, fn, body: CXCursor, site: LandingSite,
+                     landing: seq[tuple[first, last: int]]): HashSet[string] =
+  ## The locals and parameters a longjmp back to `site` leaves indeterminate (C11 7.13.2.1):
+  ## automatic, not volatile, declared before the setjmp and changed after it — assigned,
+  ## incremented, or exposed by `&` — outside the code the jump returns into (`landing`).
+  ## "After" includes code before the setjmp in a loop around it: it runs again after the
+  ## setjmp on the next iteration.
   var cands, written: HashSet[string]
-  let lFirst = startOffset(landing)
-  let lLast = endOffset(landing)
+  let sjOff = site.callOff
   proc notVolatile(d: CXCursor): bool =
     clang_isVolatileQualifiedType(clang_getCursorType(d)) == 0
+  proc afterSetjmp(off: int): bool =
+    var later = off > sjOff
+    for l in site.loops:
+      if off >= l.first and off < l.last: later = true
+    for r in landing:
+      if off >= r.first and off < r.last: later = false
+    later
   for p in collectChildren(fn):
     if clang_getCursorKind(p) == ckParmDecl and notVolatile(p): cands.incl usr(p)
   proc walk(ctx: Ctx, n: CXCursor, cands, written: var HashSet[string]) =
     let k = clang_getCursorKind(n)
     let off = startOffset(n)
-    let after = off > sjOff and not (off >= lFirst and off < lLast)
+    let after = afterSetjmp(off)
     if k == ckVarDecl and off < sjOff and hasAutomaticStorage(n) and notVolatile(n):
       cands.incl usr(n)
     elif after and (k == ckBinaryOperator or k == ckCompoundAssign):
@@ -1054,6 +1141,12 @@ proc clobberedLocals(ctx: Ctx, fn, body, landing: CXCursor, sjOff: int): HashSet
   ctx.walk(body, cands, written)
   for k in cands:
     if k in written: result.incl k
+
+proc landingSiteAt(ctx: Ctx, stmtOff: int): int =
+  ## The landing site whose `if` / `switch` starts at `stmtOff`, or -1.
+  for i, site in ctx.landingSites:
+    if site.stmtOff == stmtOff: return i
+  -1
 
 proc emitLongjmp(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt]) =
   ## The possible non-local jump of one call, emitted once (several lowering paths reach the
@@ -1075,26 +1168,48 @@ proc emitLongjmp(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt]) =
     locals.add l.name & "\t" & l.typ & "\t" & $l.line & "\t" & l.disp & "\n"
   var flags = (if kind == 2: 1 else: 0) or (if ctx.curFnLongjmps: 2 else: 0)
   var targets = ""
-  if ctx.curLanding > 0:
-    # after a setjmp: does this jump return to it (an edge into the landing site) or leave?
+  # WHERE THE JUMP GOES. A landing site of this function on the jump's jmp_buf may have run
+  # before this call if it comes earlier in the source or shares a loop with it; it certainly
+  # has if this call is in the region it dominates. The jump returns to the latest of those
+  # that ran — a site before a dominating one is not it — and if none certainly ran, the
+  # jmp_buf may still hold a caller's setjmp, so the jump may also leave the function.
+  var cands = ""
+  if ctx.landingSites.len > 0:
     let target = ctx.longjmpTarget(u, kind)
-    if target.len == 0: flags = flags or 4 or 8       # undeclared: cannot tell — RED
-    elif target == ctx.landingBuf: flags = flags or 4
-  if (flags and 4) != 0:
-    # a jump back to this function's own setjmp leaves only the objects declared after it
-    var kept = ""
-    for l in ctx.liveLocals:
-      if l.line > ctx.landingLine:
-        kept.add l.name & "\t" & l.typ & "\t" & $l.line & "\t" & l.disp & "\n"
-    locals = kept
-  if (flags and 4) == 0 and ctx.curFnTarget.len > 0:
-    # this jump leaves the function: it must go where the function declares it jumps
+    var possible: seq[tuple[idx, keepLine: int]]
+    var lastDom = -1
+    for i, site in ctx.landingSites:
+      if target.len > 0 and site.buf != target: continue
+      var keepLine = -1
+      if site.callOff < at: keepLine = site.line
+      else:
+        # later in the source, but in a loop around both: reached on an earlier iteration, and
+        # the jump back leaves what this iteration declared since the loop began
+        var inner = -1
+        for l in site.loops:
+          if at >= l.first and at < l.last and l.first > inner:
+            inner = l.first
+            keepLine = l.line - 1
+      if keepLine < 0: continue
+      possible.add (i, keepLine)
+      if target.len > 0 and at >= site.callOff and at < site.regionEnd:
+        lastDom = max(lastDom, site.callOff)
+    for p in possible:
+      if ctx.landingSites[p.idx].callOff < lastDom: continue   # a later setjmp replaced it
+      if cands.len > 0: cands.add ","
+      cands.add $ctx.landingSites[p.idx].id & ":" & $p.keepLine
+    if possible.len > 0:
+      flags = flags or 4
+      if target.len == 0: flags = flags or 8        # undeclared: cannot tell — RED
+      elif lastDom < 0: flags = flags or 32         # no matching setjmp certainly ran
+  if ((flags and 4) == 0 or (flags and 32) != 0) and ctx.curFnTarget.len > 0:
+    # this jump may leave the function: it must go where the function declares it jumps
     let target = ctx.longjmpTarget(u, kind)
     if target != ctx.curFnTarget:
       flags = flags or 16
       targets = ctx.curFnTarget & "\t" & target
   outp.add emit(ikMayLongjmp, line, a = spelling(u), b = locals, off = flags,
-                off2 = ctx.curLanding, cKey = targets)
+                bKey = cands, cKey = targets)
 
 proc destructibleType(ctx: Ctx, d: CXCursor): string =
   ## C++: the canonical spelling of the type of local or parameter `d` when it is a class type
@@ -3716,6 +3831,9 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
       ctx.lowerStmt(u, outp)
   of ckIfStmt:
     let kids = collectChildren(c)
+    # a landing site: its setjmp is modelled here, not refused as a call
+    let site = ctx.landingSiteAt(startOffset(c))
+    if site >= 0: ctx.longjmpEmitted.incl ctx.landingSites[site].callOff
     # IfStmt children: [cond, then, (else)]
     if kids.len >= 1:
       ctx.scanDerefs(kids[0], outp)   # derefs in the condition run before the branch
@@ -3745,12 +3863,24 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
       s.thenBody = ctx.lowerBody(@[kids[1]])
     if kids.len >= 3:
       s.elseBody = ctx.lowerBody(@[kids[2]])
+    if site >= 0:
+      # LANDING SITE: one branch runs when the setjmp first returns, the other each time a
+      # longjmp returns into it — lowered again once the whole body has been
+      let ls = ctx.landingSites[site]
+      s.landingId = ls.id
+      s.landingThen = ls.thenLands
+      let landIdx = (if ls.thenLands: 1 else: 2)
+      var rec = LandingRec(site: s, siteIdx: site, live: ctx.liveLocals)
+      rec.parts.add ((if landIdx < kids.len: @[kids[landIdx]] else: @[]), -1, false)
+      ctx.landingRecs.add rec
     outp.add s
   of ckSwitchStmt:
     # SwitchStmt children: [cond, body(CompoundStmt)]. Group the body's statements
     # into per-case bodies (a CaseStmt's child begins a group; following siblings
     # append until the next label). Each group becomes an independent branch.
     let kids = collectChildren(c)
+    let site = ctx.landingSiteAt(startOffset(c))
+    if site >= 0: ctx.longjmpEmitted.incl ctx.landingSites[site].callOff
     if kids.len >= 1:
       ctx.scanDerefs(kids[0], outp)   # derefs in the condition
       ctx.lowerExprCalls(kids[0], outp)  # a call in `switch (f(p))` escapes/contracts its args
@@ -3777,13 +3907,21 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
       var cur: seq[CXCursor]
       var pendingVal = low(int)                # the single const value of the group accumulating
       var pendingDefault = false               # the group accumulating carries a `default:` label
+      # LANDING SITE: which groups a setjmp's 0 (first return) and non-zero (a longjmp's
+      # return) can enter — a label that does not evaluate counts as either
+      var groupZero, groupOther: seq[bool]
+      var pendingZero, pendingOther = false
       for child in collectChildren(bodyCur):
         let ck = clang_getCursorKind(child)
         if ck == ckCaseStmt or ck == ckDefaultStmt:
           if ck == ckDefaultStmt: s.hasDefault = true
-          if cur.len > 0: groups.add cur; groupVals.add pendingVal; groupIsDefault.add pendingDefault
+          if cur.len > 0:
+            groups.add cur; groupVals.add pendingVal; groupIsDefault.add pendingDefault
+            groupZero.add pendingZero; groupOther.add pendingOther
           cur = @[]
           pendingDefault = (ck == ckDefaultStmt)
+          pendingZero = false
+          pendingOther = false
           var cs = child                       # unwrap (possibly nested) labels
           var labelCount = 0
           var caseVal = low(int)
@@ -3794,6 +3932,8 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
               if lk.len >= 1:
                 let v = constIntValue(unwrap(lk[0]))
                 if v.known: caseVal = int(v.value)
+                if not v.known or v.value == 0: pendingZero = true
+                if not v.known or v.value != 0: pendingOther = true
             let cks = collectChildren(cs)
             if cks.len == 0: break
             cs = cks[^1]                        # the wrapped statement (value is first)
@@ -3803,7 +3943,9 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
                         else: low(int))
         else:
           cur.add child
-      if cur.len > 0: groups.add cur; groupVals.add pendingVal; groupIsDefault.add pendingDefault
+      if cur.len > 0:
+        groups.add cur; groupVals.add pendingVal; groupIsDefault.add pendingDefault
+        groupZero.add pendingZero; groupOther.add pendingOther
       # Constant-condition fold: `switch (6)` (a literal / `const` value) selects ONE group — the
       # case whose single constant label equals it, else the `default:` group, else none. Only
       # that group is live; lowering the others (as the join of every case does) analyses paths
@@ -3829,6 +3971,23 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
           return
       for g in groups: s.cases.add ctx.lowerBody(g)
       s.caseValues = groupVals
+      if site >= 0:
+        # LANDING SITE: 0 enters the group labelled 0, else `default:`, else none; a longjmp's
+        # non-zero value any other labelled group or `default:`, else none. The groups it can
+        # enter are lowered again once the whole body has been.
+        var anyZero = false
+        for z in groupZero: anyZero = anyZero or z
+        s.switchLandingId = ctx.landingSites[site].id
+        s.firstNoMatch = not anyZero and not s.hasDefault
+        s.landingNoMatch = not s.hasDefault
+        var rec = LandingRec(site: s, siteIdx: site, live: ctx.liveLocals)
+        for i in 0 ..< groups.len:
+          let first = groupZero[i] or (groupIsDefault[i] and not anyZero)
+          let lands = groupOther[i] or groupIsDefault[i]
+          s.caseFirst.add first
+          s.caseLanding.add false
+          if lands: rec.parts.add (groups[i], i, first)
+        ctx.landingRecs.add rec
       outp.add s
   of ckForStmt, ckWhileStmt, ckDoStmt:
     # Lower the loop body into a stLoop node. The for-init (a DeclStmt, run once
@@ -5252,8 +5411,8 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
     # LONGJMP: what this function declares, whether it is a landing site, and the objects in
     # scope from the start — its by-value class parameters, whose destructors run on return.
     ctx.curFnLongjmps = spelling(c) in ctx.longjmpFuncs or qualName(c) in ctx.longjmpFuncs
-    ctx.curLanding = 0
-    ctx.landingBuf = ""
+    ctx.landingRecs = @[]
+    ctx[].findLandingSites(body)
     # the declared jump target, with `$N` written as this definition's own parameter names, so
     # the longjmps in the body can be checked against it
     ctx.curFnTarget = ""
@@ -5440,85 +5599,66 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
           ctx.tracked[fk] = true
           ctx.raiiVars[fk] = f.cls
           fn.body.add emit(ikRaiiAlloc, startLine(c), a = "this->" & f.name, b = f.cls, aKey = fk)
-    var landings: seq[tuple[site: Stmt, branch: CXCursor, has: bool, id, sjLineAt: int, buf: string,
-                            live: seq[tuple[name, typ, disp: string, line: int]], sjOff, sjLine: int]]
     for child in collectChildren(body):
-      let lc = (if clang_getCursorKind(child) == ckIfStmt: ctx[].landingCondition(child)
-                else: (ok: false, call: child, thenLands: false))
-      if not lc.ok:
-        ctx[].lowerStmt(child, fn.body)
-        continue
-      # LANDING SITE: `if (setjmp(b))` at the top level. Everything lowered from here on is in
-      # its region: a call that may jump to `b` is an edge back into it, not an exit.
-      inc ctx.landingCount
-      ctx.curLanding = ctx.landingCount
-      # the jmp_buf as written: from the `if` statement's own tokens — `setjmp` is usually a
-      # macro, and the expanded condition has no source extent of its own to read
-      let condToks = ctx[].cursorTokens(child)
-      var at = 0
-      while at < condToks.len and condToks[at] notin setjmpCallees: inc at
-      let sjArgs = argsAfter(condToks, at)
-      ctx.landingBuf = (if at < condToks.len and sjArgs.len > 0: sjArgs[0] else: "")
-      ctx.longjmpEmitted.incl startOffset(lc.call)       # modelled here, not refused
-      ctx.landingLine = startLine(lc.call)
-      let liveAtSite = ctx.liveLocals
-      let mark = fn.body.len
       ctx[].lowerStmt(child, fn.body)
-      var site: Stmt = nil
-      for i in mark ..< fn.body.len:
-        if fn.body[i].kind == stIf: site = fn.body[i]; break
-      if site == nil:
-        fn.body.add emit(ikSetjmp, startLine(lc.call), a = spelling(lc.call))
-        continue
-      site.landingId = ctx.curLanding
-      site.landingThen = lc.thenLands
-      let kids = collectChildren(child)
-      let landIdx = (if lc.thenLands: 1 else: 2)
-      landings.add (site, (if landIdx < kids.len: kids[landIdx] else: child), landIdx < kids.len,
-                    ctx.curLanding, ctx.landingLine, ctx.landingBuf, liveAtSite, startOffset(lc.call),
-                    startLine(lc.call))
-    # LANDING BRANCHES, lowered again now that the whole body has been: the branch runs when a
-    # longjmp returns, after code that comes later in the source — `rows = malloc(…)` below the
-    # setjmp is what its `free(rows)` releases, and a first lowering at the setjmp saw `rows` as
-    # untracked. Scope and landing site are restored to what they were at the setjmp.
-    for ld in landings:
-      var landBody: seq[Stmt]
-      if ld.has:
-        let first = startOffset(ld.branch)
-        let last = endOffset(ld.branch)
-        var keep = initHashSet[int]()
-        for o in ctx.longjmpEmitted:
-          if o < first or o >= last: keep.incl o
-        let savedEmitted = ctx.longjmpEmitted
-        let savedLive = ctx.liveLocals
-        let (savedLanding, savedBuf, savedLine) = (ctx.curLanding, ctx.landingBuf, ctx.landingLine)
-        ctx.longjmpEmitted = keep
-        ctx.liveLocals = ld.live
-        ctx.curLanding = ld.id
-        ctx.landingBuf = ld.buf
-        ctx.landingLine = ld.sjLineAt
-        ctx[].lowerStmt(ld.branch, landBody)
-        for o in savedEmitted: ctx.longjmpEmitted.incl o
-        ctx.liveLocals = savedLive
-        ctx.curLanding = savedLanding
-        ctx.landingBuf = savedBuf
-        ctx.landingLine = savedLine
-        # a non-volatile local changed after the setjmp is indeterminate where the jump lands
-        let clobbered = ctx[].clobberedLocals(c, body, ld.branch, ld.sjOff)
-        var reads: seq[Stmt]
-        var seen = initHashSet[string]()
-        proc findReads(n: CXCursor, clobbered: HashSet[string], seen: var HashSet[string],
-                       reads: var seq[Stmt], sjLine: int) =
-          if clang_getCursorKind(n) == ckDeclRefExpr:
-            let k = referencedUsr(n)
-            if k in clobbered and k notin seen:
-              seen.incl k
-              reads.add emit(ikSetjmpClobbered, startLine(n), a = spelling(n), off = sjLine)
-          for ch in collectChildren(n): findReads(ch, clobbered, seen, reads, sjLine)
-        findReads(ld.branch, clobbered, seen, reads, ld.sjLine)
-        landBody = reads & landBody
-      if ld.site.landingThen: ld.site.thenBody = landBody
-      else: ld.site.elseBody = landBody
+    # LANDING PARTS, lowered again now that the whole body has been: the code a longjmp returns
+    # into runs after code that comes later in the source — `rows = malloc(…)` below the setjmp
+    # is what its `free(rows)` releases, and a first lowering at the setjmp saw `rows` as
+    # untracked. Scope is restored to what it was at the setjmp. A site nested in a landing
+    # part adds its own record as that part is lowered again.
+    var ri = 0
+    while ri < ctx.landingRecs.len:
+      let rec = ctx.landingRecs[ri]
+      inc ri
+      let site = ctx.landingSites[rec.siteIdx]
+      var ranges: seq[tuple[first, last: int]]
+      var landingOnly: seq[tuple[first, last: int]]
+      for part in rec.parts:
+        if part.stmts.len == 0: continue
+        let r = (startOffset(part.stmts[0]), endOffset(part.stmts[^1]))
+        ranges.add r
+        if not part.dual: landingOnly.add r
+      # a non-volatile local changed after the setjmp is indeterminate where the jump lands
+      let clobbered = ctx[].clobberedLocals(c, body, site, landingOnly)
+      for part in rec.parts:
+        var landBody: seq[Stmt]
+        if part.stmts.len > 0:
+          let first = startOffset(part.stmts[0])
+          let last = endOffset(part.stmts[^1])
+          var keep = initHashSet[int]()
+          for o in ctx.longjmpEmitted:
+            if o < first or o >= last: keep.incl o
+          let savedEmitted = ctx.longjmpEmitted
+          let savedLive = ctx.liveLocals
+          ctx.longjmpEmitted = keep
+          ctx.liveLocals = rec.live
+          landBody = ctx[].lowerBody(part.stmts)
+          for o in savedEmitted: ctx.longjmpEmitted.incl o
+          ctx.liveLocals = savedLive
+          var reads: seq[Stmt]
+          var seen = initHashSet[string]()
+          proc findReads(n: CXCursor, clobbered: HashSet[string], seen: var HashSet[string],
+                         reads: var seq[Stmt], sjLine: int) =
+            if clang_getCursorKind(n) == ckDeclRefExpr:
+              let k = referencedUsr(n)
+              if k in clobbered and k notin seen:
+                seen.incl k
+                reads.add emit(ikSetjmpClobbered, startLine(n), a = spelling(n), off = sjLine)
+            for ch in collectChildren(n): findReads(ch, clobbered, seen, reads, sjLine)
+          for st in part.stmts: findReads(st, clobbered, seen, reads, site.line)
+          landBody = reads & landBody
+        if rec.site.kind == stIf:
+          if rec.site.landingThen: rec.site.thenBody = landBody
+          else: rec.site.elseBody = landBody
+        elif part.dual:
+          # entered on the first return too: keep that lowering, add this one for the landing
+          rec.site.cases.add landBody
+          rec.site.caseValues.add rec.site.caseValues[part.caseIdx]
+          rec.site.caseFirst.add false
+          rec.site.caseLanding.add true
+        else:
+          rec.site.cases[part.caseIdx] = landBody
+          rec.site.caseLanding[part.caseIdx] = true
     # a call that may longjmp in a position the lowering never reached is refused, not dropped
     var unlowered: seq[tuple[line: int, callee: string]]
     var unloweredSeen = initHashSet[int]()

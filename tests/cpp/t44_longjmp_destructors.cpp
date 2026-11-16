@@ -79,6 +79,30 @@ void own_landing(int c) {
   fail_env(c);                                  //EXPECT LONGJMP_SKIPS_DESTRUCTOR
 }
 
+// ... the same in a `switch` inside a block, which the jump also leaves
+void own_landing_nested(int c) {
+  std::string before = "kept";
+  {
+    switch (setjmp(env)) {
+    case 0: break;
+    default: return;
+    }
+    std::string inner = "lost";
+    fail_env(c);                                //EXPECT LONGJMP_SKIPS_DESTRUCTOR
+  }
+}
+
+// ... and in a loop, a jump from before the setjmp on a later iteration: what this iteration
+// declared is left (on the first iteration no setjmp has run, so the jump may also leave)
+// @longjmps
+void own_landing_loop(int n) {
+  for (int i = 0; i < n; i++) {
+    std::string item = "lost";
+    fail_env(i);                                //EXPECT LONGJMP_SKIPS_DESTRUCTOR
+    if (setjmp(env)) return;
+  }
+}
+
 // a jump from a lambda handed to another function: kenbi does not follow when it runs — refused
 template <class F> void run(F f) { f(); }
 // @longjmps

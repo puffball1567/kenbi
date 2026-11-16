@@ -485,13 +485,18 @@ uma chamada a uma função declarada `// @longjmps` como uma saída possível:
 Uma função de biblioteca que você não pode editar é declarada pelo nome em um cabeçalho overlay:
 `// @longjmps(png_error)` ou `// @contract png_error { longjmps }`.
 
-`if (setjmp(b))` no nível superior de uma função é onde aterrissa um longjmp para `b` (também
-`!setjmp(b)` e `setjmp(b) == 0` / `!= 0`). Cada chamada posterior que pode saltar para `b` é um
-caminho para o ramo de aterrissagem, e o kenbi analisa esse ramo, e o que vem depois dele, a
-partir de todos esses caminhos: uma liberação que não bate em algum deles é reportada como em
-qualquer outro caminho, por exemplo um `DOUBLE_FREE` quando o salto vem depois de a memória ter sido
-liberada. Se um salto vai para `b` é lido do seu jmp_buf declarado, escrito como uma expressão em
-que `$N` ou um nome de parâmetro representa o argumento da chamada:
+Um `if` ou um `switch` cuja condição inteira é um setjmp é onde aterrissa um longjmp para `b`:
+`if (setjmp(b))`, `!setjmp(b)`, `setjmp(b) == 0` / `!= 0` ou `switch (setjmp(b))`, em que o case 0
+é o primeiro retorno e os demais casos são onde um salto aterrissa. Pode estar em qualquer
+profundidade da função. Cada chamada que pode saltar para `b` é um caminho para o código onde ele
+aterrissa, e o kenbi analisa esse código, e o que vem depois dele, a partir de todos esses
+caminhos: uma liberação que não bate em algum deles é reportada como em qualquer outro caminho, por
+exemplo um `DOUBLE_FREE` quando o salto vem depois de a memória ter sido liberada. Um salto volta a
+um setjmp executado antes dele: mais acima no código, ou mais abaixo dentro de um laço que envolve
+ambos. Quando nenhum foi executado com certeza (um setjmp dentro de um bloco `if`, ou a primeira
+iteração de um laço), o salto também pode sair da função, e é verificado também como uma saída. Se
+um salto vai para `b` é lido do seu jmp_buf declarado, escrito como uma expressão em que `$N` ou um
+nome de parâmetro representa o argumento da chamada:
 
 ```c
 /* @contract png_error { longjmps: png_jmpbuf($1) } */   // em um cabeçalho overlay
@@ -502,7 +507,8 @@ Um salto para outro buffer sai da função; um salto cujo buffer não está decl
 `UNKNOWN_LONGJMP_TARGET`, e um buffer declarado para o qual o corpo não salta é
 `LONGJMP_TARGET_MISMATCH`. Uma variável local não `volatile`, alterada depois do setjmp e lida no
 ramo de aterrissagem, é `SETJMP_CLOBBERED`: seu valor ali é indeterminado. Um setjmp em qualquer
-outra forma é `UNSUPPORTED_SETJMP`.
+outra forma (uma instrução de expressão, a condição de um laço, uma atribuição ou dentro de um
+bloco `try`) é `UNSUPPORTED_SETJMP`.
 
 ### Anotações de concorrência (verificadas sob `@threadsafe`, consultivas fora dele)
 

@@ -505,13 +505,17 @@ function declared `// @longjmps` as a possible one:
 A library function you cannot edit is declared by name in an overlay header:
 `// @longjmps(png_error)` or `// @contract png_error { longjmps }`.
 
-`if (setjmp(b))` at the top level of a function is where a longjmp to `b` lands (also
-`!setjmp(b)` and `setjmp(b) == 0` / `!= 0`). Every call after it that may jump to `b` is a path
-into the landing branch, and kenbi analyses that branch, and what follows it, from all of those
-paths: a release that does not match on one of them is reported as on any other path, for
-example a `DOUBLE_FREE` when the jump comes after the memory was already freed. Whether a jump
-goes to `b` is read from its declared jmp_buf, written as an expression in which `$N` or a
-parameter name stands for the call's argument:
+An `if` or a `switch` whose whole condition is a setjmp is where a longjmp to `b` lands:
+`if (setjmp(b))`, `!setjmp(b)`, `setjmp(b) == 0` / `!= 0`, or `switch (setjmp(b))`, where case 0
+is the first return and the other cases are where a jump lands. It may be at any depth of the
+function. Every call that may jump to `b` is a path into the code it lands in, and kenbi analyses
+that code, and what follows it, from all of those paths: a release that does not match on one of
+them is reported as on any other path, for example a `DOUBLE_FREE` when the jump comes after the
+memory was already freed. A jump returns to a setjmp that ran before it: earlier in the source,
+or later in a loop around both. When no such setjmp is certain to have run (one inside an `if`
+block, or the first iteration of a loop), the jump may also leave the function, and is checked as
+an exit too. Whether a jump goes to `b` is read from its declared jmp_buf, written as an
+expression in which `$N` or a parameter name stands for the call's argument:
 
 ```c
 /* @contract png_error { longjmps: png_jmpbuf($1) } */   // in an overlay header
@@ -522,7 +526,8 @@ A jump to another buffer leaves the function instead; a jump whose buffer is not
 `UNKNOWN_LONGJMP_TARGET`, and a declared buffer that the body does not jump to is
 `LONGJMP_TARGET_MISMATCH`. A local that is not `volatile`, changed after the setjmp and read in
 the landing branch, is `SETJMP_CLOBBERED`: its value is indeterminate there. A setjmp in any
-other form is `UNSUPPORTED_SETJMP`.
+other form (an expression statement, a loop condition, an assignment, or inside a `try` block)
+is `UNSUPPORTED_SETJMP`.
 
 ### Concurrency annotations (verified under `@threadsafe`, advisory outside it)
 

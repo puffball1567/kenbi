@@ -459,11 +459,14 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 无法修改的库函数在覆盖头文件中按名称声明：`// @longjmps(png_error)` 或
 `// @contract png_error { longjmps }`。
 
-函数顶层的 `if (setjmp(b))` 是跳转到 `b` 的 longjmp 的落点（`!setjmp(b)`、`setjmp(b) == 0` /
-`!= 0` 亦然）。其后每个可能跳转到 `b` 的调用都是进入落点分支的一条路径，kenbi 从所有这些路径出发
-分析该分支及其后续：只要其中一条路径上的释放不匹配，就像在其他路径上一样报告，例如在内存已被释放
-之后发生跳转时报告 `DOUBLE_FREE`。跳转是否去往 `b` 由其声明的 jmp_buf 判断，以表达式书写，其中
-`$N` 或参数名代表调用的实参：
+条件整体为 setjmp 的 `if` 或 `switch` 是跳转到 `b` 的 longjmp 的落点：`if (setjmp(b))`、
+`!setjmp(b)`、`setjmp(b) == 0` / `!= 0` 或 `switch (setjmp(b))`（其中 case 0 是首次返回，其余
+case 是跳转的落点）。它可以位于函数的任意深度。每个可能跳转到 `b` 的调用都是进入其落点代码的一条
+路径，kenbi 从所有这些路径出发分析该代码及其后续：只要其中一条路径上的释放不匹配，就像在其他路径上
+一样报告，例如在内存已被释放之后发生跳转时报告 `DOUBLE_FREE`。跳转返回到在它之前执行过的 setjmp：
+源代码中位于其前面的，或位于同时包围二者的循环中其后面的。若没有这样的 setjmp 必定已执行（位于
+`if` 块中的 setjmp，或循环的第一次迭代），跳转也可能离开函数，因此也会作为出口进行检查。跳转是否
+去往 `b` 由其声明的 jmp_buf 判断，以表达式书写，其中 `$N` 或参数名代表调用的实参：
 
 ```c
 /* @contract png_error { longjmps: png_jmpbuf($1) } */   // 写在覆盖头文件中
@@ -472,8 +475,8 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 
 跳转到其他缓冲区则视为离开函数；未声明缓冲区的跳转是 `UNKNOWN_LONGJMP_TARGET`，函数体并未跳转到
 所声明缓冲区的是 `LONGJMP_TARGET_MISMATCH`。非 `volatile`、在 setjmp 之后被修改且在落点分支中被
-读取的局部变量是 `SETJMP_CLOBBERED`：它在那里的值是不确定的。其他形式的 setjmp 是
-`UNSUPPORTED_SETJMP`。
+读取的局部变量是 `SETJMP_CLOBBERED`：它在那里的值是不确定的。其他形式的 setjmp（表达式语句、循环
+条件、赋值，或位于 `try` 块中）是 `UNSUPPORTED_SETJMP`。
 
 ### 并发注解（在 `@threadsafe` 下验证，在其外为建议性）
 

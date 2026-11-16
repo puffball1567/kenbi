@@ -478,12 +478,17 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 編集できないライブラリの関数は、overlay ヘッダで名前を指定して宣言します:
 `// @longjmps(png_error)` または `// @contract png_error { longjmps }`。
 
-関数の最上位にある `if (setjmp(b))` は、`b` への longjmp が着地する場所です（`!setjmp(b)`、
-`setjmp(b) == 0` / `!= 0` も同様）。その後ろで `b` へ飛びうる呼び出しは、どれも着地側の分岐へ
-入る経路です。kenbi はそれらすべての経路から、着地側の分岐とその後ろを解析します。どれか一つの
-経路で解放が合わなければ、ほかの経路と同じように報告します。たとえば、すでに解放した後で飛ぶと
-`DOUBLE_FREE` になります。ジャンプが `b` へ向かうかどうかは、宣言された jmp_buf で判断します。
-宣言は式で書き、`$N` または引数名が呼び出しの実引数を表します:
+条件式全体が setjmp である `if` と `switch` は、`b` への longjmp が着地する場所です。
+`if (setjmp(b))`、`!setjmp(b)`、`setjmp(b) == 0` / `!= 0`、`switch (setjmp(b))` の形を扱います
+（`switch` では case 0 が最初の戻り、それ以外の case がジャンプの着地先です）。関数のどの深さに
+あってもかまいません。`b` へ飛びうる呼び出しは、どれも着地先へ入る経路です。kenbi はそれらすべての
+経路から、着地先とその後ろを解析します。どれか一つの経路で解放が合わなければ、ほかの経路と同じように
+報告します。たとえば、すでに解放した後で飛ぶと `DOUBLE_FREE` になります。ジャンプが戻るのは、
+それより前に実行された setjmp です（ソース上で前にあるもの、または両方を囲むループの中で後ろに
+あるもの）。そうした setjmp が必ず実行済みとは言えない場合（`if` ブロックの中の setjmp や、
+ループの1回目）は、ジャンプが関数から抜ける可能性もあるので、出口としても検査します。
+ジャンプが `b` へ向かうかどうかは、宣言された jmp_buf で判断します。宣言は式で書き、`$N` または
+引数名が呼び出しの実引数を表します:
 
 ```c
 /* @contract png_error { longjmps: png_jmpbuf($1) } */   // overlay ヘッダに
@@ -493,8 +498,8 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 別のバッファへのジャンプは、関数から抜ける経路として扱います。バッファを宣言していないジャンプは
 `UNKNOWN_LONGJMP_TARGET`、宣言したバッファへ本体が飛んでいなければ `LONGJMP_TARGET_MISMATCH`
 です。`volatile` でなく、setjmp の後で変更され、着地側の分岐で読まれる局所変数は
-`SETJMP_CLOBBERED` です（そこでの値は不定です）。これ以外の形の setjmp は `UNSUPPORTED_SETJMP`
-です。
+`SETJMP_CLOBBERED` です（そこでの値は不定です）。これ以外の形の setjmp（式文、ループの
+条件、代入、`try` ブロックの中）は `UNSUPPORTED_SETJMP` です。
 
 ### 並行性注釈（`@threadsafe` の下では検証、その外では advisory）
 

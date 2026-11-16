@@ -493,13 +493,18 @@ appel à une fonction déclarée `// @longjmps` comme une sortie possible :
 Une fonction de bibliothèque que vous ne pouvez pas modifier se déclare par son nom dans un en-tête
 overlay : `// @longjmps(png_error)` ou `// @contract png_error { longjmps }`.
 
-`if (setjmp(b))` au niveau supérieur d'une fonction est le point d'arrivée d'un longjmp vers `b`
-(de même `!setjmp(b)` et `setjmp(b) == 0` / `!= 0`). Chaque appel ultérieur qui peut sauter vers
-`b` est un chemin vers la branche d'arrivée, et kenbi analyse cette branche, et ce qui la suit, à
-partir de tous ces chemins : une libération qui ne correspond pas sur l'un d'eux est signalée comme
-sur tout autre chemin, par exemple un `DOUBLE_FREE` quand le saut survient après la libération.
-Savoir si un saut va vers `b` se lit dans son jmp_buf déclaré, écrit comme une expression où `$N`
-ou un nom de paramètre représente l'argument de l'appel :
+Un `if` ou un `switch` dont la condition entière est un setjmp est le point d'arrivée d'un
+longjmp vers `b` : `if (setjmp(b))`, `!setjmp(b)`, `setjmp(b) == 0` / `!= 0` ou
+`switch (setjmp(b))`, où le case 0 est le premier retour et les autres cas sont les points
+d'arrivée d'un saut. Il peut se trouver à n'importe quelle profondeur de la fonction. Chaque appel
+qui peut sauter vers `b` est un chemin vers le code où il arrive, et kenbi analyse ce code, et ce
+qui le suit, à partir de tous ces chemins : une libération qui ne correspond pas sur l'un d'eux est
+signalée comme sur tout autre chemin, par exemple un `DOUBLE_FREE` quand le saut survient après la
+libération. Un saut revient à un setjmp exécuté avant lui : plus haut dans le source, ou plus bas
+dans une boucle qui les entoure tous deux. Quand aucun n'est exécuté à coup sûr (un setjmp dans un
+bloc `if`, ou la première itération d'une boucle), le saut peut aussi quitter la fonction, et il est
+vérifié aussi comme une sortie. Savoir si un saut va vers `b` se lit dans son jmp_buf déclaré, écrit
+comme une expression où `$N` ou un nom de paramètre représente l'argument de l'appel :
 
 ```c
 /* @contract png_error { longjmps: png_jmpbuf($1) } */   // dans un en-tête overlay
@@ -510,7 +515,8 @@ Un saut vers un autre tampon quitte la fonction ; un saut dont le tampon n'est p
 `UNKNOWN_LONGJMP_TARGET`, et un tampon déclaré vers lequel le corps ne saute pas est
 `LONGJMP_TARGET_MISMATCH`. Une variable locale non `volatile`, modifiée après le setjmp et lue dans
 la branche d'arrivée, est `SETJMP_CLOBBERED` : sa valeur y est indéterminée. Un setjmp sous toute
-autre forme est `UNSUPPORTED_SETJMP`.
+autre forme (une instruction-expression, la condition d'une boucle, une affectation ou dans un
+bloc `try`) est `UNSUPPORTED_SETJMP`.
 
 ### Annotations de concurrence (vérifiées sous `@threadsafe`, consultatives en dehors)
 
