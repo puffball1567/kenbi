@@ -27,6 +27,32 @@ type
     ## prototype; `qual` = `Class::method` for a member function ("" otherwise) — the key its
     ## contracts are stored under.
 
+  LandingSite* = object
+    ## A setjmp a longjmp can return to: the whole condition of an `if` or a `switch`, at any
+    ## depth of the function body (not inside a `try`).
+    id*: int                ## its number in the translation unit (the IR's landing id)
+    stmtOff*: int           ## offset of the `if` / `switch` statement
+    callOff*: int           ## offset of the setjmp call
+    line*: int              ## line of the setjmp call
+    buf*: string            ## its jmp_buf as written, whitespace dropped
+    thenLands*: bool        ## `if`: the THEN branch is where a longjmp returns
+    regionEnd*: int         ## every path to an offset in [callOff, regionEnd) runs this setjmp
+                            ## first: the rest of its block, up to the next `case` label of a
+                            ## switch body or a label a `goto` from outside can reach
+    loops*: seq[tuple[first, last, line: int]] ## the loops around it (a `goto` back edge
+                            ## included): code before it in one of them may run after it
+
+  LandingRec* = object
+    ## A lowered landing site, waiting for its landing part to be lowered again after the whole
+    ## body: that part runs after code later in the source, whose allocations it releases.
+    site*: Stmt             ## the stIf / stSwitch
+    siteIdx*: int           ## index into `landingSites`
+    live*: seq[tuple[name, typ, disp: string, line: int]] ## C++ objects in scope at the setjmp
+    parts*: seq[tuple[stmts: seq[CXCursor], caseIdx: int, dual: bool]]
+                            ## the code a longjmp returns into: the landing branch of an `if`
+                            ## (`caseIdx` -1), or each case group of a `switch` a non-zero value
+                            ## can enter (`dual`: the first return can enter it too)
+
 type Ctx* = object  ## module-local state during a single parse (all fields public
                     ## so the responsibility-split modules can populate them)
   tu*: CXTranslationUnit
@@ -43,10 +69,9 @@ type Ctx* = object  ## module-local state during a single parse (all fields publ
                                     ## names stand for the call's arguments
   curFnTarget*: string              ## the jmp_buf the function being lowered declares it jumps
                                     ## to, in its own parameter names ("" = none declared)
-  curLanding*: int                  ## the landing site (`if (setjmp(b))` at the top level) whose
-                                    ## region is being lowered, 0 outside one
-  landingBuf*: string               ## ... and its jmp_buf, as written (whitespace dropped)
-  landingLine*: int                 ## ... and the line of its setjmp
+  landingSites*: seq[LandingSite]   ## the landing sites of the function being lowered
+  landingRecs*: seq[LandingRec]     ## ... and their lowered statements, whose landing branches
+                                    ## are lowered again once the whole body has been
   landingCount*: int                ## landing sites numbered so far in this translation unit
   longjmpEmitted*: HashSet[int]     ## offsets of the calls already lowered as ikMayLongjmp
   liveLocals*: seq[tuple[name, typ, disp: string, line: int]] ## C++: the automatic objects of class

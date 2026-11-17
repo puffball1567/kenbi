@@ -5,6 +5,21 @@ All notable changes to kenbi are recorded here. The format follows
 [Semantic Versioning](https://semver.org/); before 1.0 the interfaces, the annotation vocabulary
 and the JSON output may change in any minor version.
 
+## [0.1.3] - 2026-11-17
+
+### Added
+
+- Landing sites in more forms: `switch (setjmp(b))` (case 0 is the first return, the other cases
+  where a jump lands), and an `if` or `switch` on a setjmp at any depth of the function — inside a
+  block, a branch, a case or a loop. A jump returns to the latest setjmp on its jmp_buf that ran
+  before it, which can be one later in the source when a loop surrounds both; when none is
+  certain to have run, the jump may also leave the function and is checked as an exit as well.
+
+### Changed
+
+- `UNSUPPORTED_SETJMP` remains for a setjmp as an expression statement, a loop condition or an
+  assignment, or inside a `try` block.
+
 ## [0.1.2] - 2026-11-16
 
 ### Added
@@ -76,6 +91,7 @@ Also: `--project` closure over a `compile_commands.json`, `--emit-contracts`, `k
 which checks ran on which functions, and what a result without findings rests on without
 having checked it.
 
+[0.1.3]: https://github.com/puffball1567/kenbi/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/puffball1567/kenbi/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/puffball1567/kenbi/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/puffball1567/kenbi/releases/tag/v0.1.0

@@ -553,7 +553,7 @@ proc scanThrowLeaks(a: var Analyzer, s: Stmt, st: StateMap) =
         "release it before the call, or prove the callee cannot throw (`noexcept`, or vouch " &
         "it `@nothrow`; `-fno-exceptions` turns the axis off for a no-exception build).")
 
-proc reportSkippedDestructors(a: var Analyzer, s: Stmt, jumps: string)
+proc reportSkippedDestructors(a: var Analyzer, s: Stmt, jumps: string, afterLine = 0)
 
 proc scanLongjmp(a: var Analyzer, s: Stmt, st: StateMap, nst: NullState) =
   ## ikMayLongjmp: control may leave the function here by a non-local jump. Nothing runs on the
@@ -562,20 +562,26 @@ proc scanLongjmp(a: var Analyzer, s: Stmt, st: StateMap, nst: NullState) =
   ## undischarged `@frees` obligation, with the exit leak scan's exclusions) is LEAK_ON_LONGJMP,
   ## once per origin; every in-scope automatic object with a non-trivial destructor (an RAII
   ## owner among them, which is why RAII origins are left to this second report) is
-  ## LONGJMP_SKIPS_DESTRUCTOR, once per object. A function that calls `setjmp` is the landing
-  ## site, not an exit (its refusal, ikSetjmp, keeps it RED until landing sites are modelled).
+  ## LONGJMP_SKIPS_DESTRUCTOR, once per object. A jump back to a setjmp of this function is
+  ## instead a path into that landing site, analysed from there after the function.
   let callee = s.a
   if (s.off and 4) != 0:
-    # a jump back into this function's landing site: an incoming edge of that site, not an exit
+    # a jump back into this function's landing sites: an incoming edge of each, not an exit
     if (s.off and 8) != 0 and a.curCovered:
       a.addDiag(s.line, "UNKNOWN_LONGJMP_TARGET",
         "'" & callee & "' may longjmp, but kenbi cannot tell whether it jumps back to this " &
         "function's setjmp or out of it. Declare where it jumps: `@longjmps_to(<jmp_buf>)` on " &
         "its declaration, or `longjmps: <jmp_buf>` in `@contract`.")
-    a.landingDeposits.mgetOrPut(s.off2, @[]).add (st, nst, a.varOrigin, a.interiorVar,
-      a.interiorOff, a.unknownOrigin, a.ambiguousHandles, a.reallocTie, a.staleAfterRealloc)
-    a.reportSkippedDestructors(s, "'" & callee & "' may longjmp back to this function's setjmp")
-    return
+    for cand in s.bKey.split(','):
+      let f = cand.split(':')
+      if f.len != 2: continue
+      a.landingDeposits.mgetOrPut(parseInt(f[0]), @[]).add (st, nst, a.varOrigin,
+        a.interiorVar, a.interiorOff, a.unknownOrigin, a.ambiguousHandles, a.reallocTie,
+        a.staleAfterRealloc)
+      a.reportSkippedDestructors(s, "'" & callee & "' may longjmp back to this function's setjmp",
+                                 parseInt(f[1]))
+    if (s.off and 32) == 0: return
+    # ... and, with no setjmp on its jmp_buf certain to have run, it may also leave the function
   let always = (s.off and 1) != 0
   let jumps = (if always: "'" & callee & "' jumps out of this function"
                else: "'" & callee & "' may longjmp")
@@ -615,14 +621,16 @@ proc scanLongjmp(a: var Analyzer, s: Stmt, st: StateMap, nst: NullState) =
         "on that path it is never released. Release it before the call.")
   a.reportSkippedDestructors(s, jumps)
 
-proc reportSkippedDestructors(a: var Analyzer, s: Stmt, jumps: string) =
-  ## The objects in `s.b` — in scope at the jump, with a non-trivial destructor the jump skips.
-  ## Recorded as reported only on a reporting pass: a silent dry run (a loop or landing-site
-  ## fixpoint) must not use up the one report.
+proc reportSkippedDestructors(a: var Analyzer, s: Stmt, jumps: string, afterLine = 0) =
+  ## The objects in `s.b` — in scope at the jump, with a non-trivial destructor the jump skips;
+  ## for a jump back to a setjmp of this function, those declared after line `afterLine` (the
+  ## others are still in scope where it lands). Recorded as reported only on a reporting pass:
+  ## a silent dry run (a loop or landing-site fixpoint) must not use up the one report.
   if not a.curCovered or a.silent: return
   for entry in s.b.splitLines:
     let f = entry.split('\t')
     if f.len != 3: continue        # name, the type as written, line
+    if parseInt(f[2]) <= afterLine: continue
     let id = f[0] & "@" & f[2]
     if id in a.skippedReported: continue
     a.skippedReported.incl id
@@ -631,6 +639,15 @@ proc reportSkippedDestructors(a: var Analyzer, s: Stmt, jumps: string) =
       ": the jump skips its destructor, which C++ makes undefined behaviour. " &
       "Keep objects with a destructor out of the scopes a longjmp can leave, or report the " &
       "error with an exception instead.")
+
+proc landingPart(s: Stmt, mask: seq[bool], noMatch: bool): Stmt =
+  ## The switch of a landing site as one of its returns sees it: only the cases that return can
+  ## enter (`mask`), with the no-match path only when it can match no label.
+  result = Stmt(line: s.line, kind: stSwitch, hasDefault: not noMatch)
+  for i, c in s.cases:
+    if i < mask.len and mask[i]:
+      result.cases.add c
+      result.caseValues.add (if i < s.caseValues.len: s.caseValues[i] else: low(int))
 
 proc predSays(a: Analyzer, key: string): tuple[known: bool, nonZero: bool] =
   ## What this path already knows about the truth of a stable scalar, if anything.
@@ -947,14 +964,15 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
           "class it is. Declare '" & s.b & "''s destructor virtual, or delete through the type the " &
           "object was created as.")
   of ikSetjmp:
-    # a landing site: a later longjmp re-enters the function here, with the locals it changed
-    # since indeterminate unless they are volatile. Not modelled yet, so refused.
+    # a setjmp in a form kenbi does not model: a later longjmp re-enters the function here,
+    # along paths it cannot follow, so refused
     if a.curCovered:
       a.addDiag(s.line, "UNSUPPORTED_SETJMP",
         "a longjmp can return into this function here, and kenbi models that only for a setjmp " &
-        "that is the whole condition of an `if` at the function's top level (`if (setjmp(b))`, " &
-        "`if (!setjmp(b))`, `if (setjmp(b) == 0)`). Move it into that form, or mark the line " &
-        "@unsafe if you take responsibility.")
+        "that is the whole condition of an `if` or a `switch` (`if (setjmp(b))`, " &
+        "`if (!setjmp(b))`, `if (setjmp(b) == 0)`, `switch (setjmp(b))`), outside a `try` " &
+        "block. Move it into one of those forms, or mark the line @unsafe if you take " &
+        "responsibility.")
   of ikSetjmpClobbered:
     if a.curCovered:
       a.addDiag(s.line, "SETJMP_CLOBBERED",
@@ -2334,6 +2352,11 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
       a.breakStates = savedBreak
       a.continueStates = savedCont
     of stSwitch:
+      if s.switchLandingId > 0:
+        # a setjmp: on its first return (0) only the cases 0 can enter run. Those a longjmp's
+        # return enters are reached from states later in the function — analysed after it.
+        if a.analyzeBody(@[landingPart(s, s.caseFirst, s.firstNoMatch)], st, nst): gone = true
+        continue
       # Each case is an independent branch from the switch entry (fall-through is
       # under-approximated — sound toward FP-avoidance: cases are not treated as a
       # sequence, so a free in two different cases is not a false double-free). The
@@ -2446,61 +2469,166 @@ proc modelledGotos(body: seq[Stmt], noreturn: HashSet[string]): tuple[ok: bool, 
   scan(body, -1, true)
   result.gotos = found
 
+proc containsLanding(body: seq[Stmt], id: int): bool
+proc containsLanding(s: Stmt, id: int): bool =
+  ## Is landing site `id` this statement, or inside it?
+  case s.kind
+  of stIf: s.landingId == id or containsLanding(s.thenBody, id) or containsLanding(s.elseBody, id)
+  of stSwitch:
+    if s.switchLandingId == id: return true
+    for c in s.cases:
+      if containsLanding(c, id): return true
+    false
+  of stLoop: containsLanding(s.loopBody, id)
+  else: false        # never inside a `try`: the front-end refuses a setjmp there
+proc containsLanding(body: seq[Stmt], id: int): bool =
+  for s in body:
+    if containsLanding(s, id): return true
+  false
+
+proc currentPath(a: Analyzer, st: StateMap, nst: NullState): PathState =
+  (st, nst, a.varOrigin, a.interiorVar, a.interiorOff, a.unknownOrigin, a.ambiguousHandles,
+   a.reallocTie, a.staleAfterRealloc)
+
+proc enterJoin(a: var Analyzer, paths: seq[PathState], st: var StateMap, nst: var NullState) =
+  ## Continue from the join of `paths` (at least one): states merged, bindings reconciled.
+  st = paths[0].st
+  nst = paths[0].nst
+  a.varOrigin = paths[0].vo; a.interiorVar = paths[0].iv; a.interiorOff = paths[0].io
+  a.unknownOrigin = paths[0].uo; a.ambiguousHandles = paths[0].amb
+  a.reallocTie = paths[0].tie; a.staleAfterRealloc = paths[0].stale
+  for k in 1 ..< paths.len:
+    mergeStateInto(st, paths[k].st)
+    mergeNullInto(nst, paths[k].nst)
+    a.joinBindings(st, paths[k].vo, paths[k].iv, paths[k].io, paths[k].uo, paths[k].amb,
+                   paths[k].tie, paths[k].stale)
+
+proc settled(ps: PathState): PathState =
+  ## A path at a join, with what it released and no longer names dropped (see dropOrphanedFreed).
+  result = ps
+  dropOrphanedFreed(result.st, result.vo)
+
+proc analyzeFrom(a: var Analyzer, body: seq[Stmt], id: int, st: var StateMap,
+                 nst: var NullState): bool =
+  ## Analyse `body` as a longjmp back to landing site `id` runs it: from the site's landing part,
+  ## through the rest of every statement around the site — the remaining cases of nothing (a
+  ## case group ends the switch), the remaining iterations of a loop — and on to the end of
+  ## `body`. The statements before the site do not run. Returns true when no path reaches the
+  ## end of `body` (as analyzeBody does).
+  var i = 0
+  while i < body.len and not containsLanding(body[i], id): inc i
+  if i == body.len: return true
+  let s = body[i]
+  var gone = false
+  case s.kind
+  of stIf:
+    if s.landingId == id:
+      gone = a.analyzeBody((if s.landingThen: s.thenBody else: s.elseBody), st, nst)
+    else:
+      gone = a.analyzeFrom((if containsLanding(s.thenBody, id): s.thenBody else: s.elseBody),
+                           id, st, nst)
+  of stSwitch:
+    if s.switchLandingId == id:
+      gone = a.analyzeBody(@[landingPart(s, s.caseLanding, s.landingNoMatch)], st, nst)
+    else:
+      # inside one case group: its end, and every `break` in it, leave the switch
+      var k = s.cases.high
+      while k >= 0 and not containsLanding(s.cases[k], id): dec k
+      let savedBreak = a.breakStates
+      a.breakStates = @[]
+      var exits: seq[PathState]
+      if not a.analyzeFrom(s.cases[k], id, st, nst): exits.add settled(a.currentPath(st, nst))
+      for bs in a.breakStates: exits.add settled(bs)
+      a.breakStates = savedBreak
+      if exits.len == 0: gone = true
+      else: a.enterJoin(exits, st, nst)
+  of stLoop:
+    # the rest of this iteration, then the loop as usual from its head: the end of the body
+    # and every `continue` are its back edges, every `break` an exit
+    let savedBreak = a.breakStates
+    let savedCont = a.continueStates
+    a.breakStates = @[]
+    a.continueStates = @[]
+    var heads, exits: seq[PathState]
+    let d = a.analyzeFrom(s.loopBody, id, st, nst)
+    let endPath = (if d: @[] else: @[settled(a.currentPath(st, nst))])
+    var conts: seq[PathState]
+    for cs in a.continueStates: conts.add settled(cs)
+    for bs in a.breakStates: exits.add settled(bs)
+    a.breakStates = savedBreak
+    a.continueStates = savedCont
+    heads = endPath & conts
+    if s.noBackEdge:
+      exits.add heads                     # `do { … } while (0)`: no second iteration
+    else:
+      if s.doWhile:
+        # tested at the bottom: the end of this iteration may already be the exit (as the
+        # loop's own analysis takes it), and so may a `continue` when the test can be false
+        exits.add endPath
+        if s.contExits: exits.add conts
+      if heads.len > 0:
+        var hs: StateMap
+        var hn: NullState
+        a.enterJoin(heads, hs, hn)
+        if not a.analyzeBody(@[s], hs, hn): exits.add a.currentPath(hs, hn)
+    if exits.len == 0: gone = true
+    else: a.enterJoin(exits, st, nst)
+  else:
+    gone = true
+  if gone: return true
+  a.analyzeBody(body[i + 1 .. ^1], st, nst)
+
 proc analyzeLandings(a: var Analyzer, fn: Func) =
-  ## The paths a longjmp takes back into this function. A landing site is an `if (setjmp(b))`
-  ## at the top level of the body; every call after it that may jump to `b` deposited its path
-  ## state while the body was analysed. From the join of those states the landing branch runs,
-  ## then — if it falls through — the rest of the body after the `if`, exactly as on a first
-  ## pass: a leak, a double free or a use after free on any of those paths is reported like
-  ## any other. Calls on these paths may jump back again, so the entry is iterated to a
-  ## fixpoint (silent dry runs, then one reporting pass), as a loop head is.
-  for i, site in fn.body:
-    if site.kind != stIf or site.landingId == 0: continue
-    let id = site.landingId
-    if a.landingDeposits.getOrDefault(id, @[]).len == 0: continue   # nothing jumps here
-    var tail = (if site.landingThen: site.thenBody else: site.elseBody)
-    for j in i + 1 ..< fn.body.len: tail.add fn.body[j]
-    let post = a.captureWorld()
-    proc enter(a: var Analyzer, deps: seq[PathState], st: var StateMap, nst: var NullState) =
-      a.restoreWorld(post)
-      st = deps[0].st
-      nst = deps[0].nst
-      a.varOrigin = deps[0].vo; a.interiorVar = deps[0].iv; a.interiorOff = deps[0].io
-      a.unknownOrigin = deps[0].uo; a.ambiguousHandles = deps[0].amb
-      a.reallocTie = deps[0].tie; a.staleAfterRealloc = deps[0].stale
-      for k in 1 ..< deps.len:
-        mergeStateInto(st, deps[k].st)
-        mergeNullInto(nst, deps[k].nst)
-        a.joinBindings(st, deps[k].vo, deps[k].iv, deps[k].io, deps[k].uo, deps[k].amb,
-                       deps[k].tie, deps[k].stale)
-    var deps = a.landingDeposits[id]
-    const cap = 16
-    var converged = false
-    for _ in 0 ..< cap:
-      var st: StateMap
-      var nst: NullState
-      a.enter(deps, st, nst)
-      a.landingDeposits[id] = @[]
-      let savedSilent = a.silent
-      a.silent = true
-      discard a.analyzeBody(tail, st, nst)
-      a.silent = savedSilent
-      let again = a.landingDeposits.getOrDefault(id, @[])
-      var grown = false
-      for d in again:
-        if d notin deps: deps.add d; grown = true
-      if not grown:
-        converged = true
-        break
-    if not converged and a.curCovered:
-      a.addDiag(site.line, "LOOP_FIXPOINT_LIMIT", "the paths a longjmp takes back into this " &
-        "setjmp did not converge within " & $cap & " iterations, so the findings on them are " &
-        "incomplete. Hold fewer resources across the calls that may jump here.")
+  ## The paths a longjmp takes back into this function. A landing site is an `if` or a
+  ## `switch` on a setjmp, anywhere in the body; every call that may jump to it deposited its
+  ## path state while the body was analysed. From the join of those states the code the jump
+  ## returns into runs, then everything after it, exactly as on a first pass: a leak, a double
+  ## free or a use after free on any of those paths is reported like any other. Calls on these
+  ## paths may jump back again — to the same site or another — so the entries are iterated
+  ## together to a fixpoint (silent dry runs, then one reporting pass), as a loop head is.
+  var ids: seq[int]
+  for id in a.landingDeposits.keys: ids.add id
+  if ids.len == 0: return
+  ids.sort()
+  var deps = a.landingDeposits
+  let post = a.captureWorld()
+  proc run(a: var Analyzer, fn: Func, id: int, paths: seq[PathState]) =
+    a.restoreWorld(post)
     var st: StateMap
     var nst: NullState
-    a.enter(deps, st, nst)
-    a.landingDeposits[id] = @[]
-    if not a.analyzeBody(tail, st, nst): a.scanLeaks(st)
+    a.enterJoin(paths, st, nst)
+    a.landingDeposits = initTable[int, seq[PathState]]()
+    if not a.analyzeFrom(fn.body, id, st, nst): a.scanLeaks(st)
+  const cap = 16
+  var converged = false
+  for _ in 0 ..< cap:
+    var grown = false
+    var k = 0
+    while k < ids.len:
+      let id = ids[k]
+      inc k
+      let savedSilent = a.silent
+      a.silent = true
+      a.run(fn, id, deps[id])
+      a.silent = savedSilent
+      for nid, more in a.landingDeposits:
+        if nid notin deps:
+          deps[nid] = @[]
+          ids.add nid
+        for d in more:
+          if d notin deps[nid]:
+            deps[nid].add d
+            grown = true
+    if not grown:
+      converged = true
+      break
+  if not converged and a.curCovered:
+    a.addDiag(fn.line, "LOOP_FIXPOINT_LIMIT", "the paths a longjmp takes back into this " &
+      "function's setjmp did not converge within " & $cap & " iterations, so the findings on " &
+      "them are incomplete. Hold fewer resources across the calls that may jump back.")
+  for id in ids:
+    a.run(fn, id, deps[id])
+  a.landingDeposits = initTable[int, seq[PathState]]()
 
 proc analyzeFunc(a: var Analyzer, fn: Func, covered: bool) =
   ## Analyze one function with its own fresh origin/null/flow state, then scan

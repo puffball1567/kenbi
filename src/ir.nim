@@ -135,12 +135,17 @@ type
                  ## LONGJMP_SKIPS_DESTRUCTOR — C++ makes that jump undefined behaviour. `a` = the
                  ## callee; `b` = the in-scope locals whose destructors would be skipped, one
                  ## `name<TAB>type<TAB>line` per line; `off` = flags: 1 the call always jumps,
-                 ## 2 the enclosing function is declared `@longjmps`, 4 the jump returns to the
-                 ## landing site `off2` of this function (a `setjmp` on the same jmp_buf), so it
-                 ## is a path into that site rather than an exit; 8 the jump's target is not
-                 ## declared, so kenbi cannot tell (UNKNOWN_LONGJMP_TARGET).
-    ikSetjmp     ## a call to `setjmp` / `sigsetjmp` in a form kenbi does not model (anywhere
-                 ## but the condition of an `if` at the function's top level): refused.
+                 ## 2 the enclosing function is declared `@longjmps`, 4 the jump may return to
+                 ## a landing site of this function (a `setjmp` on the same jmp_buf) — a path
+                 ## into that site rather than an exit; the sites are listed in `bKey`, one
+                 ## `id:line` per comma-separated entry, `line` bounding the locals the jump
+                 ## leaves (those declared after it); 8 the jump's target is not declared, so
+                 ## kenbi cannot tell (UNKNOWN_LONGJMP_TARGET); 16 the jump leaves for a target
+                 ## other than the function declares (`cKey` = "declared<TAB>actual"); 32 the
+                 ## jump may ALSO leave the function — no landing site on its jmp_buf is
+                 ## certain to have run before it.
+    ikSetjmp     ## a call to `setjmp` / `sigsetjmp` in a form kenbi does not model (anything
+                 ## but the whole condition of an `if` or `switch`, or inside a `try`): refused.
     ikSetjmpClobbered ## the landing branch reads `a`, a non-volatile local changed after the
                  ## `setjmp` on line `off`: after a longjmp its value is indeterminate.
     ikLongjmpUnmodeled ## a call that may longjmp, in an expression position the front-end does
@@ -401,7 +406,8 @@ type
     of stIf:
       thenBody*: seq[Stmt]
       elseBody*: seq[Stmt]
-      landingId*: int        ## > 0: the condition is a `setjmp`, and this is landing site N —
+      landingId*: int        ## > 0: the condition is a `setjmp`, and this is landing site N (at
+                             ## any depth of the body) —
                              ## one branch runs when it first returns (0), the other each time
                              ## a longjmp returns into it. The latter is analysed from the
                              ## states of every call that may jump here, after the function.
@@ -499,6 +505,16 @@ type
                              ## case group's label proves (`case 0:` -> 0), so `n->tag == 0` is
                              ## known in that body. low(int) for default / multi-label (fall-through)
                              ## / non-const groups (no single proven value).
+      switchLandingId*: int  ## > 0: the switch is on a `setjmp` (`switch (setjmp(b))`), landing
+                             ## site N. Its first return (0) enters the cases marked in
+                             ## `caseFirst`; a longjmp's return (non-zero) the cases marked in
+                             ## `caseLanding`, analysed after the function from the states of the
+                             ## calls that may jump here. A case run on both is present twice,
+                             ## once lowered for each.
+      caseFirst*: seq[bool]  ## parallel to `cases` (landing sites only)
+      caseLanding*: seq[bool] ## parallel to `cases` (landing sites only)
+      firstNoMatch*: bool    ## 0 matches no case label and there is no `default:`
+      landingNoMatch*: bool  ## a non-zero value may match no case label (no `default:`)
     of stLabel:
       labelName*: string     ## a `goto` target. A JOIN point: the engine merges the
                              ## fall-through state with every ikGoto state targeting it
