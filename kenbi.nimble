@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.1.2"
+version       = "0.1.3"
 author        = "puffball1567"
 description   = "Annotation-driven static memory-safety checker for C/C++"
 license       = "Apache-2.0"
