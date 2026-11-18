@@ -341,6 +341,20 @@ const unstructuredGotoMsg =
   "early returns, or a single forward cleanup ladder of labels) so the release / " &
   "lifetime of each pointer is checkable."
 
+proc dropRepeats(diags: var seq[Diag], mark, caseStart: int) =
+  ## The cases of a switch share the statements of the groups they fall through into, so a
+  ## finding there is met once per case that runs it. Each is kept once: a finding added since
+  ## `caseStart` that repeats one an earlier case of the switch added (since `mark`) is dropped.
+  var i = caseStart
+  while i < diags.len:
+    var dup = false
+    for j in mark ..< caseStart:
+      if diags[j].line == diags[i].line and diags[j].code == diags[i].code and
+         diags[j].msg == diags[i].msg:
+        dup = true
+        break
+    if dup: diags.delete(i) else: inc i
+
 proc addDiag(a: var Analyzer, line: int, code, msg: string, sev = sevError) =
   if a.silent: return            # a loop-fixpoint dry run — only the final pass emits
   a.diags.add Diag(line: line, code: code, msg: msg, sev: sev)
@@ -2357,11 +2371,11 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
         # return enters are reached from states later in the function — analysed after it.
         if a.analyzeBody(@[landingPart(s, s.caseFirst, s.firstNoMatch)], st, nst): gone = true
         continue
-      # Each case is an independent branch from the switch entry (fall-through is
-      # under-approximated — sound toward FP-avoidance: cases are not treated as a
-      # sequence, so a free in two different cases is not a false double-free). The
+      # Each case is an independent branch from the switch entry: the code entered at its
+      # label, through every group it falls into (the front-end appends them), so a free in
+      # two cases is a double free only on a path that runs both. The
       # post-switch state is the may-merge of every reaching case's exit (a case that
-      # falls through OR ends in `break`), plus the entry state when there is no
+      # runs off the end of the switch OR ends in `break`), plus the entry state when there is no
       # `default` (the no-match path). The switch owns a fresh break collector — a
       # `break` here exits the switch, not any enclosing loop — restored after.
       let savedBreak = a.breakStates
@@ -2381,7 +2395,9 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
       var reached: seq[tuple[v: Table[string, int], i: Table[string, bool],
                             o: Table[string, int], u, m: HashSet[string],
                             t: Table[string, tuple[other: string, srcDisp: string, resDisp: string, line: int, isResult: bool]], sl: HashSet[string]]]
+      let mark = a.diags.len
       for caseBody in s.cases:
+        let caseStart = a.diags.len
         a.varOrigin = v0
         a.interiorVar = i0
         a.interiorOff = o0
@@ -2393,6 +2409,7 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
         var cn = nst
         let nBreaks = a.breakStates.len
         let d = a.analyzeBody(caseBody, cs, cn)
+        dropRepeats(a.diags, mark, caseStart)
         dropOrphanedFreed(cs, a.varOrigin)
         if not d:
           anyReach = true
@@ -3309,10 +3326,13 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
         var loopLow = low
         walk(s.loopBody, loopV, loopLow)
       of stSwitch:
+        let mark = diags.len
         for c in s.cases:
           var cv = valid
           var cLow = low
+          let caseStart = diags.len
           walk(c, cv, cLow)
+          dropRepeats(diags, mark, caseStart)
       of stTry:
         # a handler is entered from an unknown point of the body: no bound the body established
         # is proven there — walk it from the ENTRY facts; after the try the entry facts stand.
@@ -3390,9 +3410,13 @@ proc analyzeConcurrency(fn: Func): seq[Diag] =
         held = inter(held, bodyH)               # held after iff held on the 0-trip AND a run
       of stSwitch:
         var acc = held                          # the no-match path keeps the entry held-set
+        let mark = diags.len
         for c in s.cases:
           var cv = held
+          let caseStart = diags.len
           walk(c, cv)
+          dropRepeats(diags, mark, caseStart)
+          if diverges(c): continue              # a case that returns does not reach the join
           acc = inter(acc, cv)
         held = acc
       of stTry:
@@ -3619,9 +3643,13 @@ proc analyzeLockBalance(fn: Func, lockOrder: seq[tuple[before, after: string]]):
         var accMay = mayH                              # no-match path keeps the entry set
         var accMust = mayH
         var firstMust = true
+        let mark = diags.len
         for c in s.cases:
           var cMay = mayH; var cMust = mustH
+          let caseStart = diags.len
           walk(c, cMay, cMust, lt)
+          dropRepeats(diags, mark, caseStart)
+          if diverges(c): continue                     # a case that returns does not reach the join
           accMay = uni(accMay, cMay)
           accMust = (if firstMust: cMust else: inter(accMust, cMust)); firstMust = false
         mayH = accMay
@@ -3694,9 +3722,12 @@ proc analyzeInit(fn: Func): seq[Diag] =
       of stSwitch:
         var acc = initHashSet[string]()
         var first = true
+        let mark = diags.len
         for c in s.cases:
           var cv = asgn
+          let caseStart = diags.len
           walk(c, cv)
+          dropRepeats(diags, mark, caseStart)
           if diverges(c): continue             # a case that returns doesn't constrain the join
           if first: acc = cv; first = false
           else: acc = inter(acc, cv)
@@ -3760,11 +3791,14 @@ proc analyzeTypeConfusion(fn: Func): seq[Diag] =
         walk(s.loopBody, bodyK)
       of stSwitch:
         # a `case VALUE:` on the discriminant proves `tag == VALUE` in that case body (V2).
+        let mark = diags.len
         for i, c in s.cases:
           var cv = known
           if s.switchKey.len > 0 and i < s.caseValues.len and s.caseValues[i] != low(int):
             cv[s.switchKey] = s.caseValues[i]
+          let caseStart = diags.len
           walk(c, cv)
+          dropRepeats(diags, mark, caseStart)
         # after the switch the discriminant is no longer a single proven value -> `known` stands
         # (a variant access past the switch needs its own guard).
       of stTry:

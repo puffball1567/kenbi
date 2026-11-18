@@ -51,7 +51,11 @@ type
     parts*: seq[tuple[stmts: seq[CXCursor], caseIdx: int, dual: bool]]
                             ## the code a longjmp returns into: the landing branch of an `if`
                             ## (`caseIdx` -1), or each case group of a `switch` a non-zero value
-                            ## can enter (`dual`: the first return can enter it too)
+                            ## can enter (`dual`: the first return can enter it too), followed
+                            ## by the groups it falls through into
+    landingOnly*: seq[tuple[first, last: int]]
+                            ## `switch`: the source ranges of the case groups only a landing
+                            ## reaches (neither entered nor fallen into on the first return)
 
 type Ctx* = object  ## module-local state during a single parse (all fields public
                     ## so the responsibility-split modules can populate them)

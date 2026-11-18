@@ -3877,7 +3877,8 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
   of ckSwitchStmt:
     # SwitchStmt children: [cond, body(CompoundStmt)]. Group the body's statements
     # into per-case bodies (a CaseStmt's child begins a group; following siblings
-    # append until the next label). Each group becomes an independent branch.
+    # append until the next label). Each case — a group and the groups it falls through
+    # into — becomes an independent branch.
     let kids = collectChildren(c)
     let site = ctx.landingSiteAt(startOffset(c))
     if site >= 0: ctx.longjmpEmitted.incl ctx.landingSites[site].callOff
@@ -3969,24 +3970,42 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
           s.hasDefault = true                  # no no-match path: the constant selects this group
           outp.add s
           return
-      for g in groups: s.cases.add ctx.lowerBody(g)
+      # FALL-THROUGH: a group that may reach its end runs the next one, so the case entered at a
+      # label is its group followed by every group it falls into, up to one that ends in a jump.
+      var own: seq[seq[Stmt]]
+      for g in groups: own.add ctx.lowerBody(g)
+      var fallsInto = newSeq[bool](groups.len)  # group i may run on into group i + 1
+      for i in 0 ..< groups.high: fallsInto[i] = mayFallOff(own[i])
+      s.cases = newSeq[seq[Stmt]](groups.len)
+      for i in countdown(groups.high, 0):
+        s.cases[i] = (if fallsInto[i]: own[i] & s.cases[i + 1] else: own[i])
       s.caseValues = groupVals
       if site >= 0:
         # LANDING SITE: 0 enters the group labelled 0, else `default:`, else none; a longjmp's
         # non-zero value any other labelled group or `default:`, else none. The groups it can
-        # enter are lowered again once the whole body has been.
+        # enter, with those they fall into, are lowered again once the whole body has been.
         var anyZero = false
         for z in groupZero: anyZero = anyZero or z
         s.switchLandingId = ctx.landingSites[site].id
         s.firstNoMatch = not anyZero and not s.hasDefault
         s.landingNoMatch = not s.hasDefault
         var rec = LandingRec(site: s, siteIdx: site, live: ctx.liveLocals)
+        var firstRuns = false                  # the first return runs the group (entered or fallen into)
         for i in 0 ..< groups.len:
           let first = groupZero[i] or (groupIsDefault[i] and not anyZero)
           let lands = groupOther[i] or groupIsDefault[i]
+          firstRuns = first or (i > 0 and fallsInto[i - 1] and firstRuns)
+          if not firstRuns:
+            rec.landingOnly.add (startOffset(groups[i][0]), endOffset(groups[i][^1]))
           s.caseFirst.add first
           s.caseLanding.add false
-          if lands: rec.parts.add (groups[i], i, first)
+          if lands:
+            var run = groups[i]
+            var j = i
+            while fallsInto[j]:
+              inc j
+              run.add groups[j]
+            rec.parts.add (run, i, first)
         ctx.landingRecs.add rec
       outp.add s
   of ckForStmt, ckWhileStmt, ckDoStmt:
@@ -5611,13 +5630,11 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
       let rec = ctx.landingRecs[ri]
       inc ri
       let site = ctx.landingSites[rec.siteIdx]
-      var ranges: seq[tuple[first, last: int]]
-      var landingOnly: seq[tuple[first, last: int]]
-      for part in rec.parts:
-        if part.stmts.len == 0: continue
-        let r = (startOffset(part.stmts[0]), endOffset(part.stmts[^1]))
-        ranges.add r
-        if not part.dual: landingOnly.add r
+      var landingOnly = rec.landingOnly        # a switch's, per case group
+      if rec.site.kind == stIf:
+        for part in rec.parts:
+          if part.stmts.len > 0:
+            landingOnly.add (startOffset(part.stmts[0]), endOffset(part.stmts[^1]))
       # a non-volatile local changed after the setjmp is indeterminate where the jump lands
       let clobbered = ctx[].clobberedLocals(c, body, site, landingOnly)
       for part in rec.parts:
@@ -5638,14 +5655,20 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
           var reads: seq[Stmt]
           var seen = initHashSet[string]()
           proc findReads(n: CXCursor, clobbered: HashSet[string], seen: var HashSet[string],
-                         reads: var seq[Stmt], sjLine: int) =
+                         reads: var seq[Stmt], sjLine: int, ctx: ptr Ctx) =
+            if clang_getCursorKind(n) == ckBinaryOperator and ctx[].binOperator(n) == "=":
+              # a plain assignment only writes the variable it names: not a use of its value
+              let kids = collectChildren(n)
+              if kids.len == 2 and clang_getCursorKind(unwrap(kids[0])) == ckDeclRefExpr:
+                findReads(kids[1], clobbered, seen, reads, sjLine, ctx)
+                return
             if clang_getCursorKind(n) == ckDeclRefExpr:
               let k = referencedUsr(n)
               if k in clobbered and k notin seen:
                 seen.incl k
                 reads.add emit(ikSetjmpClobbered, startLine(n), a = spelling(n), off = sjLine)
-            for ch in collectChildren(n): findReads(ch, clobbered, seen, reads, sjLine)
-          for st in part.stmts: findReads(st, clobbered, seen, reads, site.line)
+            for ch in collectChildren(n): findReads(ch, clobbered, seen, reads, sjLine, ctx)
+          for st in part.stmts: findReads(st, clobbered, seen, reads, site.line, ctx)
           landBody = reads & landBody
         if rec.site.kind == stIf:
           if rec.site.landingThen: rec.site.thenBody = landBody

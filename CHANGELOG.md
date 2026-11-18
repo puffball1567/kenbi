@@ -5,6 +5,20 @@ All notable changes to kenbi are recorded here. The format follows
 [Semantic Versioning](https://semver.org/); before 1.0 the interfaces, the annotation vocabulary
 and the JSON output may change in any minor version.
 
+## [Unreleased]
+
+### Fixed
+
+- Fall-through between the cases of a `switch` is followed. A case that can reach its end runs
+  on into the next one, and every check now analyses that path: a release repeated along it is a
+  double free, a lock released before it is not held after it, and a `case VALUE:` no longer
+  proves its value for code reached by falling into it. Previously each case was analysed as if
+  entered only at its own label, so such a path was missed (#6).
+- Lock checks: a `switch` case that returns no longer takes part in the state after the switch,
+  so a release after the switch is not reported as `UNLOCK_WITHOUT_LOCK` because of it.
+- `SETJMP_CLOBBERED`: a plain assignment to the local, where a jump lands, is no longer reported
+  as a use of its value.
+
 ## [0.1.3] - 2026-11-17
 
 ### Added
@@ -91,6 +105,7 @@ Also: `--project` closure over a `compile_commands.json`, `--emit-contracts`, `k
 which checks ran on which functions, and what a result without findings rests on without
 having checked it.
 
+[Unreleased]: https://github.com/puffball1567/kenbi/compare/v0.1.3...HEAD
 [0.1.3]: https://github.com/puffball1567/kenbi/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/puffball1567/kenbi/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/puffball1567/kenbi/compare/v0.1.0...v0.1.1

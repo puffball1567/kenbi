@@ -489,9 +489,13 @@ type
                            ## fixpoint over the back edge — without this the release in a
                            ## `do { … free(p); } while (0)` read as a double free of itself.
     of stSwitch:
-      cases*: seq[seq[Stmt]] ## one body per case group; analyzed as independent
-                             ## branches from the switch entry (may-set merged,
-                             ## plus the entry state for the no-match path).
+      cases*: seq[seq[Stmt]] ## one body per case group: what runs when control enters at
+                             ## its label — the group's own statements, followed by those of
+                             ## every group it falls through into (a group that may reach its
+                             ## end runs the next; see `mayFallOff`). Analyzed as independent
+                             ## branches from the switch entry (may-set merged, plus the entry
+                             ## state for the no-match path). A group run through from another
+                             ## shares its statements with that case.
       hasDefault*: bool      ## a `default:` label exists — then there is no
                              ## no-match fall-through path.
       switchKey*: string     ## TYPE-CONFUSION: the discriminant the switch is on, if it is a
@@ -840,6 +844,22 @@ type
     # proven `== value` on the path is TYPE_CONFUSION. Opt-in so other files are unaffected.
     typecheckFuncs*: HashSet[string]  ## functions with a `@typecheck` marker
     typecheckAll*: bool               ## a file-level `@typecheck` marker covers every function
+
+proc mayFallOff*(body: seq[Stmt]): bool =
+  ## Can control reach the end of `body`, and so run what follows it? Only a body that ends in a
+  ## jump on every path cannot: a `break`, `continue`, `return`, forward `goto`, `throw` or
+  ## `longjmp`, or an `if` both of whose branches end so. Anything else may fall off — an extra
+  ## path, never a missing one.
+  if body.len == 0: return true
+  let s = body[^1]
+  case s.kind
+  of stInstr:
+    case s.ik
+    of ikBreak, ikContinue, ikReturn, ikGoto, ikThrow: false
+    of ikMayLongjmp: (s.off and 1) == 0
+    else: true
+  of stIf: mayFallOff(s.thenBody) or mayFallOff(s.elseBody)
+  else: true
 
 proc relined*(s: Stmt, ln: int): Stmt =
   ## A copy of `s` (and of everything nested in it) reported at line `ln`. Used when a body is
