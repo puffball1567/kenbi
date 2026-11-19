@@ -266,6 +266,12 @@ type
                  ## bound may wrap past the top of its type, so it then keeps neither. Stepping
                  ## down keeps both only when a lower bound shows it cannot wrap below the
                  ## bottom of its type (for an unsigned value, `>= |off|`).
+    ikArgLowCheck ## INVARIANT at a call: the callee <b> declares `@invariant(<bKey> >= off)` on
+                 ## its parameter <bKey>, and this call passes <a> (+ `off2`) for it. The
+                 ## declaration is the callee's assumption, so every call must establish it:
+                 ## the argument is shown `>= off` by a check on the path, its own declared
+                 ## invariant, or its unsigned type (`cKey` = "u"). `cKey` = "@const": a constant
+                 ## below the limit; "@opaque": an argument kenbi cannot read.
     ikLowBound   ## SPATIAL (lower bound): scalar value <a> is known `>= off` on the path —
                  ## from a constant initializer (`i = 0`) or, inserted by the loop lowering,
                  ## a `>= 0` loop condition. Index sinks require a SIGNED index to have a

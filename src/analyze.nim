@@ -744,7 +744,7 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
   # SPATIAL sinks/sources — handled by analyzeSpatial (a separate bounds pass); the
   # temporal engine ignores them.
   of ikIndex, ikValidate, ikTaint, ikValueCopy, ikMaintainsCheck, ikEstablishCheck,
-     ikLowBound, ikLowInvariantCheck, ikScalarStep,
+     ikLowBound, ikLowInvariantCheck, ikScalarStep, ikArgLowCheck,
      ikLockAcquire, ikLockRelease, ikGuardedAccess, ikRequiredLockCall, ikGuardedEscape,
      ikIndirectCall, ikFnAssign,
      ikInitWrite, ikInitRead, ikVariantAccess: discard
@@ -2982,6 +2982,24 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
         of ikLowBound:                                           # value >= off (tighter wins)
           low[s.keyA] = max(low.getOrDefault(s.keyA, low(int)), s.off)
         of ikTaint: valid.del s.keyA; low.del s.keyA             # untrusted: both bounds lost
+        of ikArgLowCheck:
+          var have = low(int)
+          if s.cKey notin ["@const", "@opaque"]:
+            have = max(low.getOrDefault(s.keyA, low(int)),
+                       lowInvByField.getOrDefault(s.keyA, low(int)))
+            if s.cKey == "u": have = max(have, 0)
+          if have == low(int) or have + s.off2 < s.off:
+            let passed = (if s.off2 > 0: s.a & " + " & $s.off2
+                          elif s.off2 < 0: s.a & " - " & $(-s.off2) else: s.a)
+            diags.add Diag(line: s.line, code: "INVARIANT_NOT_MAINTAINED",
+              msg: "'" & s.b & "' declares `@invariant(" & s.bKey & " >= " & $s.off & ")`, but " &
+                   "this call passes '" & passed & "', which " &
+                   (if s.cKey == "@const": "is below " & $s.off
+                    elif s.cKey == "@opaque": "kenbi cannot read as a variable plus or minus a constant"
+                    else: "nothing on this path shows is >= " & $s.off) &
+                   ". Check the value before the call (if (" & s.a & " >= " & $(s.off - s.off2) &
+                   ") …), or declare the same invariant on it.",
+              sev: sevError)
         of ikScalarStep:
           # The value moves by a constant; a bound moves with it only where the step cannot
           # wrap. Up: an upper bound (one whose own guard cannot have wrapped) rules a wrap
@@ -3139,6 +3157,7 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
           # following protected-field invariants AND validated runtime scalar bounds. Returns the
           # final (key, off) reached. (`valid` is a var param — snapshot it for the closure.)
           let validSnap = valid
+          let lowSnap = low            # immutable views for the closures (a `var` cannot be captured)
           proc chase(symKey: string, symOff: int): tuple[key: string, off: int] =
             var effKey = symKey
             var effOff = symOff
@@ -3164,14 +3183,21 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
             if b.symKey.len > 0:
               let (k, off) = chase(b.symKey, b.symOff)
               bufSym.len > 0 and k == bufSym and off + j <= needOff + bufOff
+            elif bufN >= 0:
+              b.constB + j <= bufN + needOff
             else:
-              bufN >= 0 and b.constB + j <= bufN + needOff
+              # a constant bound against a buffer of `bufSym + bufOff` elements: covered once
+              # the path shows the size itself is large enough (`if (n >= 4)` before `buf[3]`)
+              # — by a check on the path, or by its declared `@invariant(n >= K)`
+              let szLow = max(lowSnap.getOrDefault(bufSym, low(int)),
+                              lowInvByField.getOrDefault(bufSym, low(int)))
+              bufSym.len > 0 and b.hasConst and szLow != low(int) and
+                b.constB + j <= szLow + bufOff + needOff
           # OVERFLOW-SAFETY: a bound that covers in ℤ is still unsound where the guard's OWN
           # arithmetic wraps at runtime for THIS access. A variable-side `var + gk` (unsigned)
           # wraps near the type max, so it only bounds an access at exactly `gk` — any SMALLER
           # offset (`j < gk`) is exposed. A limit-side `sym - k` (unsigned) underflows to a huge
           # value unless the companion `sym >= k` is a tracked lower bound on the path.
-          let lowSnap = low            # immutable view for the closure (a `var` cannot be captured)
           proc wrapBlocks(b: SpBound): bool =
             # variable-side: unsigned exposes `j < gk`; SIGNED (wrapVarStrict) exposes every
             # access including `j == gk` (the INT_MIN wrap passes `< lim` yet is OOB).
@@ -3318,7 +3344,11 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
                     msg: "'" & access & "' " & what & " a buffer whose size is a VARIABLE, but it " &
                          "is bounded by a constant (< " & $bound & ") — kenbi cannot confirm a " &
                          "constant covers a variable size. Bound '" & s.a & "' by the buffer's " &
-                         "own allocation count (the identifier passed to malloc/calloc).",
+                         "own allocation count (the identifier passed to malloc/calloc), or " &
+                         "show the count is at least " & $(bound + j - needOff) & " first: " &
+                         "check it on the path (if (count >= " & $(bound + j - needOff) &
+                         ") …) or declare it (`@invariant(count >= " &
+                         $(bound + j - needOff) & ")`).",
                     sev: sevError)
                 else:
                   diags.add Diag(line: s.line, code: codeBase,

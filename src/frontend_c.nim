@@ -1928,6 +1928,29 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
     var (disp, key) = requiredLockSink(call, rel)
     if key.len == 0 and rel in ctx.lockClasses: (disp, key) = (rel, rel)
     if key.len > 0: outp.add emit(ikLockRelease, line, a = disp, aKey = key)
+  # INVARIANT at the call: a callee's `@invariant(param >= K)` is what its body assumes of that
+  # parameter, so each call must establish it for the argument it passes.
+  for lo in ctx.lowInvariants.getOrDefault(callee, @[]):
+    let decl = clang_getCursorReferenced(call)
+    let np = int(clang_Cursor_getNumArguments(decl))
+    let na = int(clang_Cursor_getNumArguments(call))
+    for pi in 0 ..< min(np, na):
+      if spelling(clang_Cursor_getArgument(decl, cuint(pi))) != lo.fieldExpr: continue
+      let arg = clang_Cursor_getArgument(call, cuint(pi))
+      let uns = isUnsignedInteger(unwrap(arg))
+      if uns and lo.lowConst <= 0: continue          # `>= 0` by type
+      let lin = ctx.parseLinear(arg)
+      if lin.ok and lin.key.len == 0:
+        if lin.off < lo.lowConst:
+          outp.add emit(ikArgLowCheck, line, a = $lin.off, b = callee, bKey = lo.fieldExpr,
+                        off = lo.lowConst, cKey = "@const")
+      elif lin.ok:
+        outp.add emit(ikArgLowCheck, line, a = lin.disp, aKey = lin.key, b = callee,
+                      bKey = lo.fieldExpr, off = lo.lowConst, off2 = lin.off,
+                      cKey = (if isUnsignedInteger(unwrap(arg)) and lin.off >= 0: "u" else: ""))
+      else:
+        outp.add emit(ikArgLowCheck, line, a = ctx.cursorTokens(unwrap(arg)).join(""), b = callee,
+                      bKey = lo.fieldExpr, off = lo.lowConst, cKey = "@opaque")
   # SPATIAL size sink: if this callee takes a length argument and it is an untrusted
   # scalar parameter with no bound on the path, that is a buffer-overflow risk.
   if callee in sizeArgPos:
@@ -1962,7 +1985,7 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
           elif clang_getCursorKind(bufc) == ckMemberRefExpr:
             sz = fixedArraySize(bufc)    # a fixed-size array member `memcpy(s->buf, …)`
         let uns = isUnsignedInteger(unwrap(kids[pos]))   # unsigned length: >= 0 by type
-        if not lenConst or sz >= 0:              # a constant is checked against a fixed size only
+        if not lenConst or sz >= 0 or bsym.len > 0:   # a constant needs a known size to check
           outp.add emit(ikIndex, line, a = lin.disp, b = "size",
                         aKey = lin.key, off = sz, off2 = lin.off, bKey = bsym,
                         cKey = (if uns: "u" else: ""))
@@ -1979,7 +2002,7 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
             if ssz < 0: ssym = ctx.bufSizeSym.getOrDefault(referencedUsr(srcc)).symKey
           elif clang_getCursorKind(srcc) == ckMemberRefExpr:
             ssz = fixedArraySize(srcc)
-          if (ssz >= 0 or ssym.len > 0) and lin.key.len > 0 and (not lenConst or ssz >= 0):
+          if (ssz >= 0 or ssym.len > 0) and lin.key.len > 0:
             outp.add emit(ikIndex, line, a = lin.disp, b = "rsize",   # rsize = a READ length
                           aKey = lin.key, off = ssz, off2 = lin.off, bKey = ssym,
                           cKey = (if uns: "u" else: ""))
@@ -2541,7 +2564,7 @@ proc emitIndexSink(ctx: Ctx, baseCur, idxCur: CXCursor, line: int, outp: var seq
   ##                                 comes before the step, so it is stated on the old value);
   ##   * a constant, `x % K`, `x & K`, `x & unsignedMask` — bounded by its own form. The bound
   ##     is still checked against the buffer, through a value of its own that carries it. A
-  ##     constant index is checked only against a fixed-size array.
+  ##     constant index is checked when the buffer's size is known (fixed or symbolic).
   ## Anything else (a product, a call, two variables, a nested read) is a sink with no key:
   ## no bound check can be matched to it, so it is reported.
   let base = unwrap(baseCur)
@@ -2568,7 +2591,7 @@ proc emitIndexSink(ctx: Ctx, baseCur, idxCur: CXCursor, line: int, outp: var seq
   let own = "@index:" & $line & ":" & $outp.len      # the value an expression-form index carries
   let cv = constIntValue(ix)
   if cv.known:
-    if sz >= 0:
+    if sz >= 0 or bsym.len > 0:
       let c = int(cv.value)
       if c != high(int): outp.add emit(ikValidate, line, a = text, aKey = own, off = c + 1)
       outp.add emit(ikLowBound, line, a = text, aKey = own, off = c)
@@ -3173,6 +3196,10 @@ proc neqBound(ctx: Ctx, lhs, rhs: CXCursor): tuple[has: bool, eff: BoundEffect] 
   # `value + vOff != cConst`  ->  `value != cConst - vOff`
   let (ok, lim) = subPlus(cLin.off, vLin.off, false)
   if not ok: return (false, BoundEffect())
+  # an UNSIGNED value `!= 0` is `>= 1` outright: its type already gives `>= 0`
+  let vCur = (if vLin.key == ll.key and ll.key.len > 0: lhs else: rhs)
+  if lim == 0 and vLin.off == 0 and isUnsignedInteger(unwrap(vCur)):
+    return (true, BoundEffect(key: vLin.key, isLower: true, isConst: true, constLimit: 1))
   (true, BoundEffect(key: vLin.key, isNeq: true, constLimit: lim))
 
 proc subHeadroomBound(ctx: Ctx, op: string, lhs, rhs: CXCursor): tuple[has: bool, eff: BoundEffect] =
@@ -3283,6 +3310,11 @@ proc addElseBound(ctx: Ctx, c: CXCursor, s: Stmt) =
     for k in kids: ctx.addElseBound(k, s)
     return
   if kids.len != 2: return
+  if op == "==":                          # false on the else: `value != c`
+    let (has, eff) = ctx.neqBound(kids[0], kids[1])
+    if has:
+      var e = eff; e.onThen = false; s.condBounds.add e
+    return
   let nop = negateRel(op)
   if nop.len == 0: return
   let (has, eff) = ctx.boundWhenTrue(nop, kids[0], kids[1])
@@ -3313,6 +3345,11 @@ proc fillBounds(ctx: Ctx, cond: CXCursor, s: Stmt) =
     let (has, eff) = ctx.neqBound(kids[0], kids[1])
     if has:
       var e = eff; e.onThen = true; s.condBounds.add e
+    return
+  if op == "==":                          # `if (x == c) return;`: `x != c` on the fall-through
+    let (has, eff) = ctx.neqBound(kids[0], kids[1])
+    if has:
+      var e = eff; e.onThen = false; s.condBounds.add e
     return
   let (hasT, effT) = ctx.boundWhenTrue(op, kids[0], kids[1])
   if hasT:

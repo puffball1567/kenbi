@@ -18,6 +18,13 @@ and the JSON output may change in any minor version.
   buffer (`tab[8]` on an 8-element array, `memcpy(dst, src, 16)` into 8 bytes), and `*(p + i)`
   is checked as `p[i]` (#7).
 
+- Bounds: a constant index or length into a buffer of variable size (`buf[0]` on
+  `malloc(n * …)`, `memcpy(dst, src, 4)` into a `@counted_by` buffer) is reported unless the
+  size is shown large enough, by a check on the path (`if (n >= 1)`, `if (n == 0) return;`) or
+  by a declared `@invariant(n >= K)`.
+- `@invariant(param >= K)` on a function's parameter is verified at each call under `@spatial`:
+  the argument must be shown `>= K`, else the call is `INVARIANT_NOT_MAINTAINED`.
+
 ### Fixed
 
 - Bounds: `i++`, `--i`, `i += k` and `i = i ± k` move the bounds of the value they change, as a
