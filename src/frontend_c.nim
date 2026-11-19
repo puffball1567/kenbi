@@ -1951,6 +1951,29 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
       else:
         outp.add emit(ikArgLowCheck, line, a = ctx.cursorTokens(unwrap(arg)).join(""), b = callee,
                       bKey = lo.fieldExpr, off = lo.lowConst, cKey = "@opaque")
+  for inv in ctx.invariants.getOrDefault(callee, @[]):
+    # `@invariant(p REL q)` between two parameters: the call must establish it for the
+    # arguments. (An invariant naming a field is a property of the object, kept by its writers.)
+    let decl = clang_getCursorReferenced(call)
+    let np = min(int(clang_Cursor_getNumArguments(decl)), int(clang_Cursor_getNumArguments(call)))
+    var li = -1
+    var ri = -1
+    for pi in 0 ..< np:
+      let pn = spelling(clang_Cursor_getArgument(decl, cuint(pi)))
+      if pn == inv.lhsExpr: li = pi
+      if pn == inv.rhsExpr: ri = pi
+    if li < 0 or ri < 0: continue
+    let la = clang_Cursor_getArgument(call, cuint(li))
+    let ra = clang_Cursor_getArgument(call, cuint(ri))
+    let ll = ctx.parseLinear(la)
+    let rl = ctx.parseLinear(ra)
+    let tag = callee & "|" & inv.lhsExpr & " " & inv.rel & " " & inv.rhsExpr
+    let relBits = (if inv.rel == "<=": 1 else: 0) or (if isUnsignedInteger(unwrap(ra)): 2 else: 0)
+    if ll.ok and rl.ok:
+      outp.add emit(ikArgRelCheck, line, a = ll.disp, aKey = ll.key, off = ll.off,
+                    b = rl.disp, bKey = rl.key, off2 = rl.off, cKey = tag, off3 = relBits)
+    else:
+      outp.add emit(ikArgRelCheck, line, a = "@opaque", cKey = tag, off3 = relBits)
   # SPATIAL size sink: if this callee takes a length argument and it is an untrusted
   # scalar parameter with no bound on the path, that is a buffer-overflow risk.
   if callee in sizeArgPos:

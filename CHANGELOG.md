@@ -22,8 +22,10 @@ and the JSON output may change in any minor version.
   `malloc(n * …)`, `memcpy(dst, src, 4)` into a `@counted_by` buffer) is reported unless the
   size is shown large enough, by a check on the path (`if (n >= 1)`, `if (n == 0) return;`) or
   by a declared `@invariant(n >= K)`.
-- `@invariant(param >= K)` on a function's parameter is verified at each call under `@spatial`:
-  the argument must be shown `>= K`, else the call is `INVARIANT_NOT_MAINTAINED`.
+- An `@invariant` on a function's parameters — `@invariant(param >= K)`, or a relation between
+  two parameters such as `@invariant(next <= num)` — is verified at each call under `@spatial`:
+  the arguments must be shown to satisfy it, else the call is `INVARIANT_NOT_MAINTAINED`.
+  Previously it was assumed of every caller.
 
 ### Fixed
 

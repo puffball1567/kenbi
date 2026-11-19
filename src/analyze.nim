@@ -744,7 +744,7 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
   # SPATIAL sinks/sources — handled by analyzeSpatial (a separate bounds pass); the
   # temporal engine ignores them.
   of ikIndex, ikValidate, ikTaint, ikValueCopy, ikMaintainsCheck, ikEstablishCheck,
-     ikLowBound, ikLowInvariantCheck, ikScalarStep, ikArgLowCheck,
+     ikLowBound, ikLowInvariantCheck, ikScalarStep, ikArgLowCheck, ikArgRelCheck,
      ikLockAcquire, ikLockRelease, ikGuardedAccess, ikRequiredLockCall, ikGuardedEscape,
      ikIndirectCall, ikFnAssign,
      ikInitWrite, ikInitRead, ikVariantAccess: discard
@@ -2982,6 +2982,61 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
         of ikLowBound:                                           # value >= off (tighter wins)
           low[s.keyA] = max(low.getOrDefault(s.keyA, low(int)), s.off)
         of ikTaint: valid.del s.keyA; low.del s.keyA             # untrusted: both bounds lost
+        of ikArgRelCheck:
+          # prove  x + xo < y + yo + base  (base 1 for `<=`)
+          let base = s.off3 and 1
+          let yUnsigned = (s.off3 and 2) == 2
+          let xo = s.off
+          let yo = s.off2
+          var ok = false
+          if s.a == "@opaque": ok = false
+          elif s.aKey.len == 0 and s.bKey.len == 0: ok = xo < yo + base
+          elif s.aKey.len == 0:
+            # constant vs variable: needs a lower bound on the variable
+            var yl = max(low.getOrDefault(s.bKey, low(int)), lowInvByField.getOrDefault(s.bKey, low(int)))
+            if yUnsigned and yo >= 0: yl = max(yl, 0)
+            ok = yl != low(int) and xo < yl + yo + base
+          elif s.aKey == s.bKey: ok = xo < yo + base
+          else:
+            # the bound(s) known for x: on the path, and x's own declared invariant
+            var starts: seq[tuple[key: string, off: int, isConst: bool]]
+            if s.aKey in valid:
+              let b = valid[s.aKey]
+              if not b.wrapVar and b.wrapLimNeed == 0:
+                if b.symKey.len > 0: starts.add (b.symKey, b.symOff, false)
+                elif b.hasConst: starts.add ("", b.constB, true)
+            if s.aKey in invByField:
+              starts.add (invByField[s.aKey].sizeKey, invByField[s.aKey].symOff, false)
+            for st in starts:
+              if st.isConst:                         # x < C: against a constant y only
+                if s.bKey.len == 0 and st.off + xo <= yo + base: ok = true
+                continue
+              if s.bKey.len == 0: continue
+              var k = st.key                         # x < k + off: follow k up to y
+              var off = st.off
+              var seen = initHashSet[string]()
+              while k != s.bKey and k notin seen:
+                seen.incl k
+                if k in invByField:
+                  off = off + invByField[k].symOff - 1
+                  k = invByField[k].sizeKey
+                elif k in valid and valid[k].symKey.len > 0 and not valid[k].wrapVar and
+                     valid[k].wrapLimNeed == 0:
+                  off = off + valid[k].symOff - 1
+                  k = valid[k].symKey
+                else: break
+              if k == s.bKey and off + xo <= yo + base: ok = true
+              if ok: break
+          if not ok:
+            let parts = s.cKey.split('|')
+            diags.add Diag(line: s.line, code: "INVARIANT_NOT_MAINTAINED",
+              msg: "'" & parts[0] & "' declares `@invariant(" & parts[^1] & ")`, but this call " &
+                   "is not shown to establish it — " &
+                   (if s.a == "@opaque": "kenbi cannot read the arguments it passes as a " &
+                      "variable plus or minus a constant"
+                    else: "nothing on this path relates the arguments it passes") &
+                   ". Check the relation before the call, or declare the same invariant here.",
+              sev: sevError)
         of ikArgLowCheck:
           var have = low(int)
           if s.cKey notin ["@const", "@opaque"]:

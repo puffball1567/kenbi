@@ -266,6 +266,14 @@ type
                  ## bound may wrap past the top of its type, so it then keeps neither. Stepping
                  ## down keeps both only when a lower bound shows it cannot wrap below the
                  ## bottom of its type (for an unsigned value, `>= |off|`).
+    ikArgRelCheck ## INVARIANT at a call: the callee declares `@invariant(p REL q)` between two of
+                 ## its parameters (`cKey` = the declaration as written, after the callee's
+                 ## name and a `|`), and this call passes <a> + `off` for `p` and <b> + `off2`
+                 ## for `q` (an empty key = a constant, its value in the offset). `off3` = 1
+                 ## for `<=`, 0 for `<`; +2 when the `q` argument is unsigned. Every call must
+                 ## establish the relation: the same variable on both sides, a bound on the
+                 ## path (followed through the caller's own invariants), or constants.
+                 ## `a` = "@opaque": an argument kenbi cannot read.
     ikArgLowCheck ## INVARIANT at a call: the callee <b> declares `@invariant(<bKey> >= off)` on
                  ## its parameter <bKey>, and this call passes <a> (+ `off2`) for it. The
                  ## declaration is the callee's assumption, so every call must establish it:
