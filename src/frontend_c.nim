@@ -1934,8 +1934,23 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
     let kids = collectChildren(call)
     let pos = sizeArgPos[callee] + 1            # +1: kids[0] is the callee reference
     if pos < kids.len:
-      let lin = ctx.parseLinear(kids[pos])           # the length, possibly `len ± k`
-      if lin.ok and lin.key.len > 0:
+      var lin = ctx.parseLinear(kids[pos])           # the length, possibly `len ± k`
+      var lenConst = false
+      if lin.ok and lin.key.len == 0:
+        # a CONSTANT length: carried by a value of its own, bounded to exactly that constant,
+        # so it is checked against a fixed-size destination / source like any other length
+        lenConst = true
+        lin.key = "@size:" & $line & ":" & $outp.len
+        lin.disp = ctx.cursorTokens(unwrap(kids[pos])).join("")
+        if lin.off != high(int):
+          outp.add emit(ikValidate, line, a = lin.disp, aKey = lin.key, off = lin.off + 1)
+        outp.add emit(ikLowBound, line, a = lin.disp, aKey = lin.key, off = lin.off)
+        lin.off = 0
+      elif not lin.ok:
+        # a length kenbi cannot read as `variable ± constant`: no bound check can be matched
+        # to it, so the sink carries no key and is reported
+        lin = (true, "", ctx.cursorTokens(unwrap(kids[pos])).join(""), 0)
+      block:
         var sz = -1                         # the destination buffer's size, if a fixed array
         var bsym = ""                       # or its symbolic allocation count, if malloc'd
         let bp = bufArgPos.getOrDefault(callee, -1) + 1   # +1: kids[0] is the callee ref
@@ -1947,9 +1962,10 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
           elif clang_getCursorKind(bufc) == ckMemberRefExpr:
             sz = fixedArraySize(bufc)    # a fixed-size array member `memcpy(s->buf, …)`
         let uns = isUnsignedInteger(unwrap(kids[pos]))   # unsigned length: >= 0 by type
-        outp.add emit(ikIndex, line, a = lin.disp, b = "size",
-                      aKey = lin.key, off = sz, off2 = lin.off, bKey = bsym,
-                      cKey = (if uns: "u" else: ""))
+        if not lenConst or sz >= 0:              # a constant is checked against a fixed size only
+          outp.add emit(ikIndex, line, a = lin.disp, b = "size",
+                        aKey = lin.key, off = sz, off2 = lin.off, bKey = bsym,
+                        cKey = (if uns: "u" else: ""))
         # SPATIAL source-read sink: the copy also READS `len` bytes from the source buffer. When
         # the source's size is DECLARED, check the read stays within it (the memcpy SOURCE
         # over-read — Heartbleed). Only for a known source size; an unsized source is not flagged.
@@ -1963,7 +1979,7 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
             if ssz < 0: ssym = ctx.bufSizeSym.getOrDefault(referencedUsr(srcc)).symKey
           elif clang_getCursorKind(srcc) == ckMemberRefExpr:
             ssz = fixedArraySize(srcc)
-          if ssz >= 0 or ssym.len > 0:            # only when the source size is known
+          if (ssz >= 0 or ssym.len > 0) and lin.key.len > 0 and (not lenConst or ssz >= 0):
             outp.add emit(ikIndex, line, a = lin.disp, b = "rsize",   # rsize = a READ length
                           aKey = lin.key, off = ssz, off2 = lin.off, bKey = ssym,
                           cKey = (if uns: "u" else: ""))
@@ -2514,10 +2530,92 @@ proc lowerExprCalls(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
   for ch in collectChildren(cu):
     ctx.lowerExprCalls(ch, outp)
 
+proc incDecDelta(ctx: Ctx, c: CXCursor): int
+
+proc emitIndexSink(ctx: Ctx, baseCur, idxCur: CXCursor, line: int, outp: var seq[Stmt]) =
+  ## SPATIAL sink for an access `base[idx]` (or `*(base + idx)`): emit the ikIndex the spatial
+  ## pass checks. The index is read as one of:
+  ##   * `var ± k`                 — the sink names `var`, carrying the offset, so a neighbour
+  ##                                 access `buf[i + 1]` needs `i` bounded to cover `i + 1`;
+  ##   * `var++` / `var--`         — reads `var`; `++var` / `--var` reads `var ± 1` (the sink
+  ##                                 comes before the step, so it is stated on the old value);
+  ##   * a constant, `x % K`, `x & K`, `x & unsignedMask` — bounded by its own form. The bound
+  ##     is still checked against the buffer, through a value of its own that carries it. A
+  ##     constant index is checked only against a fixed-size array.
+  ## Anything else (a product, a call, two variables, a nested read) is a sink with no key:
+  ## no bound check can be matched to it, so it is reported.
+  let base = unwrap(baseCur)
+  var sz = -1                    # a fixed array's element count
+  var bsym = ""                  # the buffer's symbolic allocation count, if known
+  var bsymOff = 0                # the buffer holds `bsym + bsymOff` elements
+  if clang_getCursorKind(base) == ckDeclRefExpr:
+    sz = fixedArraySize(base)
+    if sz < 0:
+      let bs = ctx.bufSizeSym.getOrDefault(referencedUsr(base))
+      bsym = bs.symKey; bsymOff = bs.off
+  elif clang_getCursorKind(base) == ckMemberRefExpr:
+    sz = fixedArraySize(base)    # a fixed-size array member `s->buf[N]` (field buffer)
+    if sz < 0:                   # a pointer field sized by a declared `@counted_by`
+      let (fk, _) = fieldPath(base)
+      if fk.len > 0:
+        let bs = ctx.bufSizeSym.getOrDefault(fk)
+        bsym = bs.symKey; bsymOff = bs.off
+  let ix = unwrap(idxCur)
+  proc sink(disp, key: string, off2: int, uns: bool): Stmt =
+    emit(ikIndex, line, a = disp, aKey = key, off = sz, off2 = off2, bKey = bsym,
+         cKey = (if uns: "u" else: ""), off3 = bsymOff)
+  let text = ctx.cursorTokens(ix).join("")
+  let own = "@index:" & $line & ":" & $outp.len      # the value an expression-form index carries
+  let cv = constIntValue(ix)
+  if cv.known:
+    if sz >= 0:
+      let c = int(cv.value)
+      if c != high(int): outp.add emit(ikValidate, line, a = text, aKey = own, off = c + 1)
+      outp.add emit(ikLowBound, line, a = text, aKey = own, off = c)
+      outp.add sink(text, own, 0, false)
+    return
+  let lin = ctx.parseLinear(ix)
+  if lin.ok and lin.key.len > 0:
+    outp.add sink(lin.disp, lin.key, lin.off, isUnsignedInteger(ix))
+    return
+  let d = ctx.incDecDelta(ix)
+  if d != 0:
+    let kids = collectChildren(ix)
+    if kids.len >= 1:
+      let t = ctx.scalarTerm(unwrap(kids[0]))
+      if t.ok:
+        let prefix = ctx.firstTokenSpelling(ix) in ["++", "--"]
+        outp.add sink(t.disp, t.key, (if prefix: d else: 0), isUnsignedInteger(unwrap(kids[0])))
+        return
+  if clang_getCursorKind(ix) == ckBinaryOperator and ctx.binOperator(ix) in ["%", "&"]:
+    let kids = collectChildren(ix)
+    if kids.len == 2:
+      let isMod = ctx.binOperator(ix) == "%"
+      let uns = isUnsignedInteger(ix)
+      let m = constIntValue(unwrap(kids[1]))
+      if m.known and m.value > 0 and m.value < int64(high(int)):
+        # x % K < K (and >= 0 only when unsigned);  0 <= x & K <= K
+        outp.add emit(ikValidate, line, a = text, aKey = own,
+                      off = (if isMod: int(m.value) else: int(m.value) + 1))
+        if not isMod: outp.add emit(ikLowBound, line, a = text, aKey = own, off = 0)
+        outp.add sink(text, own, 0, uns)
+        return
+      if not isMod:
+        for mi in [1, 0]:        # `x & mask`, mask an unsigned variable / field: 0 <= result <= mask
+          let mt = ctx.scalarTerm(unwrap(kids[mi]))
+          if mt.ok and isUnsignedInteger(unwrap(kids[mi])):
+            outp.add emit(ikValidate, line, a = text, aKey = own, b = mt.disp, bKey = mt.key, off = 1)
+            outp.add emit(ikLowBound, line, a = text, aKey = own, off = 0)
+            outp.add sink(text, own, 0, uns)
+            return
+  outp.add sink(text, "", 0, false)
+
 proc scanDerefs(ctx: Ctx, c: CXCursor, outp: var seq[Stmt]) =
   ## Walk an expression subtree and emit `ikDeref` for `*p` / `p->x` / `p[i]`
   ## of a named variable. Harmless on non-nullable vars (the engine only warns
-  ## when null-state says maybe). Does not descend into nested statements.
+  ## when null-state says maybe). Does not descend into nested statements. Also emits the
+  ## SPATIAL effects found in an expression: the index sinks, and every in-place change of a
+  ## scalar (`i++`, `--i`, `i += k`), in evaluation order.
   let k = clang_getCursorKind(c)
   let kids = collectChildren(c)
   case k
@@ -2541,38 +2639,63 @@ proc scanDerefs(ctx: Ctx, c: CXCursor, outp: var seq[Stmt]) =
       return
     for ch in kids: ctx.scanDerefs(ch, outp)
     return
+  of ckCompoundAssign:
+    # `v OP= rhs` on a scalar: the right side is evaluated first, then `v` changes. `+=` /
+    # `-=` by a constant is a step; `%= K` / `&= K` bound it; anything else leaves it with no
+    # bound. A protected field written under `@maintains` is verified (and re-bounded) by the
+    # invariant check instead.
+    for ch in kids: ctx.scanDerefs(ch, outp)
+    if kids.len == 2:
+      let lhs = unwrap(kids[0])
+      let t = ctx.scalarTerm(lhs)
+      if t.ok and not (t.key in ctx.curProtected and startLine(c) in ctx.maintainsLines):
+        let op = ctx.binOperator(c)
+        let rc = constIntValue(unwrap(kids[1]))
+        let line = startLine(c)
+        if op in ["+=", "-="] and rc.known and abs(rc.value) < int64(high(int32)):
+          outp.add emit(ikScalarStep, line, a = t.disp, aKey = t.key,
+                        off = (if op == "+=": int(rc.value) else: -int(rc.value)),
+                        cKey = (if isUnsignedInteger(lhs): "u" else: ""))
+        elif op == "%=" and rc.known and rc.value > 0:
+          outp.add emit(ikTaint, line, a = t.disp, aKey = t.key)   # the old lower bound is gone
+          outp.add emit(ikValidate, line, a = t.disp, aKey = t.key, off = int(rc.value))
+        elif op == "&=" and rc.known and rc.value >= 0 and rc.value < int64(high(int)):
+          outp.add emit(ikTaint, line, a = t.disp, aKey = t.key)
+          outp.add emit(ikValidate, line, a = t.disp, aKey = t.key, off = int(rc.value) + 1)
+          outp.add emit(ikLowBound, line, a = t.disp, aKey = t.key, off = 0)
+        else:
+          outp.add emit(ikTaint, line, a = t.disp, aKey = t.key)
+    return
   of ckUnaryOperator:
     if ctx.firstTokenSpelling(c) == "*" and kids.len >= 1:
       ctx.derefVar(kids[0], startLine(c), outp)
+      # `*(p + i)` / `*(i + p)` is `p[i]`; `*(p - i)` reads below `p`
+      let inner = unwrap(kids[0])
+      if clang_getCursorKind(inner) == ckBinaryOperator and ctx.binOperator(inner) in ["+", "-"]:
+        let ik = collectChildren(inner)
+        if ik.len == 2:
+          let l = unwrap(ik[0]); let r = unwrap(ik[1])
+          if isIntegerType(r) and not isIntegerType(l):
+            if ctx.binOperator(inner) == "+": ctx.emitIndexSink(ik[0], ik[1], startLine(c), outp)
+            elif not constIntValue(r).known or fixedArraySize(l) >= 0:
+              outp.add emit(ikIndex, startLine(c), a = "-(" & ctx.cursorTokens(r).join("") & ")",
+                            off = fixedArraySize(l))
+          elif isIntegerType(l) and not isIntegerType(r) and ctx.binOperator(inner) == "+":
+            ctx.emitIndexSink(ik[1], ik[0], startLine(c), outp)
+    else:
+      let d = ctx.incDecDelta(c)
+      if d != 0 and kids.len >= 1:
+        let o = unwrap(kids[0])
+        let t = ctx.scalarTerm(o)
+        if t.ok:
+          for ch in kids: ctx.scanDerefs(ch, outp)
+          if not (t.key in ctx.curProtected and startLine(c) in ctx.maintainsLines):
+            outp.add emit(ikScalarStep, startLine(c), a = t.disp, aKey = t.key, off = d,
+                          cKey = (if isUnsignedInteger(o): "u" else: ""))
+          return
   of ckArraySubscriptExpr:
     if kids.len >= 1: ctx.derefVar(kids[0], startLine(c), outp)
-    # SPATIAL sink: the index expression. A value (possibly `var ± k`) used as a subscript
-    # must be VALIDATED; emit ikIndex so the spatial pass can check it, carrying the `± k`
-    # offset so a neighbour access `buf[i + 1]` requires `i` bounded to cover `i + 1`. A
-    # pure-constant / modulo / mask index is bounded by construction (no variable -> no sink).
-    if kids.len >= 2:
-      let lin = ctx.parseLinear(kids[1])
-      if lin.ok and lin.key.len > 0:
-        let base = unwrap(kids[0])     # the buffer: its size (if a fixed array) lets the
-        var sz = -1
-        var bsym = ""                  # the buffer's symbolic allocation count, if known
-        var bsymOff = 0                # the buffer holds `bsym + bsymOff` elements
-        if clang_getCursorKind(base) == ckDeclRefExpr:
-          sz = fixedArraySize(base)
-          if sz < 0:
-            let s = ctx.bufSizeSym.getOrDefault(referencedUsr(base))
-            bsym = s.symKey; bsymOff = s.off
-        elif clang_getCursorKind(base) == ckMemberRefExpr:
-          sz = fixedArraySize(base)    # a fixed-size array member `s->buf[N]` (field buffer)
-          if sz < 0:                   # a pointer field sized by a declared `@counted_by`
-            let (fk, _) = fieldPath(base)
-            if fk.len > 0:
-              let s = ctx.bufSizeSym.getOrDefault(fk)
-              bsym = s.symKey; bsymOff = s.off
-        let uns = isUnsignedInteger(unwrap(kids[1]))   # unsigned index: >= 0 by type
-        outp.add emit(ikIndex, startLine(c), a = lin.disp, aKey = lin.key,
-                      off = sz, off2 = lin.off, bKey = bsym, cKey = (if uns: "u" else: ""),
-                      off3 = bsymOff)
+    if kids.len >= 2: ctx.emitIndexSink(kids[0], kids[1], startLine(c), outp)
   of ckMemberRefExpr:
     if kids.len >= 1 and ctx.hasArrow(c): ctx.derefVar(kids[0], startLine(c), outp)
   else: discard
@@ -3280,6 +3403,11 @@ proc lowerScalarAssign(ctx: Ctx, name, key: string, rhs: CXCursor, line: int,
   # the same deferred concern as every signed index). An UNSIGNED target could wrap to a
   # huge value, so it is NOT derived here (left tainted — no false green). This is the
   # reverse-loop idiom `i = toknext - 1` and the `toksuper = toknext - 1` cursor step.
+  block:                                         # `v = v ± k`: a step, like `v += k`
+    let lin = ctx.parseLinear(v)
+    if lin.ok and lin.key.len > 0 and lin.key == key and abs(lin.off) < int(high(int32)):
+      outp.add emit(ikScalarStep, line, a = name, aKey = key, off = lin.off,
+                    cKey = (if lhsSigned: "" else: "u")); return
   if lhsSigned:
     let lin = ctx.parseLinear(v)
     if lin.ok and lin.key.len > 0 and lin.off <= -1:
@@ -3532,9 +3660,11 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
             # to the caller — the obligation leaves through the parameter, not a leak here.
             ctx.prog.escapesLines.incl startLine(c)
             outp.add emit(ikEscape, startLine(c), a = spelling(lhs), aKey = referencedUsr(lhs))
-          if isIntegerType(lhs):   # SPATIAL: follow scalar-integer dataflow
-            ctx.lowerScalarAssign(spelling(lhs), referencedUsr(lhs), kids[1], startLine(c), outp,
-                                  lhsSigned = not isUnsignedInteger(lhs))
+          if isIntegerType(lhs):   # SPATIAL: follow scalar-integer dataflow — AFTER the
+            # statement's own sinks, which read the value from before the assignment
+            # (`i = tab[i] % 8` indexes with the old `i`)
+            deferFk = referencedUsr(lhs); deferFd = spelling(lhs); deferRhs = kids[1]
+            deferSigned = not isUnsignedInteger(lhs)
         elif ctx.containerStoreTarget(lhs).has:
           # `m[k] = p` on a STANDARD associative container: the container takes the owned
           # pointer into its element slot, exactly like `v.push_back(p)` (Juliet 74).
@@ -3641,8 +3771,7 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
             if (fk in ctx.curProtected or fk in ctx.curProtectedLow) and not selfMod:
               deferFk = fk; deferFd = fd; deferRhs = kids[1]; deferSigned = not isUnsignedInteger(lhs)
             elif fk notin ctx.curProtected and fk notin ctx.curProtectedLow:
-              ctx.lowerScalarAssign(fd, fk, kids[1], startLine(c), outp,
-                                    lhsSigned = not isUnsignedInteger(lhs))
+              deferFk = fk; deferFd = fd; deferRhs = kids[1]; deferSigned = not isUnsignedInteger(lhs)
     else:
       # `p += n` / `p -= n` on a tracked pointer advances it -> interior pointer.
       let adv = ctx.advancesTrackedPointer(c)
@@ -3650,18 +3779,6 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
         outp.add emit(ikInterior, startLine(c), a = adv.name, b = adv.name,
                       aKey = adv.key, bKey = adv.key, off = ctx.advanceStep(c))
       else:
-        # SPATIAL: a compound mutation (`i += k`, `i <<= …`) on a scalar integer makes
-        # it unvalidated again (it may now exceed any earlier bound — off-by-one). In a
-        # loop the cond re-validates at the body top, so this only de-validates straight
-        # line / post-loop uses. `i &= mask` / `i %= n` keep it bounded.
-        let kids = collectChildren(c)
-        if kids.len >= 1:
-          let lhs = unwrap(kids[0])
-          if clang_getCursorKind(lhs) == ckDeclRefExpr and isIntegerType(lhs):
-            if op in ["&=", "%="]:
-              outp.add emit(ikValidate, startLine(c), a = spelling(lhs), aKey = referencedUsr(lhs))
-            else:
-              outp.add emit(ikTaint, startLine(c), a = spelling(lhs), aKey = referencedUsr(lhs))
         # ...and a CALL on the right of a compound assignment still passes its arguments across
         # the boundary: `status &= AppendValueToLinkedList(cache, log_info);` hands the object to
         # the container exactly as the plain-statement form does. Without this the escape went
@@ -3682,7 +3799,7 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
           outp.add emit(ikUnsupportedConstruct, startLine(c), a = "expression")
     ctx.scanDerefs(c, outp)
     ctx.scanInvariantWrites(c, outp)
-    if deferFk.len > 0:                          # protected-field re-taint, AFTER the maintains check
+    if deferFk.len > 0:                          # the scalar assignment's effect, AFTER its sinks / maintains check
       ctx.lowerScalarAssign(deferFd, deferFk, deferRhs, startLine(c), outp, lhsSigned = deferSigned)
     ctx.scanGuarded(c, outp)
     ctx.scanInit(c, outp)
@@ -4040,6 +4157,7 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
       ctx.lowerStmt(initCur, outp)          # assignment-form init: hoist it before the loop
     var lb: seq[Stmt]
     if hasBody: lb = ctx.lowerBody(@[bodyCur])
+    var headerAt = lb.len                   # where the header's own statements start
     for ch in kids:                         # cond / increment header expressions
       if clang_getCursorKind(ch) == ckDeclStmt: continue      # init: already lowered
       if hasInit and clang_equalCursors(ch, initCur) != 0: continue  # hoisted init
@@ -4073,16 +4191,20 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
         # wrap-prone loop *condition* with an offset is near-nonexistent in real code — the
         # headroom check is an inner `if`, which the sink DOES wrap-gate.)
         if be.wrapVar or be.wrapLimNeed > 0: continue
-        if be.isLower:                         # `for (; i >= 0; …)` -> i >= 0 in the body
-          lb.insert(emit(ikLowBound, startLine(c), aKey = be.key, off = be.constLimit), 0)
-        elif be.isConst:
-          lb.insert(emit(ikValidate, startLine(c), aKey = be.key, off = be.constLimit), 0)
-        else:
-          lb.insert(emit(ikValidate, startLine(c), aKey = be.key,
-                         b = be.symDisp, bKey = be.symKey, off = be.symOff), 0)
+        let bs = (if be.isLower:               # `for (; i >= 0; …)` -> i >= 0 in the body
+                    emit(ikLowBound, startLine(c), aKey = be.key, off = be.constLimit)
+                  elif be.isConst:
+                    emit(ikValidate, startLine(c), aKey = be.key, off = be.constLimit)
+                  else:
+                    emit(ikValidate, startLine(c), aKey = be.key,
+                         b = be.symDisp, bKey = be.symKey, off = be.symOff))
+        if k == ckDoStmt:
+          lb.add bs                            # a do-while tests AFTER the body: the first
+        else:                                  # iteration runs without the bound
+          lb.insert(bs, 0); inc headerAt
     let trips = ctx.loopTripFacts(c, k, kids, bodyCur, hasBody)
     outp.add Stmt(line: startLine(c), kind: stLoop, loopBody: lb, doWhile: trips.atLeastOnce,
-                  contExits: trips.contExits, noBackEdge: trips.atMostOnce)
+                  contExits: trips.contExits, noBackEdge: trips.atMostOnce, headerAt: headerAt)
     # `@drains(head)` on the loop's line (or the line above it): this loop releases every
     # element of the collection rooted at `head`. Emitted AFTER the loop — the collection is
     # discharged at the loop's exit, and every cursor on it dangles from there.
@@ -4161,6 +4283,7 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
         s.doWhile = true
         s.contExits = true    # `continue` on the LAST element leaves the loop
     if kids.len >= 1: s.loopBody = head & ctx.lowerBody(@[kids[^1]])
+    s.headerAt = s.loopBody.len             # no header statements of its own
     outp.add s
   of ckCXXThrowExpr:
     # `throw e;` — control leaves by unwinding: a call in the operand lowers its effects first,
@@ -5079,7 +5202,8 @@ proc rewriteBackwardLoop(body: seq[Stmt]): seq[Stmt] =
   for i in 0 ..< hi: result.add body[i]
   # a goto-loop runs its body at least once (the back-edge test follows the body), so the
   # synthetic loop is a do-while — its post-state must not include a 0-trip exit.
-  result.add Stmt(line: body[hi].line, kind: stLoop, loopBody: loopBody, doWhile: true)
+  result.add Stmt(line: body[hi].line, kind: stLoop, loopBody: loopBody, doWhile: true,
+                  headerAt: loopBody.len)
   for i in gi+1 ..< body.len: result.add body[i]
 
 

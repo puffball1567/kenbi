@@ -259,6 +259,13 @@ type
                  ## deref / field read, or non-bounding arithmetic). Must be re-validated
                  ## before a sink. Clears any prior validation (avoids a false negative
                  ## when a once-validated var is reassigned to untrusted data).
+    ikScalarStep ## SPATIAL: scalar value <a> is changed in place by the constant `off` (`i++`,
+                 ## `--i`, `i += 2`, `i = i - 1`). `cKey` = "u" when <a> is unsigned. Its bounds
+                 ## move with it where that is certain: stepping up keeps an upper bound
+                 ## (shifted by `off`) and, with it, the lower bound — a value with no upper
+                 ## bound may wrap past the top of its type, so it then keeps neither. Stepping
+                 ## down keeps both only when a lower bound shows it cannot wrap below the
+                 ## bottom of its type (for an unsigned value, `>= |off|`).
     ikLowBound   ## SPATIAL (lower bound): scalar value <a> is known `>= off` on the path —
                  ## from a constant initializer (`i = 0`) or, inserted by the loop lowering,
                  ## a `>= 0` loop condition. Index sinks require a SIGNED index to have a
@@ -484,6 +491,9 @@ type
                            ## constant (`while (1)`), where `continue` always re-enters the body.
                            ## Only consulted when `doWhile` is set — otherwise the loop exits at
                            ## the head, which already joins every continue.
+      headerAt*: int       ## index in `loopBody` where the loop header's own statements (the
+                           ## condition's and the increment's effects) start. A `continue`
+                           ## jumps there, not to the end of the loop.
       noBackEdge*: bool    ## the body runs AT MOST ONCE: `do … while (0)`, the standard C
                            ## multi-statement macro wrapper. There is no second iteration, so no
                            ## fixpoint over the back edge — without this the release in a

@@ -744,7 +744,7 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
   # SPATIAL sinks/sources — handled by analyzeSpatial (a separate bounds pass); the
   # temporal engine ignores them.
   of ikIndex, ikValidate, ikTaint, ikValueCopy, ikMaintainsCheck, ikEstablishCheck,
-     ikLowBound, ikLowInvariantCheck,
+     ikLowBound, ikLowInvariantCheck, ikScalarStep,
      ikLockAcquire, ikLockRelease, ikGuardedAccess, ikRequiredLockCall, ikGuardedEscape,
      ikIndirectCall, ikFnAssign,
      ikInitWrite, ikInitRead, ikVariantAccess: discard
@@ -2931,7 +2931,40 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
   for lo in fn.lowInvariants:
     lowInvByField[lo.fieldKey] = lo.lowConst
   proc diverges(stmts: seq[Stmt]): bool =
-    stmts.len > 0 and stmts[^1].kind == stInstr and stmts[^1].ik == ikReturn
+    # does `stmts` end by leaving: a `return`, or a `break` / `continue`, whose state is joined
+    # where it goes (breakFrames / contFrames) rather than after `stmts`
+    stmts.len > 0 and stmts[^1].kind == stInstr and stmts[^1].ik in {ikReturn, ikBreak, ikContinue}
+  proc joinValid(x, y: Table[string, SpBound]): Table[string, SpBound] =
+    ## The bounds that hold where two paths meet: a bound only if on BOTH paths and COMPATIBLE,
+    ## and then the weaker one.
+    for k, v in x:
+      if k notin y: continue
+      let w = y[k]
+      if v.symKey.len > 0 and v.symKey == w.symKey:
+        result[k] = SpBound(symKey: v.symKey, symDisp: v.symDisp,
+                            symOff: max(v.symOff, w.symOff),    # weaker bound holds
+                            # wrap hazards survive the join: keep the STRICTER of each
+                            # (larger gk / larger companion need refuses more; signed-strict
+                            # wins) so a merged bound never loses a wrap constraint one
+                            # branch carried.
+                            wrapVar: v.wrapVar or w.wrapVar,
+                            wrapGuardOff: max(v.wrapGuardOff, w.wrapGuardOff),
+                            wrapVarStrict: v.wrapVarStrict or w.wrapVarStrict,
+                            wrapLimNeed: max(v.wrapLimNeed, w.wrapLimNeed))
+      elif v.symKey.len == 0 and w.symKey.len == 0 and v.hasConst and w.hasConst:
+        result[k] = SpBound(hasConst: true, constB: max(v.constB, w.constB),
+                            wrapVar: v.wrapVar or w.wrapVar,
+                            wrapGuardOff: max(v.wrapGuardOff, w.wrapGuardOff),
+                            wrapVarStrict: v.wrapVarStrict or w.wrapVarStrict)
+      # else: incompatible bounds (const vs symbolic, or different symbols) -> drop
+  proc joinLow(x, y: Table[string, int]): Table[string, int] =
+    ## A lower bound holds where two paths meet only if on BOTH; the weaker (smaller) one.
+    for k, v in x:
+      if k in y: result[k] = min(v, y[k])
+  # The states a `break` / `continue` leaves with, collected for the innermost loop or switch
+  # (`break`) and the innermost loop (`continue`): they join the state after it / at its head.
+  var breakFrames: seq[seq[tuple[v: Table[string, SpBound], l: Table[string, int]]]]
+  var contFrames: seq[seq[tuple[v: Table[string, SpBound], l: Table[string, int]]]]
   # `low[key]` = a known LOWER bound on a scalar (`value >= low[key]`). Tracked in parallel
   # with the upper-bound `valid` table so a signed index can be shown to be `>= 0` (the
   # access reads `i + k`, needing `i + k >= 0`). An unsigned index gets `>= 0` from its type
@@ -2949,6 +2982,33 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
         of ikLowBound:                                           # value >= off (tighter wins)
           low[s.keyA] = max(low.getOrDefault(s.keyA, low(int)), s.off)
         of ikTaint: valid.del s.keyA; low.del s.keyA             # untrusted: both bounds lost
+        of ikScalarStep:
+          # The value moves by a constant; a bound moves with it only where the step cannot
+          # wrap. Up: an upper bound (one whose own guard cannot have wrapped) rules a wrap
+          # out, and both bounds shift; without one, neither is kept. Down: a lower bound
+          # rules it out — any for a signed value, `>= |step|` for an unsigned one — and the
+          # upper bound stays (it only got looser); without one, neither is kept.
+          let d = s.off
+          if d > 0:
+            var kept = false
+            if s.keyA in valid:
+              var b = valid[s.keyA]
+              if not b.wrapVar and b.wrapLimNeed == 0:
+                if b.symKey.len > 0:
+                  b.symOff += d; kept = true
+                elif b.hasConst and b.constB <= high(int) - d:
+                  b.constB += d; kept = true
+                if kept: valid[s.keyA] = b
+            if kept:
+              if s.keyA in low: low[s.keyA] = low[s.keyA] + d
+            else:
+              valid.del s.keyA; low.del s.keyA
+          elif d < 0:
+            let lo = low.getOrDefault(s.keyA, low(int))
+            if lo != low(int) and (s.cKey != "u" or lo >= -d):
+              low[s.keyA] = lo + d
+            else:
+              valid.del s.keyA; low.del s.keyA
         of ikValueCopy:
           if s.keyB in valid: valid[s.keyA] = valid[s.keyB] else: valid.del s.keyA
           if s.keyB in low: low[s.keyA] = low[s.keyB] else: low.del s.keyA
@@ -3149,7 +3209,15 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
             effLow = max(effLow, lowInvByField[s.keyA])
           if s.cKey == "u": effLow = max(effLow, 0)              # unsigned: >= 0 by type
           let lowerOk = effLow != low(int) and effLow >= needLow
-          if candidates.len == 0:
+          if s.aKey.len == 0:
+            # an index kenbi cannot read as `variable ± constant`: nothing can bound it
+            diags.add Diag(line: s.line, code: codeBase,
+              msg: "'" & s.a & "' " & what & " a buffer, but kenbi cannot read this expression " &
+                   "as a variable plus or minus a constant, so no bound check can be matched " &
+                   "to it. Store it in a variable and bound that before the use (if (v < N) …), " &
+                   "or mark the access @unsafe.",
+              sev: sevError)
+          elif candidates.len == 0:
             diags.add Diag(line: s.line, code: codeBase,
               msg: "'" & access & "' " & what & " a buffer but no bound check is present on " &
                    "this path — kenbi cannot confirm it is in range (it is an untrusted " &
@@ -3158,12 +3226,18 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
               sev: sevError)
           elif covered and not lowerOk:
             diags.add Diag(line: s.line, code: "INDEX_MAYBE_NEGATIVE",
-              msg: "'" & access & "' is bounded above but not below — '" & s.a & "' is signed " &
-                   "and nothing on this path shows it is " & (if needLow > 0: ">= " & $needLow
-                   else: ">= 0") & ", so the access could go below the buffer. Make '" & s.a &
-                   "' unsigned, add a lower-bound guard (if (" & s.a & " >= " &
-                   (if needLow > 0: $needLow else: "0") & ") …), or declare `@invariant(" &
-                   s.a & " >= 0)`.",
+              msg: (if s.cKey == "u":
+                      "'" & access & "' is bounded above but not below — '" & s.a & "' is " &
+                      "unsigned and nothing on this path shows it is >= " & $needLow & ", so the " &
+                      "subtraction could wrap around to a huge index. Add a lower-bound guard " &
+                      "(if (" & s.a & " >= " & $needLow & ") …) before the use."
+                    else:
+                      "'" & access & "' is bounded above but not below — '" & s.a & "' is signed " &
+                      "and nothing on this path shows it is " & (if needLow > 0: ">= " & $needLow
+                      else: ">= 0") & ", so the access could go below the buffer. Make '" & s.a &
+                      "' unsigned, add a lower-bound guard (if (" & s.a & " >= " &
+                      (if needLow > 0: $needLow else: "0") & ") …), or declare `@invariant(" &
+                      s.a & " >= 0)`."),
               sev: sevError)
           elif not covered and wrapHit:
             # OVERFLOW-SAFETY: a bound covered this access in ℤ but its guard arithmetic can
@@ -3259,6 +3333,10 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
                        "out of range. Bound it to the buffer's size (need '" & access &
                        needRel & $bufN & "').",
                   sev: sevError)
+        of ikBreak:
+          if breakFrames.len > 0: breakFrames[^1].add (valid, low)
+        of ikContinue:
+          if contFrames.len > 0: contFrames[^1].add (valid, low)
         else: discard
       of stIf:
         var thenV = valid
@@ -3295,54 +3373,129 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
         elif ed and not td: valid = thenV; low = thenLow
         elif td and ed: discard
         else:                                       # merge: keep a bound only if on BOTH
-          var merged = initTable[string, SpBound]() # paths and COMPATIBLE; weaker holds
-          for k, v in thenV:
-            if k notin elseV: continue
-            let w = elseV[k]
-            if v.symKey.len > 0 and v.symKey == w.symKey:
-              merged[k] = SpBound(symKey: v.symKey, symDisp: v.symDisp,
-                                  symOff: max(v.symOff, w.symOff),    # weaker bound holds
-                                  # wrap hazards survive the join: keep the STRICTER of each
-                                  # (larger gk / larger companion need refuses more; signed-strict
-                                  # wins) so a merged bound never loses a wrap constraint one
-                                  # branch carried.
-                                  wrapVar: v.wrapVar or w.wrapVar,
-                                  wrapGuardOff: max(v.wrapGuardOff, w.wrapGuardOff),
-                                  wrapVarStrict: v.wrapVarStrict or w.wrapVarStrict,
-                                  wrapLimNeed: max(v.wrapLimNeed, w.wrapLimNeed))
-            elif v.symKey.len == 0 and w.symKey.len == 0 and v.hasConst and w.hasConst:
-              merged[k] = SpBound(hasConst: true, constB: max(v.constB, w.constB),
-                                  wrapVar: v.wrapVar or w.wrapVar,
-                                  wrapGuardOff: max(v.wrapGuardOff, w.wrapGuardOff),
-                                  wrapVarStrict: v.wrapVarStrict or w.wrapVarStrict)
-            # else: incompatible bounds (const vs symbolic, or different symbols) -> drop
-          valid = merged
-          var mergedLow = initTable[string, int]()  # a lower bound holds only if on BOTH;
-          for k, v in thenLow:                       # the weaker (smaller) one holds
-            if k in elseLow: mergedLow[k] = min(v, elseLow[k])
-          low = mergedLow
+          valid = joinValid(thenV, elseV)           # paths and COMPATIBLE; weaker holds
+          low = joinLow(thenLow, elseLow)
       of stLoop:
-        var loopV = valid
-        var loopLow = low
-        walk(s.loopBody, loopV, loopLow)
+        # Each iteration starts at the head: the entry joined with the state every iteration
+        # ends or `continue`s with, iterated until it settles (a join only drops or weakens a
+        # bound; one that is still weakening after two rounds is dropped, so it does). The
+        # rounds before the last report nothing. After the loop: the head (where the condition fails) joined
+        # with every `break`.
+        let header = (if s.headerAt >= 0 and s.headerAt <= s.loopBody.len:
+                        s.loopBody[s.headerAt .. ^1] else: @[])
+        var head = valid
+        var headLow = low
+        var rounds = 0
+        while true:
+          let mark = diags.len
+          var bv = head
+          var bl = headLow
+          breakFrames.add @[]
+          contFrames.add @[]
+          walk(s.loopBody, bv, bl)
+          discard breakFrames.pop()
+          let conts = contFrames.pop()
+          diags.setLen(mark)
+          var nh = joinValid(head, bv)
+          var nl = joinLow(headLow, bl)
+          for c in conts:
+            var cv = c.v                    # a `continue` still runs the loop header
+            var cl = c.l
+            walk(header, cv, cl)
+            nh = joinValid(nh, cv)
+            nl = joinLow(nl, cl)
+          diags.setLen(mark)
+          if nh == head and nl == headLow: break
+          inc rounds
+          if rounds > 2:
+            # a bound still moving after two rounds (a counter stepped every iteration) has
+            # no limit the head can keep: drop it, so the rounds end
+            var moving: seq[string]
+            for k, v in nh:
+              if head[k] != v: moving.add k
+            for k in moving: nh.del k
+            moving.setLen 0
+            for k, v in nl:
+              if headLow[k] != v: moving.add k
+            for k in moving: nl.del k
+          head = nh
+          headLow = nl
+        var bv = head
+        var bl = headLow
+        breakFrames.add @[]
+        contFrames.add @[]
+        let lmark = diags.len
+        walk(s.loopBody, bv, bl)
+        let brks = breakFrames.pop()
+        for c in contFrames.pop():          # the header as reached by each `continue`
+          var cv = c.v
+          var cl = c.l
+          let hstart = diags.len
+          walk(header, cv, cl)
+          dropRepeats(diags, lmark, hstart)
+        valid = head
+        low = headLow
+        for b in brks:
+          valid = joinValid(valid, b.v)
+          low = joinLow(low, b.l)
       of stSwitch:
+        # After the switch: every case that reaches its end, every `break`, and — without a
+        # `default:` — the entry (no case matches), joined.
+        var accV = valid
+        var accL = low
+        var have = not s.hasDefault
         let mark = diags.len
+        breakFrames.add @[]
         for c in s.cases:
           var cv = valid
           var cLow = low
           let caseStart = diags.len
           walk(c, cv, cLow)
           dropRepeats(diags, mark, caseStart)
+          if diverges(c): continue
+          if have:
+            accV = joinValid(accV, cv)
+            accL = joinLow(accL, cLow)
+          else:
+            accV = cv
+            accL = cLow
+            have = true
+        for b in breakFrames.pop():
+          if have:
+            accV = joinValid(accV, b.v)
+            accL = joinLow(accL, b.l)
+          else:
+            accV = b.v
+            accL = b.l
+            have = true
+        if have:
+          valid = accV
+          low = accL
       of stTry:
         # a handler is entered from an unknown point of the body: no bound the body established
-        # is proven there — walk it from the ENTRY facts; after the try the entry facts stand.
+        # is proven there — walk it from the ENTRY facts. After the try: the end of the body and
+        # of every handler that reaches its end, joined.
         var tv = valid
         var tLow = low
         walk(s.tryBody, tv, tLow)
+        var accV = tv
+        var accL = tLow
+        var have = not diverges(s.tryBody)
         for h in s.handlers:
           var hv = valid
           var hLow = low
           walk(h, hv, hLow)
+          if diverges(h): continue
+          if have:
+            accV = joinValid(accV, hv)
+            accL = joinLow(accL, hLow)
+          else:
+            accV = hv
+            accL = hLow
+            have = true
+        if have:
+          valid = accV
+          low = accL
       of stLabel: discard
   var valid = initTable[string, SpBound]()
   var low = initTable[string, int]()

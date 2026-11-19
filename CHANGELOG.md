@@ -7,8 +7,28 @@ and the JSON output may change in any minor version.
 
 ## [Unreleased]
 
+### Changed
+
+- Bounds (`@spatial`): an index or a length that is not a variable plus or minus a constant — a
+  product, a call, two variables, a nested read — is now reported (`UNVALIDATED_INDEX` /
+  `UNVALIDATED_SIZE`), since no bound check can be matched to it; previously such an access was
+  not checked at all. Store the value in a variable and bound that. Code that passed only
+  because its index was not read will now draw findings (#7).
+- Bounds: a constant index or length, `x % K` and `x & K` are checked against a fixed-size
+  buffer (`tab[8]` on an 8-element array, `memcpy(dst, src, 16)` into 8 bytes), and `*(p + i)`
+  is checked as `p[i]` (#7).
+
 ### Fixed
 
+- Bounds: `i++`, `--i`, `i += k` and `i = i ± k` move the bounds of the value they change, as a
+  statement or inside an expression (`buf[i++]`, `buf[++i]`), on variables and fields. Before,
+  `if (i < n) { i++; buf[i]; }` passed. `i &= K` / `i %= K` bound the value to `K` instead of
+  marking it as checked against any buffer (#8).
+- Bounds: a bound checked before a `switch`, a loop or a `try` holds after it only if it holds
+  on every path through it, and each loop iteration starts from what the previous one left. A
+  `do … while (c)` no longer applies `c` to its first iteration, a `continue` in a `for` runs
+  the increment, and an access in a statement reads its index as it was before that statement
+  assigns it (`i = tab[i] % 8`) (#9).
 - Fall-through between the cases of a `switch` is followed. A case that can reach its end runs
   on into the next one, and every check now analyses that path: a release repeated along it is a
   double free, a lock released before it is not held after it, and a `case VALUE:` no longer
