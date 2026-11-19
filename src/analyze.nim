@@ -218,6 +218,10 @@ type
     landingDeposits: Table[int, seq[PathState]] ## landing site -> the path state at every call
                                      ## that may longjmp into it (its incoming edges)
     skippedReported: HashSet[string] ## locals already reported LONGJMP_SKIPS_DESTRUCTOR
+    landingLines: Table[int, int]    ## landing site -> the line of its setjmp
+    clobberLine: Table[string, int]  ## local -> the setjmp line a jump back to which left it
+                                     ## indeterminate (for the SETJMP_CLOBBERED message)
+    clobberReported: HashSet[string] ## `local:line` uses already reported SETJMP_CLOBBERED
     movedHandles: Table[string, int] ## owner HANDLES moved-from by an ikRaiiMove (var key ->
                                      ## the origin it held then): the resource is still owned,
                                      ## by the destination; using / moving / freeing / returning
@@ -340,6 +344,17 @@ const unstructuredGotoMsg =
   "cannot be tracked across them. Restructure into structured control flow (a loop, " &
   "early returns, or a single forward cleanup ladder of labels) so the release / " &
   "lifetime of each pointer is checkable."
+
+# LOCALS ACROSS A LONGJMP are kept in the per-path null state under reserved keys (which no
+# variable can have), so they follow every branch, join, loop and deposited path as the null
+# facts do — `nkMaybe` on either side of a join stays `nkMaybe`, a may-fact.
+const
+  jmpChangedPrefix = "@jmp-changed:"
+    ## + `<landing site>:<local>`: the local may have been changed since that site's setjmp
+    ## last ran
+  jmpIndetPrefix = "@jmp-indeterminate:"
+    ## + `<local>`: a longjmp returned on this path while the local was changed, and it has
+    ## not been assigned since
 
 proc dropRepeats(diags: var seq[Diag], mark, caseStart: int) =
   ## The cases of a switch share the statements of the groups they fall through into, so a
@@ -653,6 +668,28 @@ proc reportSkippedDestructors(a: var Analyzer, s: Stmt, jumps: string, afterLine
       ": the jump skips its destructor, which C++ makes undefined behaviour. " &
       "Keep objects with a destructor out of the scopes a longjmp can leave, or report the " &
       "error with an exception instead.")
+
+proc dropJmpChanged(nst: var NullState, id: int) =
+  ## Landing site `id`'s setjmp runs (its first return): nothing has changed since it yet.
+  let prefix = jmpChangedPrefix & $id & ":"
+  var gone: seq[string]
+  for k in nst.keys:
+    if k.startsWith(prefix): gone.add k
+  for k in gone: nst.del k
+
+proc collectLandingLines(body: seq[Stmt], acc: var Table[int, int]) =
+  ## Every landing site of a function body, with the line of its setjmp.
+  for s in body:
+    case s.kind
+    of stIf:
+      if s.landingId > 0: acc[s.landingId] = s.line
+      collectLandingLines(s.thenBody, acc)
+      collectLandingLines(s.elseBody, acc)
+    of stSwitch:
+      if s.switchLandingId > 0: acc[s.switchLandingId] = s.line
+      for c in s.cases: collectLandingLines(c, acc)
+    of stLoop: collectLandingLines(s.loopBody, acc)
+    else: discard        # never inside a `try`: the front-end refuses a setjmp there
 
 proc landingPart(s: Stmt, mask: seq[bool], noMatch: bool): Stmt =
   ## The switch of a landing site as one of its returns sees it: only the cases that return can
@@ -987,12 +1024,25 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
         "`if (!setjmp(b))`, `if (setjmp(b) == 0)`, `switch (setjmp(b))`), outside a `try` " &
         "block. Move it into one of those forms, or mark the line @unsafe if you take " &
         "responsibility.")
-  of ikSetjmpClobbered:
-    if a.curCovered:
-      a.addDiag(s.line, "SETJMP_CLOBBERED",
-        "'" & s.a & "' is changed after the setjmp on line " & $s.off & " and is not volatile: " &
-        "when a longjmp returns there, its value is indeterminate, so this use may not see what " &
-        "was stored. Declare it volatile.")
+  of ikJmpLocalRead:
+    # a use of a local a longjmp left indeterminate on this path. Reported once per path:
+    # the fix (volatile) is the same for every later use
+    let k = jmpIndetPrefix & s.aKey
+    if k in nst:
+      nst.del k
+      let tag = s.aKey & ":" & $s.line
+      if a.curCovered and not a.silent and tag notin a.clobberReported:
+        a.clobberReported.incl tag
+        a.addDiag(s.line, "SETJMP_CLOBBERED",
+          "'" & s.a & "' is changed after the setjmp on line " &
+          $a.clobberLine.getOrDefault(s.aKey) & " and is not volatile: " &
+          "when a longjmp returns there, its value is indeterminate, so this use may not see what " &
+          "was stored. Declare it volatile.")
+  of ikJmpLocalWrite:
+    if (s.off and 1) != 0: nst.del jmpIndetPrefix & s.aKey   # a fresh value
+    if (s.off and 2) != 0:
+      # changed since the setjmp of every landing site: whichever a later jump returns to
+      for id in a.landingLines.keys: nst[jmpChangedPrefix & $id & ":" & s.aKey] = nkMaybe
   of ikLongjmpUnmodeled:
     if a.curCovered:
       a.addDiag(s.line, "UNSUPPORTED_CONSTRUCT",
@@ -1999,6 +2049,7 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
         # a setjmp: on its first return only the non-landing branch runs. The landing branch is
         # reached by a longjmp, from states later in the function — analysed after it.
         let first = (if s.landingThen: s.elseBody else: s.thenBody)
+        dropJmpChanged(nst, s.landingId)
         if a.analyzeBody(first, st, nst): gone = true
         continue
       let known = a.predSays(s.predKey)
@@ -2369,6 +2420,7 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
       if s.switchLandingId > 0:
         # a setjmp: on its first return (0) only the cases 0 can enter run. Those a longjmp's
         # return enters are reached from states later in the function — analysed after it.
+        dropJmpChanged(nst, s.switchLandingId)
         if a.analyzeBody(@[landingPart(s, s.caseFirst, s.firstNoMatch)], st, nst): gone = true
         continue
       # Each case is an independent branch from the switch entry: the code entered at its
@@ -2614,6 +2666,14 @@ proc analyzeLandings(a: var Analyzer, fn: Func) =
     var st: StateMap
     var nst: NullState
     a.enterJoin(paths, st, nst)
+    # what changed between this site's setjmp and the jump is indeterminate from here
+    let prefix = jmpChangedPrefix & $id & ":"
+    var changed: seq[string]
+    for k in nst.keys:
+      if k.startsWith(prefix): changed.add k[prefix.len .. ^1]
+    for v in changed:
+      nst[jmpIndetPrefix & v] = nkMaybe
+      a.clobberLine[v] = a.landingLines.getOrDefault(id)
     a.landingDeposits = initTable[int, seq[PathState]]()
     if not a.analyzeFrom(fn.body, id, st, nst): a.scanLeaks(st)
   const cap = 16
@@ -2727,6 +2787,10 @@ proc analyzeFunc(a: var Analyzer, fn: Func, covered: bool) =
   var st: StateMap = initTable[int, set[AllocState]]()
   var nst: NullState = initTable[string, NullKind]()
   a.landingDeposits = initTable[int, seq[PathState]]()
+  a.landingLines = initTable[int, int]()
+  a.clobberLine = initTable[string, int]()
+  a.clobberReported = initHashSet[string]()
+  collectLandingLines(fn.body, a.landingLines)
   let diverged = a.analyzeBody(fn.body, st, nst)
   # The fall-through end is one more exit: scan it for abandoned obligations.
   # But if every path already returned (diverged), each return was scanned at

@@ -525,8 +525,9 @@ Aufrufs steht:
 
 Ein Sprung zu einem anderen Puffer verlässt stattdessen die Funktion; ein Sprung ohne deklarierten
 Puffer ist `UNKNOWN_LONGJMP_TARGET`, und ein deklarierter Puffer, zu dem der Rumpf nicht springt,
-ist `LONGJMP_TARGET_MISMATCH`. Eine lokale Variable, die nicht `volatile` ist, nach dem setjmp
-geändert und im Landezweig gelesen wird, ist `SETJMP_CLOBBERED`: Ihr Wert ist dort unbestimmt.
+ist `LONGJMP_TARGET_MISMATCH`. Eine lokale Variable, die nicht `volatile` ist, zwischen dem setjmp
+und dem Sprung geändert und danach auf einem Pfad des Sprungs gelesen wird – im Landezweig oder
+dahinter –, bevor sie neu zugewiesen wurde, ist `SETJMP_CLOBBERED`: Ihr Wert ist dort unbestimmt.
 Ein setjmp in jeder anderen Form (als Ausdrucksanweisung, als Schleifenbedingung, in einer
 Zuweisung oder in einem `try`-Block) ist `UNSUPPORTED_SETJMP`.
 

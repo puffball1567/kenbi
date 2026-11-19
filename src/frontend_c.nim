@@ -1100,47 +1100,131 @@ proc findLandingSites(ctx: var Ctx, body: CXCursor) =
          (g.off < site.callOff or g.off >= site.regionEnd):
         site.regionEnd = l.off
 
-proc clobberedLocals(ctx: Ctx, fn, body: CXCursor, site: LandingSite,
-                     landing: seq[tuple[first, last: int]]): HashSet[string] =
-  ## The locals and parameters a longjmp back to `site` leaves indeterminate (C11 7.13.2.1):
-  ## automatic, not volatile, declared before the setjmp and changed after it — assigned,
-  ## incremented, or exposed by `&` — outside the code the jump returns into (`landing`).
-  ## "After" includes code before the setjmp in a loop around it: it runs again after the
-  ## setjmp on the next iteration.
-  var cands, written: HashSet[string]
-  let sjOff = site.callOff
+proc collectJmpLocals(ctx: var Ctx, fn, body: CXCursor) =
+  ## The objects a longjmp can leave indeterminate (C11 7.13.2.1): the function's automatic,
+  ## non-volatile locals and parameters. Empty when the function has no landing site.
+  ctx.jmpLocals = initHashSet[string]()
+  if ctx.landingSites.len == 0: return
   proc notVolatile(d: CXCursor): bool =
     clang_isVolatileQualifiedType(clang_getCursorType(d)) == 0
-  proc afterSetjmp(off: int): bool =
-    var later = off > sjOff
-    for l in site.loops:
-      if off >= l.first and off < l.last: later = true
-    for r in landing:
-      if off >= r.first and off < r.last: later = false
-    later
   for p in collectChildren(fn):
-    if clang_getCursorKind(p) == ckParmDecl and notVolatile(p): cands.incl usr(p)
-  proc walk(ctx: Ctx, n: CXCursor, cands, written: var HashSet[string]) =
+    if clang_getCursorKind(p) == ckParmDecl and notVolatile(p): ctx.jmpLocals.incl usr(p)
+  proc walk(n: CXCursor, acc: var HashSet[string]) =
     let k = clang_getCursorKind(n)
-    let off = startOffset(n)
-    let after = afterSetjmp(off)
-    if k == ckVarDecl and off < sjOff and hasAutomaticStorage(n) and notVolatile(n):
-      cands.incl usr(n)
-    elif after and (k == ckBinaryOperator or k == ckCompoundAssign):
-      let kids = collectChildren(n)
-      if kids.len == 2 and (k == ckCompoundAssign or ctx.binOperator(n) == "="):
-        let lhs = unwrap(kids[0])
-        if clang_getCursorKind(lhs) == ckDeclRefExpr: written.incl referencedUsr(lhs)
-    elif after and k == ckUnaryOperator:
-      let toks = ctx.cursorTokens(n)
-      if toks.len > 0 and (toks[0] in ["&", "++", "--"] or toks[^1] in ["++", "--"]):
-        let kids = collectChildren(n)
-        if kids.len == 1 and clang_getCursorKind(unwrap(kids[0])) == ckDeclRefExpr:
-          written.incl referencedUsr(unwrap(kids[0]))
-    for ch in collectChildren(n): ctx.walk(ch, cands, written)
-  ctx.walk(body, cands, written)
-  for k in cands:
-    if k in written: result.incl k
+    if k == ckLambdaExpr: return
+    if k == ckVarDecl and hasAutomaticStorage(n) and notVolatile(n): acc.incl usr(n)
+    for ch in collectChildren(n): walk(ch, acc)
+  walk(body, ctx.jmpLocals)
+
+proc jmpLocalEvents(ctx: Ctx, n: CXCursor, top: bool, pre, marks, post: var seq[Stmt]) =
+  ## The uses and changes of the function's jump-sensitive locals in one expression or
+  ## declaration: `pre` the uses of a value, `marks` the possible changes (both placed before
+  ## the statement), `post` the assignments that give a fresh value (placed after it — only
+  ## for the statement's own assignment, `top`, which runs whenever the statement completes).
+  let u = unwrap(n)
+  let k = clang_getCursorKind(u)
+  if k == ckLambdaExpr: return
+  proc local(ctx: Ctx, e: CXCursor): tuple[key, disp: string] =
+    let r = unwrap(e)
+    if clang_getCursorKind(r) != ckDeclRefExpr: return ("", "")
+    let key = referencedUsr(r)
+    if key in ctx.jmpLocals: (key, spelling(r)) else: ("", "")
+  proc base(ctx: Ctx, e: CXCursor): tuple[key, disp: string] =
+    ## the local a `.field` / `[i]` chain is part of (not through a pointer)
+    var r = unwrap(e)
+    while true:
+      let rk = clang_getCursorKind(r)
+      let kids = collectChildren(r)
+      if kids.len == 0: break
+      if rk == ckArraySubscriptExpr and isArrayType(unwrap(kids[0])): r = unwrap(kids[0])
+      elif rk == ckMemberRefExpr and "->" notin ctx.cursorTokens(r): r = unwrap(kids[0])
+      else: break
+    ctx.local(r)
+  case k
+  of ckVarDecl:
+    let kids = collectChildren(u)
+    if kids.len > 0 and clang_isExpression(clang_getCursorKind(kids[^1])) != 0:
+      ctx.jmpLocalEvents(kids[^1], false, pre, marks, post)
+      if usr(u) in ctx.jmpLocals:
+        post.add emit(ikJmpLocalWrite, startLine(u), a = spelling(u), aKey = usr(u), off = 3)
+    return
+  of ckDeclStmt:
+    for d in collectChildren(u): ctx.jmpLocalEvents(d, top, pre, marks, post)
+    return
+  of ckBinaryOperator, ckCompoundAssign:
+    let kids = collectChildren(u)
+    if kids.len == 2 and (k == ckCompoundAssign or ctx.binOperator(u) == "="):
+      let whole = ctx.local(kids[0])
+      let part = (if whole.key.len > 0: whole else: ctx.base(kids[0]))
+      if part.key.len > 0:
+        if k == ckCompoundAssign or whole.key.len == 0:
+          # `x += e` uses the old value; `s.f = e` / `a[i] = e` changes part of the object
+          if k == ckCompoundAssign:
+            pre.add emit(ikJmpLocalRead, startLine(u), a = part.disp, aKey = part.key)
+          marks.add emit(ikJmpLocalWrite, startLine(u), a = part.disp, aKey = part.key, off = 2)
+          if whole.key.len == 0:
+            for ch in collectChildren(unwrap(kids[0]))[1 .. ^1]:    # the subscripts
+              ctx.jmpLocalEvents(ch, false, pre, marks, post)
+        elif top:
+          post.add emit(ikJmpLocalWrite, startLine(u), a = part.disp, aKey = part.key, off = 3)
+        else:
+          marks.add emit(ikJmpLocalWrite, startLine(u), a = part.disp, aKey = part.key, off = 2)
+        ctx.jmpLocalEvents(kids[1], false, pre, marks, post)
+        return
+  of ckUnaryOperator:
+    let toks = ctx.cursorTokens(u)
+    let kids = collectChildren(u)
+    if toks.len > 0 and kids.len == 1:
+      let step = toks[0] in ["++", "--"] or toks[^1] in ["++", "--"]
+      if step or toks[0] == "&":
+        let part = ctx.base(kids[0])
+        if part.key.len > 0:
+          if step: pre.add emit(ikJmpLocalRead, startLine(u), a = part.disp, aKey = part.key)
+          marks.add emit(ikJmpLocalWrite, startLine(u), a = part.disp, aKey = part.key, off = 2)
+          return
+  of ckArraySubscriptExpr:
+    let kids = collectChildren(u)
+    if kids.len == 2 and isArrayType(unwrap(kids[0])):
+      # an element of a local array: a use of the array, not an exposure of it
+      let arr = ctx.local(kids[0])
+      if arr.key.len > 0:
+        pre.add emit(ikJmpLocalRead, startLine(u), a = arr.disp, aKey = arr.key)
+        ctx.jmpLocalEvents(kids[1], false, pre, marks, post)
+        return
+  of ckDeclRefExpr:
+    let v = ctx.local(u)
+    if v.key.len > 0:
+      pre.add emit(ikJmpLocalRead, startLine(u), a = v.disp, aKey = v.key)
+      # an array used as a pointer may be written through it from here on
+      if isArrayType(u):
+        marks.add emit(ikJmpLocalWrite, startLine(u), a = v.disp, aKey = v.key, off = 2)
+    return
+  else: discard
+  for ch in collectChildren(u): ctx.jmpLocalEvents(ch, false, pre, marks, post)
+
+proc jmpLocalStmtEvents(ctx: Ctx, c: CXCursor, outp, post: var seq[Stmt]) =
+  ## The events of the part of statement `c` that runs when control reaches it: the whole of a
+  ## declaration, an expression or a `return`, the condition of an `if` or `switch`, the range
+  ## of a range-`for`. Nested statements, and the header of a loop, are lowered as statements
+  ## of their own and emit theirs there.
+  let k = clang_getCursorKind(c)
+  var pre, marks: seq[Stmt]
+  let kids = collectChildren(c)
+  if k == ckDeclStmt or clang_isExpression(k) != 0:
+    ctx.jmpLocalEvents(c, true, pre, marks, post)
+  elif k == ckReturnStmt:
+    for ch in kids: ctx.jmpLocalEvents(ch, false, pre, marks, post)
+  elif k in [ckIfStmt, ckSwitchStmt]:
+    # the condition, with the declaration before it when there is one (C++)
+    var last = 1
+    if kids.len >= 3 and clang_getCursorKind(kids[0]) in [ckDeclStmt, ckVarDecl]: last = 2
+    var condPost: seq[Stmt]
+    for i in 0 ..< min(last, kids.len): ctx.jmpLocalEvents(kids[i], false, pre, marks, condPost)
+    marks.add condPost
+  elif k == ckCXXForRangeStmt:
+    for i in 0 ..< kids.len - 1: ctx.jmpLocalEvents(kids[i], false, pre, marks, post)
+  outp.add pre
+  outp.add marks
 
 proc landingSiteAt(ctx: Ctx, stmtOff: int): int =
   ## The landing site whose `if` / `switch` starts at `stmtOff`, or -1.
@@ -3581,7 +3665,11 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
   # scope of whatever was declared inside it.
   ctx.flushPendingLocals()
   let scopeMark = ctx.liveLocals.len
+  # LONGJMP: what this statement uses and changes of the locals a jump can leave indeterminate
+  var jmpPost: seq[Stmt]
+  if ctx.jmpLocals.len > 0: ctx.jmpLocalStmtEvents(c, outp, jmpPost)
   defer:
+    outp.add jmpPost
     if k == ckDeclStmt: ctx.flushPendingLocals()
     elif k notin [ckLabelStmt, ckCaseStmt, ckDefaultStmt] and ctx.liveLocals.len > scopeMark:
       ctx.pendingLocal.setLen(0)
@@ -4167,13 +4255,9 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
         s.firstNoMatch = not anyZero and not s.hasDefault
         s.landingNoMatch = not s.hasDefault
         var rec = LandingRec(site: s, siteIdx: site, live: ctx.liveLocals)
-        var firstRuns = false                  # the first return runs the group (entered or fallen into)
         for i in 0 ..< groups.len:
           let first = groupZero[i] or (groupIsDefault[i] and not anyZero)
           let lands = groupOther[i] or groupIsDefault[i]
-          firstRuns = first or (i > 0 and fallsInto[i - 1] and firstRuns)
-          if not firstRuns:
-            rec.landingOnly.add (startOffset(groups[i][0]), endOffset(groups[i][^1]))
           s.caseFirst.add first
           s.caseLanding.add false
           if lands:
@@ -5616,6 +5700,7 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
     ctx.curFnLongjmps = spelling(c) in ctx.longjmpFuncs or qualName(c) in ctx.longjmpFuncs
     ctx.landingRecs = @[]
     ctx[].findLandingSites(body)
+    ctx[].collectJmpLocals(c, body)
     # the declared jump target, with `$N` written as this definition's own parameter names, so
     # the longjmps in the body can be checked against it
     ctx.curFnTarget = ""
@@ -5814,13 +5899,6 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
       let rec = ctx.landingRecs[ri]
       inc ri
       let site = ctx.landingSites[rec.siteIdx]
-      var landingOnly = rec.landingOnly        # a switch's, per case group
-      if rec.site.kind == stIf:
-        for part in rec.parts:
-          if part.stmts.len > 0:
-            landingOnly.add (startOffset(part.stmts[0]), endOffset(part.stmts[^1]))
-      # a non-volatile local changed after the setjmp is indeterminate where the jump lands
-      let clobbered = ctx[].clobberedLocals(c, body, site, landingOnly)
       for part in rec.parts:
         var landBody: seq[Stmt]
         if part.stmts.len > 0:
@@ -5836,24 +5914,6 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
           landBody = ctx[].lowerBody(part.stmts)
           for o in savedEmitted: ctx.longjmpEmitted.incl o
           ctx.liveLocals = savedLive
-          var reads: seq[Stmt]
-          var seen = initHashSet[string]()
-          proc findReads(n: CXCursor, clobbered: HashSet[string], seen: var HashSet[string],
-                         reads: var seq[Stmt], sjLine: int, ctx: ptr Ctx) =
-            if clang_getCursorKind(n) == ckBinaryOperator and ctx[].binOperator(n) == "=":
-              # a plain assignment only writes the variable it names: not a use of its value
-              let kids = collectChildren(n)
-              if kids.len == 2 and clang_getCursorKind(unwrap(kids[0])) == ckDeclRefExpr:
-                findReads(kids[1], clobbered, seen, reads, sjLine, ctx)
-                return
-            if clang_getCursorKind(n) == ckDeclRefExpr:
-              let k = referencedUsr(n)
-              if k in clobbered and k notin seen:
-                seen.incl k
-                reads.add emit(ikSetjmpClobbered, startLine(n), a = spelling(n), off = sjLine)
-            for ch in collectChildren(n): findReads(ch, clobbered, seen, reads, sjLine, ctx)
-          for st in part.stmts: findReads(st, clobbered, seen, reads, site.line, ctx)
-          landBody = reads & landBody
         if rec.site.kind == stIf:
           if rec.site.landingThen: rec.site.thenBody = landBody
           else: rec.site.elseBody = landBody

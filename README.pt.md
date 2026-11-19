@@ -505,8 +505,9 @@ nome de parâmetro representa o argumento da chamada:
 
 Um salto para outro buffer sai da função; um salto cujo buffer não está declarado é
 `UNKNOWN_LONGJMP_TARGET`, e um buffer declarado para o qual o corpo não salta é
-`LONGJMP_TARGET_MISMATCH`. Uma variável local não `volatile`, alterada depois do setjmp e lida no
-ramo de aterrissagem, é `SETJMP_CLOBBERED`: seu valor ali é indeterminado. Um setjmp em qualquer
+`LONGJMP_TARGET_MISMATCH`. Uma variável local não `volatile`, alterada entre o setjmp e o salto
+e depois lida num caminho que o salto percorre — no ramo de aterrissagem ou depois dele — antes de
+ser atribuída de novo, é `SETJMP_CLOBBERED`: seu valor ali é indeterminado. Um setjmp em qualquer
 outra forma (uma instrução de expressão, a condição de um laço, uma atribuição ou dentro de um
 bloco `try`) é `UNSUPPORTED_SETJMP`.
 

@@ -47,6 +47,12 @@ and the JSON output may change in any minor version.
   so a release after the switch is not reported as `UNLOCK_WITHOUT_LOCK` because of it.
 - `SETJMP_CLOBBERED`: a plain assignment to the local, where a jump lands, is no longer reported
   as a use of its value.
+- `SETJMP_CLOBBERED` follows a local along the paths a longjmp takes instead of looking only
+  inside the landing branch. A use after a landing branch that falls through, or after a
+  `switch` on the setjmp that a landing case breaks out of, is reported; a local assigned again
+  before the use, or not changed since the setjmp last ran, is not. A local array changed
+  through an element or handed to a callee, and a struct changed through a member, count as
+  changed (#5).
 
 ## [0.1.3] - 2026-11-17
 

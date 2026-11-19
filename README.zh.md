@@ -474,8 +474,9 @@ case 是跳转的落点）。它可以位于函数的任意深度。每个可能
 ```
 
 跳转到其他缓冲区则视为离开函数；未声明缓冲区的跳转是 `UNKNOWN_LONGJMP_TARGET`，函数体并未跳转到
-所声明缓冲区的是 `LONGJMP_TARGET_MISMATCH`。非 `volatile`、在 setjmp 之后被修改且在落点分支中被
-读取的局部变量是 `SETJMP_CLOBBERED`：它在那里的值是不确定的。其他形式的 setjmp（表达式语句、循环
+所声明缓冲区的是 `LONGJMP_TARGET_MISMATCH`。非 `volatile`、在 setjmp 与跳转之间被修改，
+并在重新赋值之前于跳转所经路径上（落点分支之内或之后）被读取的局部变量是 `SETJMP_CLOBBERED`：
+它在那里的值是不确定的。其他形式的 setjmp（表达式语句、循环
 条件、赋值，或位于 `try` 块中）是 `UNSUPPORTED_SETJMP`。
 
 ### 并发注解（在 `@threadsafe` 下验证，在其外为建议性）

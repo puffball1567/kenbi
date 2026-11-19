@@ -513,8 +513,9 @@ comme une expression où `$N` ou un nom de paramètre représente l'argument de 
 
 Un saut vers un autre tampon quitte la fonction ; un saut dont le tampon n'est pas déclaré est
 `UNKNOWN_LONGJMP_TARGET`, et un tampon déclaré vers lequel le corps ne saute pas est
-`LONGJMP_TARGET_MISMATCH`. Une variable locale non `volatile`, modifiée après le setjmp et lue dans
-la branche d'arrivée, est `SETJMP_CLOBBERED` : sa valeur y est indéterminée. Un setjmp sous toute
+`LONGJMP_TARGET_MISMATCH`. Une variable locale non `volatile`, modifiée entre le setjmp et
+le saut puis lue sur un chemin que prend le saut — dans la branche d'arrivée ou après elle — avant
+d'être réaffectée, est `SETJMP_CLOBBERED` : sa valeur y est indéterminée. Un setjmp sous toute
 autre forme (une instruction-expression, la condition d'une boucle, une affectation ou dans un
 bloc `try`) est `UNSUPPORTED_SETJMP`.
 

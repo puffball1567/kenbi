@@ -524,8 +524,9 @@ expression in which `$N` or a parameter name stands for the call's argument:
 
 A jump to another buffer leaves the function instead; a jump whose buffer is not declared is
 `UNKNOWN_LONGJMP_TARGET`, and a declared buffer that the body does not jump to is
-`LONGJMP_TARGET_MISMATCH`. A local that is not `volatile`, changed after the setjmp and read in
-the landing branch, is `SETJMP_CLOBBERED`: its value is indeterminate there. A setjmp in any
+`LONGJMP_TARGET_MISMATCH`. A local that is not `volatile`, changed between the setjmp and the jump and then read on a path
+the jump takes — in the landing branch or after it — before it is assigned again, is
+`SETJMP_CLOBBERED`: its value is indeterminate there. A setjmp in any
 other form (an expression statement, a loop condition, an assignment, or inside a `try` block)
 is `UNSUPPORTED_SETJMP`.
 

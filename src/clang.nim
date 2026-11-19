@@ -208,6 +208,7 @@ proc clang_getTypeSpelling*(t: CXType): CXString   ## `kir_owned_scalar<std::uin
                                                     ## to match a local's type against `@raii` owners
 proc clang_isConstQualifiedType*(t: CXType): cuint
 proc clang_isVolatileQualifiedType*(t: CXType): cuint
+proc clang_isExpression*(k: cint): cuint
 proc clang_getTypeDeclaration*(t: CXType): CXCursor
 proc clang_getCursorDefinition*(c: CXCursor): CXCursor
 proc clang_CXXMethod_isVirtual*(c: CXCursor): cuint

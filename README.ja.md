@@ -497,7 +497,8 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 
 別のバッファへのジャンプは、関数から抜ける経路として扱います。バッファを宣言していないジャンプは
 `UNKNOWN_LONGJMP_TARGET`、宣言したバッファへ本体が飛んでいなければ `LONGJMP_TARGET_MISMATCH`
-です。`volatile` でなく、setjmp の後で変更され、着地側の分岐で読まれる局所変数は
+です。`volatile` でなく、setjmp からジャンプまでの間に変更され、再び代入される前に
+ジャンプが通る経路（着地側の分岐の中でも、その後でも）で読まれる局所変数は
 `SETJMP_CLOBBERED` です（そこでの値は不定です）。これ以外の形の setjmp（式文、ループの
 条件、代入、`try` ブロックの中）は `UNSUPPORTED_SETJMP` です。
 

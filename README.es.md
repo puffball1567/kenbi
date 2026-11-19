@@ -510,8 +510,9 @@ salida. Si un salto va a `b` se lee de su jmp_buf declarado, escrito como una ex
 
 Un salto a otro búfer sale de la función; un salto cuyo búfer no está declarado es
 `UNKNOWN_LONGJMP_TARGET`, y un búfer declarado al que el cuerpo no salta es
-`LONGJMP_TARGET_MISMATCH`. Una variable local no `volatile`, modificada después del setjmp y leída
-en la rama de aterrizaje, es `SETJMP_CLOBBERED`: su valor ahí es indeterminado. Un setjmp en
+`LONGJMP_TARGET_MISMATCH`. Una variable local no `volatile`, modificada entre el setjmp y el salto
+y leída después en un camino que recorre el salto —en la rama de aterrizaje o tras ella— antes de
+volver a asignarse, es `SETJMP_CLOBBERED`: su valor ahí es indeterminado. Un setjmp en
 cualquier otra forma (una sentencia de expresión, la condición de un bucle, una asignación o
 dentro de un bloque `try`) es `UNSUPPORTED_SETJMP`.
 

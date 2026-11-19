@@ -146,8 +146,14 @@ type
                  ## certain to have run before it.
     ikSetjmp     ## a call to `setjmp` / `sigsetjmp` in a form kenbi does not model (anything
                  ## but the whole condition of an `if` or `switch`, or inside a `try`): refused.
-    ikSetjmpClobbered ## the landing branch reads `a`, a non-volatile local changed after the
-                 ## `setjmp` on line `off`: after a longjmp its value is indeterminate.
+    ikJmpLocalRead ## a use of the value of `a` (key `aKey`), a non-volatile automatic local or
+                 ## parameter of a function with a landing site. On a path a longjmp took back
+                 ## into the function, a local changed between the setjmp and the jump is
+                 ## indeterminate (C11 7.13.2.1) until it is assigned again: SETJMP_CLOBBERED.
+    ikJmpLocalWrite ## ... and a change of it. `off` bit 1: the local may have been changed here
+                 ## (assigned, stepped, or exposed by `&` / array decay), which is what makes it
+                 ## indeterminate after a later jump; bit 0: it certainly holds a fresh value
+                 ## from here (a plain assignment or an initialised declaration).
     ikLongjmpUnmodeled ## a call that may longjmp, in an expression position the front-end does
                  ## not lower (e.g. inside a lambda passed to a callee): refused in covered scope
                  ## rather than dropped. `a` = the callee.

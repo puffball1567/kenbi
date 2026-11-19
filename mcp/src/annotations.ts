@@ -170,8 +170,9 @@ the declared intent and reports where they disagree.
   (\`@contract png_error { longjmps: png_jmpbuf($1) }\`); \`longjmp\`'s own first argument needs no
   declaration. Another buffer = the jump leaves the function; undeclared = \`UNKNOWN_LONGJMP_TARGET\`
   (RED until declared); a body jumping elsewhere than declared = \`LONGJMP_TARGET_MISMATCH\`. A
-  non-volatile local changed after the setjmp and read in the landing branch is
-  \`SETJMP_CLOBBERED\` (declare it \`volatile\`). Any other setjmp form (expression statement, loop condition, assignment, inside \`try\`):
+  non-volatile local changed between the setjmp and the jump, then read on a path the jump takes
+  (in the landing branch or after it) before being assigned again, is \`SETJMP_CLOBBERED\`
+  (declare it \`volatile\`). Any other setjmp form (expression statement, loop condition, assignment, inside \`try\`):
   \`UNSUPPORTED_SETJMP\`.
 - A LAMBDA body runs where it is CALLED: \`auto v = [..]{..};\` defines it, each \`v()\`
   runs it (so calling a cleanup lambda twice is a \`DOUBLE_FREE\`, and never calling it leaves
