@@ -2,12 +2,14 @@
 name: kenbi-memory-safety
 description: >
   Use when writing or reviewing C / C++ that manages memory or other
-  acquire/release resources (malloc/free, new/delete, fd, lock, file, db).
-  Teaches you to (1) write kenbi ownership/lifetime annotations as you code so
-  intent is explicit, (2) run the deterministic kenbi checker and treat its
-  verdict as ground truth, and (3) give grounded advisory review on the
-  residue kenbi cannot see. The deterministic tool — never the LLM — decides
-  what is "safe".
+  acquire/release resources (malloc/free, new/delete, fd, lock, file, db),
+  indexes buffers, or is checked by kenbi (CLI or the kenbi MCP server).
+  Teaches you to (1) write kenbi annotations as you code so intent is
+  explicit, (2) run the deterministic kenbi checker — through the MCP tools
+  when they are available — and treat its verdict as ground truth, (3) fix
+  each finding the way that actually resolves it, and (4) give grounded
+  advisory review on the residue kenbi cannot see. The deterministic tool —
+  never the LLM — decides what is "safe".
 ---
 
 # kenbi — annotation-driven memory safety for C/C++
@@ -18,9 +20,10 @@ annotations** and checks — statically — that the code does what the annotati
 say. Model in one line: **don't guess; an unannotated resource carries no
 verdict, and an annotated one is checked, not trusted.**
 
-You (the agent) have three jobs, in order. The split is non-negotiable: **you
-*author* annotations and safer code; the deterministic tool *judges*.** Never
-emit a "this is safe" verdict yourself — run kenbi.
+You (the agent) have four jobs, in order: annotate (§1), run the checker (§2),
+fix what it reports (§3), and review what it cannot see (§4, §5). The split is
+non-negotiable: **you *author* annotations and safer code; the deterministic
+tool *judges*.** Never emit a "this is safe" verdict yourself — run kenbi.
 
 ---
 
@@ -92,6 +95,60 @@ Rules of thumb:
   that bypasses it is `FINALLY_BYPASSED`; **`// @goto_backward`** on a back-edge models
   a simple goto-loop as a do-while (so the fixpoint catches cross-iteration hazards).
 
+### Opting in, and the other axes
+
+Nothing is checked until the code opts in. `// @kenbi` above a function (or at
+file level, or on a block) adopts it for the ownership checks; each further
+axis has its own marker and is off without it. A result always lists which
+checks ran on which functions — read that list before reporting.
+
+**Bounds — `// @spatial`.** An index or a length that comes from outside must
+have a bound check on the path to the access.
+
+```c
+// @spatial
+// @counted_by(buf: n)                 the pointer's size, declared
+// @invariant(n >= 1)                  what the body assumes of its parameters
+int first_or(const int *buf, unsigned n, unsigned i) {
+  if (i < n) return buf[i];            // checked on the path: covered
+  return buf[0];                       // covered by the declared n >= 1
+}
+```
+
+- Write the index as **a variable plus or minus a constant** (`buf[i]`,
+  `buf[i + 1]`, `buf[i++]`, `*(p + i)`), a constant, or `x % K` / `x & K`.
+  A product, a call, two variables or a nested read (`buf[a * b]`,
+  `buf[next()]`, `buf[tab[i]]`) cannot be matched to a check and is reported:
+  store the value in a variable first, then bound that variable.
+- The check must cover the buffer (`i < n` for a buffer of `n` elements, not a
+  looser bound), a signed index also needs `i >= 0`, and the guard must not
+  wrap: `i + 4 <= n` on an unsigned `i` is not credited; `n >= 4 && i <= n - 4` is.
+- A constant index into a buffer of variable size needs the size shown large
+  enough: a check (`if (n >= 1)`, `if (n == 0) return;`) or `@invariant(n >= K)`.
+- An `@invariant` on parameters is **verified at every call**: a caller that
+  cannot show its arguments satisfy it gets `INVARIANT_NOT_MAINTAINED`. Declare
+  it only when the callers really establish it. An `@invariant` on a field
+  (`@invariant(p->len <= p->cap)`) protects the field: each write to it needs
+  `// @maintains(...)`, which is checked.
+
+**Initialisation — `// @initcheck`.** A local declared without an initializer
+must be assigned on every path before it is read.
+
+**Tagged unions — `// @typecheck`** with `// @variant(<member>: <tag> == <value>)`
+per member: a member may be used only where its tag is proven
+(`if (n->tag == 1)`, `case 1:`).
+
+**Locks — `// @threadsafe`.** Inside it the lock annotations are verified, not
+advisory: `// @guarded_by(<lock>)` on a field, `// @requires_lock(<lock>)`,
+`// @acquires(<lock>)` / `// @releases(<lock>)` on functions, and
+`// @lock_order(<a> < <b>)`.
+
+**Non-local jumps.** A function that can reach a `longjmp` declares it:
+`// @longjmps`, or `// @longjmps_to(<jmp_buf>)` when the buffer is known. Write
+the landing site as the whole condition of an `if` or `switch`
+(`if (setjmp(env))`). A local that is changed after the `setjmp` and read after
+a jump back must be `volatile`.
+
 > Enforced today: `@mem`, `@move`, `@copy`, `@unsafe`, `@nullable`/`@nonnull`,
 > `@frees` / `@borrows` / `@moves` / `@adopts` / `@owns` / `@arena`, `@allocator`,
 > `@contract`, `@list` / `@drains`, `@raii`, `@must_use`, the goto vocabulary
@@ -102,9 +159,36 @@ Rules of thumb:
 > typestate (`@proto`; configured state machines exist under `--safety`) and exclusive
 > borrow (`@unique`). The complete, current list is the MCP resource `kenbi://annotations`.
 > Advisory outside `@threadsafe` (parsed and surfaced for *your* review, never gated — see
-> §4): `@guarded_by`, `@requires_lock`, `@acquires`, `@releases`, `@lock_order`, `@llm`.
+> §5): `@guarded_by`, `@requires_lock`, `@acquires`, `@releases`, `@lock_order`, `@llm`.
 
 ## 2. Run the deterministic checker — this is the verdict
+
+### With the kenbi MCP server (preferred when it is connected)
+
+The server gives you two tools and two resources. Use them in this order:
+
+1. **Before writing**, read the resource `kenbi://annotations` (the complete,
+   current annotation reference) and `kenbi://patterns` (the safe shape for each
+   kind of code, and the unsafe ones kenbi rejects). They are the source of
+   truth; this file is a summary of them.
+2. **After every edit** to checked C/C++, call `check_memory_safety` with the
+   files you changed (`files`; pass `cwd` so relative paths resolve, and
+   `compileCommands` or `clangArgs` when the file needs include paths or flags
+   to parse).
+3. **Read the summary first.** It says which checks ran on which functions,
+   and what the result rests on without checking (contracts, `@unsafe` lines).
+   A file whose functions were not adopted, or an axis that did not run, was
+   not checked — "no findings" there means nothing.
+4. **For each finding**, call `explain_finding` with its `code`. It returns a
+   worked example in three states: what triggers the finding, a half-fix that
+   is still reported, and the fix. Write your code to the third shape.
+5. **Re-run `check_memory_safety`** and repeat until it reports no findings.
+   Do not report the work as done on the strength of the edit alone.
+
+If a call fails (the file does not parse, the checker times out), say so and
+fix the cause — a run that did not complete is not a clean result.
+
+### With the command line
 
 ```sh
 kenbi --format=json --compile-commands=build/compile_commands.json src/foo.c
@@ -112,31 +196,77 @@ kenbi --format=json --compile-commands=build/compile_commands.json src/foo.c
 
 `--format=json` returns `{ "version", "tool", "findings": [ {file, line, code,
 severity, message} ] }` with **stable codes** and deterministic order. Treat
-findings with `severity: "error"` as ground truth and fix them. Codes:
-
-| code | meaning |
-|---|---|
-| `DOUBLE_FREE` / `USE_AFTER_FREE` / `USE_AFTER_MOVE` | temporal misuse of an obligation |
-| `LEAK` | an obligation never discharged on some path |
-| `FREE_INTERIOR` / `MOVE_INTERIOR` | freeing/moving via an interior pointer |
-| `FREE_AFTER_MOVE` / `MOVE_AFTER_FREE` / `DOUBLE_MOVE` | move/free ordering |
-| `WRONG_DEALLOCATOR` | freed with a function other than the declared `free:` |
-| `NULL_DEREF` | deref of a `@nullable` pointer with no null-check |
-| `CONTRACT_NOT_HONORED` | declared `@frees` but the body doesn't free it |
-| `BORROW_FREED` / `BORROW_OUTLIVES_OWNER` | a `@borrows` / arena object freed individually / used after its owner died |
-| `DANGLING_RETURN` | return of a pointer into a local, or a freed pointer |
-| `UNCONTRACTED_ESCAPE` / `UNCONTRACTED_RELEASE` | owned pointer crosses a callee / release boundary with no ownership contract |
-| `UNUSED_MUST_USE` | a `@must_use` result is discarded |
-| `UNSTRUCTURED_GOTO` | a backward / nested / computed goto kenbi refuses to model |
-| `FINALLY_BYPASSED` | an owning exit bypasses a declared `@goto_finally` funnel |
-| `UNKNOWN_VAR` / `UNKNOWN_RESOURCE` | annotation hygiene |
+findings with `severity: "error"` as ground truth and fix them.
 
 **propose-then-verify**: when you propose a fix or a new annotation, re-run
-kenbi. If it still flags, you are not done. If kenbi is clean, the temporal /
-deallocator claims it covers are discharged — say so plainly, scoped to what it
-checks. Do not re-litigate kenbi-clean code with hypothetical doubts.
+kenbi. If it still flags, you are not done. If kenbi is clean, the claims it
+covers are discharged — say so plainly, scoped to what it checked. Do not
+re-litigate kenbi-clean code with hypothetical doubts.
 
-## 3. Advisory review — the residue kenbi cannot see (grounded, never a gate)
+## 3. Fix a finding — what resolves it, and what does not
+
+A finding means kenbi could not show the code does what it declares. Either
+the code is wrong, or the intent is not declared. Decide which by reading the
+code, then fix that. The message names the line and usually the fix.
+
+| code | what it means | what resolves it |
+|---|---|---|
+| `LEAK` | an obligation is never discharged on some path | release it on that path (early returns and error paths are the usual ones), or transfer it with a declared `@move` / `@moves` / return from an `@owns` function |
+| `DOUBLE_FREE` / `USE_AFTER_FREE` | released twice, or used after release | remove the second release or reorder the use; if a callee releases it, declare `@frees` on the callee and drop the caller's release |
+| `USE_AFTER_MOVE` / `DOUBLE_MOVE` / `FREE_AFTER_MOVE` | the handle was used after its obligation left | stop using the moved-from handle, or do not move it |
+| `FREE_INTERIOR` / `FREE_NONHEAP` | a release through a pointer that is not the start of a heap block | release the owner, not the interior pointer |
+| `WRONG_DEALLOCATOR` | released with a function other than the declared `free:` | call the declared deallocator; change `free:` only if the declaration was the mistake |
+| `NULL_DEREF` | a `@nullable` pointer dereferenced without a check | check it on the path (`if (!p) return;`) |
+| `DANGLING_RETURN` | returns a pointer into a local, or a released pointer | return an owned object or write into caller storage |
+| `UNCONTRACTED_ESCAPE` / `UNCONTRACTED_RELEASE` / `UNCONTRACTED_MOVE` | an owned pointer crosses a function boundary that declares nothing | declare what the callee does on the callee: `@borrows`, `@frees`, `@moves`, `@adopts` (or `@contract` for code you cannot edit) |
+| `CONTRACT_NOT_HONORED` / `BORROW_FREED` / `BORROW_MOVED` | the body does not do what its contract says | fix the body, or correct the contract if it was wrong — then every caller is re-checked against it |
+| `BORROW_OUTLIVES_OWNER` | a borrow or arena object used after its owner died | shorten the use or lengthen the owner |
+| `UNVALIDATED_INDEX` / `UNVALIDATED_SIZE` | an index or length reaches a buffer with no bound check on the path, or in a form kenbi cannot read | add the check before the access; put a computed index in a variable and bound that |
+| `INAPPROPRIATE_BOUND` | a check is present but does not cover the buffer | check against the buffer's real size |
+| `INDEX_MAYBE_NEGATIVE` | a signed index with no lower bound | add `i >= 0`, or use an unsigned type |
+| `INVARIANT_NOT_MAINTAINED` | a write breaks a declared invariant, or a call does not establish a parameter invariant | establish it before the write or the call (a check, or the caller's own `@invariant`) |
+| `UNGUARDED_INVARIANT_WRITE` | a protected field written without `@maintains` | add `// @maintains(...)` on a write that keeps the invariant |
+| `USE_OF_UNINITIALIZED` | a local read before it is assigned on some path | initialise it at the declaration or on the missing path |
+| `TYPE_CONFUSION` | a union member used where its tag is not proven | test the tag on the path |
+| `UNGUARDED_ACCESS` / `REQUIRED_LOCK_NOT_HELD` | a guarded field or a `@requires_lock` function reached without the lock | take the lock, or declare `@requires_lock` on the enclosing function |
+| `LOCK_LEAKED` / `DOUBLE_LOCK` / `UNLOCK_WITHOUT_LOCK` | unbalanced locking on some path | release on every path; do not re-acquire a held lock |
+| `LOCK_ORDER_VIOLATION` | locks taken against the declared order | take them in the declared order |
+| `LEAK_ON_THROW` / `LEAK_ON_LONGJMP` / `LONGJMP_SKIPS_DESTRUCTOR` | an owner is held where a call may unwind or jump | hold it in an RAII owner, release it before the call, or (longjmp) free it where the jump lands |
+| `UNDECLARED_LONGJMP` / `UNKNOWN_LONGJMP_TARGET` | a function can reach a longjmp without declaring it, or its target | declare `@longjmps` / `@longjmps_to(<jmp_buf>)` |
+| `SETJMP_CLOBBERED` | a local changed after the setjmp is read after a jump back | declare it `volatile`, or assign it again before the use |
+| `UNSTRUCTURED_GOTO` / `UNSUPPORTED_SETJMP` / `UNSUPPORTED_CONSTRUCT` / `LOOP_FIXPOINT_LIMIT` | a construct kenbi refuses rather than guesses at | rewrite it in the form the message names |
+| `UNUSED_MUST_USE` | a `@must_use` result discarded | use or test the result |
+| `STALE_UNSAFE` / `UNKNOWN_VAR` / `UNKNOWN_RESOURCE` | an annotation that matches nothing | remove or correct the annotation |
+
+For any code, `explain_finding` (MCP) gives a worked example; the table is the
+short form.
+
+**These do not resolve a finding. Do not do them:**
+
+- **Adding `// @unsafe` to make it go away.** `@unsafe` is a statement that a
+  human takes responsibility for a line kenbi cannot model. It is listed in
+  every result as trust that was not checked. Propose it only when the code is
+  right and cannot be written in a checkable form, say why, and leave the
+  decision to the user.
+- **Removing the opt-in marker or the annotation** (`@kenbi`, `@spatial`,
+  `@mem`, …) so the check no longer runs.
+- **Declaring something that is not true** to satisfy the check: an
+  `@invariant` no caller establishes, a `@counted_by` larger than the buffer,
+  a `@borrows` on a function that keeps the pointer, a `@frees` on one that
+  does not free. Contracts are checked against bodies and callers, so this
+  usually only moves the finding — and where it is not checkable, it hides a bug.
+- **A check that does not check**: a bound that is looser than the buffer, a
+  null test after the dereference, a guard on a different variable.
+- **Hiding the expression from the checker**: routing an index through a
+  helper, a cast or a macro so it is no longer read, or moving the code into a
+  file that is not adopted.
+- **Weakening the code's behaviour to quiet a path** (dropping an error path,
+  leaking instead of freeing) without saying so.
+
+If a finding looks wrong after you have read the code, do not work around it:
+report it to the user with the smallest example that shows it.
+
+## 4. Advisory review — the residue kenbi cannot see (grounded, never a gate)
 
 kenbi is deterministic and bounded. *You* add a second layer, **grounded by the
 annotations** (this is why it beats ungrounded review: your task is "does the
@@ -166,12 +296,11 @@ Perspectives (the catalogue of residue):
 Keep advisory output low-priority and clearly separate from kenbi's errors.
 Aesthetic preferences are out of scope; stay safety-relevant.
 
-## 4. Advisory annotations — intent the engine does NOT decide (you verify it)
+## 5. Advisory annotations — outside `@threadsafe`, intent you verify
 
-Some intent can't be settled statically at low false-positive cost — lock
-discipline, lock ordering, acquire/release effects, and anything the author
-flags freeform. kenbi parses these annotations and emits them as findings with
-`severity: "advisory"`. **Advisory findings never gate the build (the exit code
+Inside a `@threadsafe` scope the lock annotations are verified by kenbi (§1,
+§3). Outside one — and for anything the author flags freeform — kenbi parses
+the annotations and emits them as findings with `severity: "advisory"`. **Advisory findings never gate the build (the exit code
 ignores them) — they are review directives for *you*.** For each one, read the
 surrounding code and verify the stated property; if it can be violated, report a
 concrete, falsifiable scenario.
@@ -201,7 +330,9 @@ gate; the deterministic engine remains the only judge of `error` findings.
 - **Annotate boundaries, infer interiors.** Put intent at allocation / transfer
   / signatures; let the tool propagate.
 - **Don't silence — fix or take responsibility.** A finding is fixed by code or
-  by a reviewed, explicit annotation, not by deleting the marker.
+  by a true, checked annotation — never by `@unsafe` on your own decision, by
+  deleting a marker, or by declaring what does not hold (§3).
+- **Re-run after every change.** An edit is not a fix until the checker says so.
 - **Stale annotations are bugs.** If an annotation no longer matches the code,
   update it; kenbi will flag inconsistencies (`WRONG_DEALLOCATOR`, etc.).
 - **Don't restate an annotation in prose.** Who owns a resource, which function

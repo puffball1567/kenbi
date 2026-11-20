@@ -27,6 +27,11 @@ and the JSON output may change in any minor version.
   the arguments must be shown to satisfy it, else the call is `INVARIANT_NOT_MAINTAINED`.
   Previously it was assumed of every caller.
 
+- Agent guidance (`integrations/agent/SKILL.md`): adds the opt-in axes (`@spatial`,
+  `@initcheck`, `@typecheck`, `@threadsafe`, non-local jumps), the procedure for the kenbi MCP
+  tools, a per-code table of what resolves each finding, and the changes that do not resolve
+  one (`@unsafe` to silence, removing a marker, declaring what does not hold).
+
 ### Fixed
 
 - Bounds: `i++`, `--i`, `i += k` and `i = i ± k` move the bounds of the value they change, as a

@@ -32,6 +32,11 @@ code and annotations that will *pass* `kenbi`; do not assert safety in comments.
 else. These never fail the build; treat each as a directive to verify against the
 code (for `GUARDED_BY`, check every access holds the lock; `LOCK_ORDER_CONFLICT`
 is a declared deadlock). Report a concrete scenario if violated. Details in
-`integrations/agent/SKILL.md` §4.
+`integrations/agent/SKILL.md` §5.
+
+**Fixing a finding.** Fix the code, or declare intent that is true. Do not add
+`@unsafe`, remove a marker, or declare something that does not hold to make a
+finding disappear; re-run kenbi after every change. The per-code fix table and
+the kenbi MCP procedure are in `integrations/agent/SKILL.md` §2–§3.
 
 Full guidance: `integrations/agent/SKILL.md`.
