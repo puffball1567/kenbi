@@ -436,12 +436,24 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 `i + 4 <= n` は認められず、`n >= 4 && i <= n - 4` は認められます。kenbi はパス上のチェックを
 探すのであって、チェックを取り除くことはありません。
 
+kenbi が添字や長さとして読めるのは、変数に定数を足し引きした形（`buf[i]`、`buf[i + 1]`、
+`buf[i++]`、`*(p + i)`）、定数、`x % K` / `x & K` です。それ以外（積、関数呼び出し、変数どうしの
+演算、入れ子の読み出し）はチェックと対応づけられないため報告されます。値を変数に入れ、その変数を
+境界チェックしてください。定数の添字や長さもバッファのサイズと照合されます。サイズが可変の
+バッファ（`malloc(n * …)` に対する `buf[0]`）では、経路上のチェック（`if (n >= 1)`）か、宣言した
+`@invariant(n >= 1)` によって、サイズが足りることを示す必要があります。
+
 - 関数の上の `// @counted_by(<buf>: <len>)` はポインタ引数にサイズを与えます。フィールド
   （`b->buf: b->cap`）やリングバッファのマスク（`b->mask + 1`）としても指定できます。
 - `// @invariant(<field> <rel> <size>)` はデータ構造の不変条件を宣言します（例:
   `parser->toknext <= num_tokens`）。そのフィールドは保護され、それへの書き込みはすべて
   `// @maintains(...)` を必要とし、kenbi がそれを検証します（`UNGUARDED_INVARIANT_WRITE`、
   `INVARIANT_NOT_MAINTAINED`）。そのフィールドで抑えられたインデックスは、この関係を通じてカバーされます。
+- 関数の上の `// @invariant(<param> >= <K>)` や `// @invariant(<param> <rel> <param>)` は、
+  本体が引数について仮定することを宣言します（`@invariant(n >= 2)`、`@invariant(next <= num)`）。
+  kenbi は `@spatial` のコードにあるすべての呼び出しでこれを検証します。引数が条件を満たすことを、
+  経路上のチェック、定数、または呼び出し側自身が宣言した不変条件で示せなければ、その呼び出しは
+  `INVARIANT_NOT_MAINTAINED` です。
 
 ### 初期化（`@initcheck`）とタグ付き共用体（`@typecheck`）
 

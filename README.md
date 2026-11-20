@@ -462,12 +462,24 @@ else it is `UNVALIDATED_INDEX` / `UNVALIDATED_SIZE`. The check must cover the bu
 not credited; `n >= 4 && i <= n - 4` is. kenbi looks for the check on the path; it never removes
 one.
 
+kenbi reads an index or a length as a variable plus or minus a constant (`buf[i]`, `buf[i + 1]`,
+`buf[i++]`, `*(p + i)`), a constant, or `x % K` / `x & K`. Anything else — a product, a call, two
+variables, a nested read — cannot be matched to a check and is reported: store the value in a
+variable and bound that. A constant index or length is checked against the buffer's size too:
+on a buffer of variable size (`buf[0]` on `malloc(n * …)`) the size must be shown large enough,
+by a check on the path (`if (n >= 1)`) or by a declared `@invariant(n >= 1)`.
+
 - `// @counted_by(<buf>: <len>)` above a function gives a pointer parameter its size, also as a
   field (`b->buf: b->cap`) or a ring-buffer mask (`b->mask + 1`).
 - `// @invariant(<field> <rel> <size>)` declares a data-structure invariant (for example
   `parser->toknext <= num_tokens`). The field is then protected: every write to it needs
   `// @maintains(...)`, which kenbi verifies (`UNGUARDED_INVARIANT_WRITE`,
   `INVARIANT_NOT_MAINTAINED`), and an index bounded by the field is covered through the relation.
+- `// @invariant(<param> >= <K>)` or `// @invariant(<param> <rel> <param>)` above a function
+  declares what its body assumes of its parameters (`@invariant(n >= 2)`,
+  `@invariant(next <= num)`). kenbi verifies it at every call in `@spatial` code: the arguments
+  must be shown to satisfy it — by a check on the path, by constants, or by the caller's own
+  declared invariant — else the call is `INVARIANT_NOT_MAINTAINED`.
 
 ### Initialisation (`@initcheck`) and tagged unions (`@typecheck`)
 

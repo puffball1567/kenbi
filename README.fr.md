@@ -448,6 +448,14 @@ une condition de boucle, `% n`, un écrêtage (clamp) ou un masque — sinon c'e
 `i + 4 <= n` sur un `i` non signé n'est pas reconnu ; `n >= 4 && i <= n - 4` l'est. kenbi
 recherche la vérification sur le chemin ; il n'en supprime jamais aucune.
 
+kenbi lit un index ou une longueur comme une variable plus ou moins une constante (`buf[i]`,
+`buf[i + 1]`, `buf[i++]`, `*(p + i)`), une constante, ou `x % K` / `x & K`. Toute autre forme — un
+produit, un appel, deux variables, une lecture imbriquée — ne peut être rapprochée d'aucune
+vérification et est signalée : rangez la valeur dans une variable et bornez celle-ci. Un index ou
+une longueur constants sont eux aussi comparés à la taille du tampon : sur un tampon de taille
+variable (`buf[0]` sur `malloc(n * …)`), il faut montrer que la taille suffit, par une
+vérification sur le chemin (`if (n >= 1)`) ou par un `@invariant(n >= 1)` déclaré.
+
 - `// @counted_by(<buf>: <len>)` au-dessus d'une fonction donne sa taille à un paramètre
   pointeur, également sous forme de champ (`b->buf: b->cap`) ou de masque de tampon circulaire
   (`b->mask + 1`).
@@ -455,6 +463,11 @@ recherche la vérification sur le chemin ; il n'en supprime jamais aucune.
   exemple `parser->toknext <= num_tokens`). Le champ est alors protégé : chaque écriture dans ce
   champ exige `// @maintains(...)`, que kenbi vérifie (`UNGUARDED_INVARIANT_WRITE`,
   `INVARIANT_NOT_MAINTAINED`), et un index borné par le champ est couvert via la relation.
+- `// @invariant(<param> >= <K>)` ou `// @invariant(<param> <rel> <param>)` au-dessus d'une
+  fonction déclare ce que son corps suppose de ses paramètres (`@invariant(n >= 2)`,
+  `@invariant(next <= num)`). kenbi le vérifie à chaque appel dans du code `@spatial` : il faut
+  montrer que les arguments le satisfont — par une vérification sur le chemin, par des constantes
+  ou par l'invariant déclaré de l'appelant —, sinon l'appel est `INVARIANT_NOT_MAINTAINED`.
 
 ### Initialisation (`@initcheck`) et unions étiquetées (`@typecheck`)
 

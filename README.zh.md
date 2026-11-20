@@ -419,12 +419,22 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 `i + 4 <= n` 不被认可；`n >= 4 && i <= n - 4` 则被认可。kenbi 在路径上寻找该检查；它从不
 移除检查。
 
+kenbi 能读懂的索引或长度是：变量加减一个常量（`buf[i]`、`buf[i + 1]`、`buf[i++]`、`*(p + i)`）、
+常量，或 `x % K` / `x & K`。其他形式——乘积、函数调用、两个变量的运算、嵌套读取——无法与任何检查
+对应，会被报告：请把该值存入一个变量，再对这个变量做边界检查。常量索引或长度同样要与缓冲区大小
+比对：对于大小可变的缓冲区（`malloc(n * …)` 上的 `buf[0]`），必须通过路径上的检查
+（`if (n >= 1)`）或声明的 `@invariant(n >= 1)` 表明大小足够。
+
 - 函数上方的 `// @counted_by(<buf>: <len>)` 为指针参数给出其大小，也可以是字段形式
   （`b->buf: b->cap`）或环形缓冲区掩码（`b->mask + 1`）。
 - `// @invariant(<field> <rel> <size>)` 声明一个数据结构不变式（例如
   `parser->toknext <= num_tokens`）。该字段随后受到保护：对它的每次写入都需要
   `// @maintains(...)`，kenbi 会对其进行验证（`UNGUARDED_INVARIANT_WRITE`、
   `INVARIANT_NOT_MAINTAINED`），并且以该字段为界的索引通过该关系得到覆盖。
+- 函数上方的 `// @invariant(<param> >= <K>)` 或 `// @invariant(<param> <rel> <param>)` 声明函数体
+  对其参数的假设（`@invariant(n >= 2)`、`@invariant(next <= num)`）。kenbi 会在 `@spatial` 代码中的
+  每一处调用验证它：必须通过路径上的检查、常量，或调用方自己声明的不变式表明实参满足该条件，否则
+  该调用为 `INVARIANT_NOT_MAINTAINED`。
 
 ### 初始化（`@initcheck`）与带标签联合体（`@typecheck`）
 

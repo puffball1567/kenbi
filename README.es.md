@@ -446,12 +446,25 @@ pero es demasiado laxa), un índice con signo necesita además `i >= 0` (`INDEX_
 la aritmética de la guarda no debe desbordarse: `i + 4 <= n` sobre un `i` sin signo no se acepta;
 `n >= 4 && i <= n - 4` sí. kenbi busca la comprobación en la vía; nunca elimina ninguna.
 
+kenbi lee un índice o una longitud como una variable más o menos una constante (`buf[i]`,
+`buf[i + 1]`, `buf[i++]`, `*(p + i)`), una constante, o `x % K` / `x & K`. Cualquier otra forma —un
+producto, una llamada, dos variables, una lectura anidada— no puede asociarse a ninguna
+comprobación y se reporta: guarde el valor en una variable y acote esa variable. Un índice o una
+longitud constantes también se comparan con el tamaño del búfer: en un búfer de tamaño variable
+(`buf[0]` sobre `malloc(n * …)`) hay que mostrar que el tamaño alcanza, con una comprobación en el
+camino (`if (n >= 1)`) o con un `@invariant(n >= 1)` declarado.
+
 - `// @counted_by(<buf>: <len>)` sobre una función da su tamaño a un parámetro puntero, también
   como campo (`b->buf: b->cap`) o como máscara de búfer circular (`b->mask + 1`).
 - `// @invariant(<field> <rel> <size>)` declara un invariante de estructura de datos (por ejemplo
   `parser->toknext <= num_tokens`). El campo queda entonces protegido: cada escritura en él necesita
   `// @maintains(...)`, que kenbi verifica (`UNGUARDED_INVARIANT_WRITE`,
   `INVARIANT_NOT_MAINTAINED`), y un índice acotado por el campo queda cubierto a través de la relación.
+- `// @invariant(<param> >= <K>)` o `// @invariant(<param> <rel> <param>)` encima de una función
+  declara lo que su cuerpo supone de sus parámetros (`@invariant(n >= 2)`,
+  `@invariant(next <= num)`). kenbi lo verifica en cada llamada dentro de código `@spatial`: hay
+  que mostrar que los argumentos lo cumplen —con una comprobación en el camino, con constantes o
+  con el invariante declarado del llamador—; si no, la llamada es `INVARIANT_NOT_MAINTAINED`.
 
 ### Inicialización (`@initcheck`) y uniones etiquetadas (`@typecheck`)
 

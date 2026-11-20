@@ -459,6 +459,14 @@ Index braucht zusätzlich `i >= 0` (`INDEX_MAYBE_NEGATIVE`), und die Arithmetik 
 nicht überlaufen: `i + 4 <= n` bei einem vorzeichenlosen `i` wird nicht angerechnet;
 `n >= 4 && i <= n - 4` schon. kenbi sucht die Prüfung auf dem Pfad; es entfernt nie eine.
 
+kenbi liest einen Index oder eine Länge als Variable plus oder minus eine Konstante (`buf[i]`,
+`buf[i + 1]`, `buf[i++]`, `*(p + i)`), als Konstante oder als `x % K` / `x & K`. Alles andere – ein
+Produkt, ein Aufruf, zwei Variablen, ein verschachtelter Lesezugriff – lässt sich keiner Prüfung
+zuordnen und wird gemeldet: Legen Sie den Wert in einer Variablen ab und begrenzen Sie diese. Auch
+ein konstanter Index oder eine konstante Länge wird gegen die Puffergröße geprüft: Bei einem
+Puffer variabler Größe (`buf[0]` auf `malloc(n * …)`) muss gezeigt sein, dass die Größe ausreicht,
+durch eine Prüfung auf dem Pfad (`if (n >= 1)`) oder ein deklariertes `@invariant(n >= 1)`.
+
 - `// @counted_by(<buf>: <len>)` über einer Funktion gibt einem Zeigerparameter seine Größe, auch
   als Feld (`b->buf: b->cap`) oder als Ringpuffer-Maske (`b->mask + 1`).
 - `// @invariant(<field> <rel> <size>)` deklariert eine Datenstruktur-Invariante (zum Beispiel
@@ -466,6 +474,12 @@ nicht überlaufen: `i + 4 <= n` bei einem vorzeichenlosen `i` wird nicht angerec
   braucht `// @maintains(...)`, was kenbi verifiziert (`UNGUARDED_INVARIANT_WRITE`,
   `INVARIANT_NOT_MAINTAINED`), und ein durch das Feld begrenzter Index ist über die Relation
   abgedeckt.
+- `// @invariant(<param> >= <K>)` oder `// @invariant(<param> <rel> <param>)` über einer
+  Funktion deklariert, was ihr Rumpf von ihren Parametern voraussetzt (`@invariant(n >= 2)`,
+  `@invariant(next <= num)`). kenbi prüft das an jedem Aufruf in `@spatial`-Code: Für die
+  Argumente muss gezeigt sein, dass sie es erfüllen – durch eine Prüfung auf dem Pfad, durch
+  Konstanten oder durch die deklarierte Invariante des Aufrufers –, sonst ist der Aufruf
+  `INVARIANT_NOT_MAINTAINED`.
 
 ### Initialisierung (`@initcheck`) und getaggte Unions (`@typecheck`)
 
