@@ -83,6 +83,13 @@ Rules of thumb:
   such contract is `UNCONTRACTED_ESCAPE`; freeing an undeclared pointer parameter is
   `UNCONTRACTED_RELEASE` (the default-red boundary discipline).
 
+- **`// @unique(param)`** above a function declares the pointer exclusive for the
+  call — no other argument reaches the same object (C's `restrict`, checked). Each
+  call is verified: the same object passed twice is `UNIQUE_ALIASED`, and a pair
+  kenbi cannot show distinct is `UNIQUE_UNPROVEN`. The body may not store the
+  pointer where it outlives the call (`UNIQUE_ESCAPES`). Declare it on functions
+  whose result is wrong when source and destination overlap.
+
 - **`// @must_use`** above a function: dropping its result (a bare statement, not
   assigned / returned / passed / tested) is `UNUSED_MUST_USE` — the `#[must_use]`
   discipline for ignored error codes and leaked allocations.
@@ -150,14 +157,14 @@ the landing site as the whole condition of an `if` or `switch`
 a jump back must be `volatile`.
 
 > Enforced today: `@mem`, `@move`, `@copy`, `@unsafe`, `@nullable`/`@nonnull`,
-> `@frees` / `@borrows` / `@moves` / `@adopts` / `@owns` / `@arena`, `@allocator`,
+> `@frees` / `@borrows` / `@moves` / `@adopts` / `@owns` / `@unique` / `@arena`, `@allocator`,
 > `@contract`, `@list` / `@drains`, `@raii`, `@must_use`, the goto vocabulary
 > (`@goto_noreturn` / `@goto_finally` / `@goto_backward`), and the opt-in axes:
 > `@spatial` (`@counted_by`, `@invariant` / `@maintains`), `@initcheck`, `@typecheck`
 > (`@variant`) and `@threadsafe` (which turns the lock annotations below into verified
-> checks). Not available — don't write these expecting a check: in-source protocol
-> typestate (`@proto`; configured state machines exist under `--safety`) and exclusive
-> borrow (`@unique`). The complete, current list is the MCP resource `kenbi://annotations`.
+> checks). Not available — don't write this expecting a check: in-source protocol
+> typestate (`@proto`; configured state machines exist under `--safety`). The complete,
+> current list is the MCP resource `kenbi://annotations`.
 > Advisory outside `@threadsafe` (parsed and surfaced for *your* review, never gated — see
 > §5): `@guarded_by`, `@requires_lock`, `@acquires`, `@releases`, `@lock_order`, `@llm`.
 
@@ -221,6 +228,8 @@ code, then fix that. The message names the line and usually the fix.
 | `UNCONTRACTED_ESCAPE` / `UNCONTRACTED_RELEASE` / `UNCONTRACTED_MOVE` | an owned pointer crosses a function boundary that declares nothing | declare what the callee does on the callee: `@borrows`, `@frees`, `@moves`, `@adopts` (or `@contract` for code you cannot edit) |
 | `CONTRACT_NOT_HONORED` / `BORROW_FREED` / `BORROW_MOVED` | the body does not do what its contract says | fix the body, or correct the contract if it was wrong — then every caller is re-checked against it |
 | `BORROW_OUTLIVES_OWNER` | a borrow or arena object used after its owner died | shorten the use or lengthen the owner |
+| `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` | an `@unique` parameter is passed an object another argument reaches, or may reach | pass a separate object or a copy; make the distinction visible (distinct variables or members, a fresh allocation, `@unique` on the caller's own parameter) |
+| `UNIQUE_ESCAPES` | the body stores an `@unique` pointer where it outlives the call | keep it in locals, or drop `@unique` if the function does keep it |
 | `UNVALIDATED_INDEX` / `UNVALIDATED_SIZE` | an index or length reaches a buffer with no bound check on the path, or in a form kenbi cannot read | add the check before the access; put a computed index in a variable and bound that |
 | `INAPPROPRIATE_BOUND` | a check is present but does not cover the buffer | check against the buffer's real size |
 | `INDEX_MAYBE_NEGATIVE` | a signed index with no lower bound | add `i >= 0`, or use an unsigned type |

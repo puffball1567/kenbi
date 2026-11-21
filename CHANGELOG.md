@@ -7,6 +7,13 @@ and the JSON output may change in any minor version.
 
 ## [Unreleased]
 
+### Added
+
+- `// @unique(param)` above a function declares a pointer parameter exclusive for the call: no
+  other argument reaches the object it points into. Every call is verified — the same object
+  passed twice is `UNIQUE_ALIASED`, a pair nothing shows to be distinct is `UNIQUE_UNPROVEN` —
+  and the body may not store the pointer where it outlives the call (`UNIQUE_ESCAPES`).
+
 ### Changed
 
 - Bounds (`@spatial`): an index or a length that is not a variable plus or minus a constant — a

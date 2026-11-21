@@ -339,6 +339,18 @@ type Ctx* = object  ## module-local state during a single parse (all fields publ
                                     ## resolved to keys in fnVisitor against the DEFINING function's
                                     ## params — so a contract declared on a header prototype binds to
                                     ## the implementation in another TU (cross-file). off = `+ k` size.
+  uniqueSites*: seq[tuple[file: string, line: int, spec: string]] ## `@unique(p, q)` sites
+  uniqueParams*: Table[string, seq[string]] ## function -> the pointer parameters it declares
+                                    ## exclusive: no other argument of a call may reach the
+                                    ## same object, and the body may not keep the pointer
+  uqAddrCount*: Table[string, int]  ## the function being lowered: variable -> how often its
+                                    ## address is taken (`&x`, or an array used as a pointer)
+  uqAssigned*: HashSet[string]      ## ... the variables it assigns or steps
+  uqLocals*: HashSet[string]        ## ... its automatic locals
+  uqParams*: HashSet[string]        ## ... its parameters
+  uqLoops*: seq[tuple[first, last: int]] ## ... the source ranges of its loops
+  curUnique*: HashSet[string]       ## ... and the parameters it declares `@unique` itself
+  uqHasGoto*: bool                  ## ... and whether it has a `goto` (a possible loop)
   invariantSites*: seq[tuple[file: string, line: int, spec: string]] ## `@invariant(lvalue rel
                                     ## expr)` sites: a declared data-structure invariant relating a
                                     ## PROTECTED field/var to a size (the jsmn `toknext <= num_tokens`).

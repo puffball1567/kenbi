@@ -1024,6 +1024,49 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
         "`if (!setjmp(b))`, `if (setjmp(b) == 0)`, `switch (setjmp(b))`), outside a `try` " &
         "block. Move it into one of those forms, or mark the line @unsafe if you take " &
         "responsibility.")
+  of ikUniqueCheck:
+    if a.curCovered:
+      var verdict = s.off
+      if verdict == 0:
+        # two pointer variables: decided by what each is bound to on this path
+        proc bound(a: Analyzer, key: string): int =
+          if key in a.unknownOrigin or key in a.ambiguousHandles: -1
+          else: a.varOrigin.getOrDefault(key, -1)
+        proc fresh(a: Analyzer, o: int): bool =
+          ## an allocation this function made itself: nothing it was handed can point into it
+          o >= 0 and o notin a.contractOrigins and o notin a.borrowedOrigins and
+            o notin a.undeclaredParams and o notin a.fieldOrigins and
+            o notin a.conflatedOrigins and o notin a.listOrigins and o notin a.arenaObjects
+        proc handedIn(a: Analyzer, o: int): bool =
+          ## what a pointer parameter pointed to when the function was called
+          o in a.contractOrigins or o in a.borrowedOrigins or o in a.undeclaredParams
+        let (oa, ob) = (a.bound(s.aKey), a.bound(s.bKey))
+        if oa >= 0 and oa == ob:
+          verdict = (if oa in a.conflatedOrigins: 2 else: 1)
+        elif a.fresh(oa) and a.fresh(ob): verdict = -1
+        elif (a.fresh(oa) and a.handedIn(ob)) or (a.fresh(ob) and a.handedIn(oa)): verdict = -1
+        elif a.fresh(oa) and ob < 0 and (s.off2 and 2) != 0: verdict = -1
+        elif a.fresh(ob) and oa < 0 and (s.off2 and 1) != 0: verdict = -1
+        else: verdict = 2
+      let f = s.cKey.split('|')
+      if verdict == 1:
+        a.addDiag(s.line, "UNIQUE_ALIASED",
+          "'" & f[0] & "' declares its parameter '" & f[1] & "' `@unique`, but this call passes '" &
+          s.a & "' for it and '" & s.b & "' as another argument, and both point into the same " &
+          "object. Pass a separate object, or a copy.")
+      elif verdict == 2:
+        a.addDiag(s.line, "UNIQUE_UNPROVEN",
+          "'" & f[0] & "' declares its parameter '" & f[1] & "' `@unique`, and nothing shows that '" &
+          s.a & "', passed for it, and '" & s.b & "', another argument of this call, point to " &
+          "different objects. kenbi can tell for distinct variables, distinct members of one " &
+          "struct, separate allocations made in this function, and a parameter this function " &
+          "itself declares `@unique`.")
+  of ikUniqueEscape:
+    if a.curCovered:
+      a.addDiag(s.line, "UNIQUE_ESCAPES",
+        "'" & s.a & "' is, or derives from, the `@unique` parameter '" & s.b & "', and is stored " &
+        "where it outlives the call: the caller's exclusive access would end while this copy " &
+        "remains. Keep it in locals, or drop `@unique` from the parameter.")
   of ikJmpLocalRead:
     # a use of a local a longjmp left indeterminate on this path. Reported once per path:
     # the fix (volatile) is the same for every later use

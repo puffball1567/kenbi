@@ -224,7 +224,7 @@ const engineCoreDirectives* = [
   "@kenbi", "@verify", "@spatial", "@threadsafe", "@initcheck", "@typecheck", "@variant",
   "@counted_by", "@invariant", "@maintains", "@mem", "@move", "@goto_noreturn",
   "@goto_finally", "@goto_backward", "@copy", "@unsafe", "@escapes", "@realloc", "@raii", "@arena",
-  "@allocator", "@lock_order", "@drains", "@list", "@contract", "@contracts_for"]
+  "@allocator", "@lock_order", "@drains", "@list", "@contract", "@contracts_for", "@unique"]
 
 proc allKenbiDirectives*(): HashSet[string] =
   ## The COMPLETE set of directive keywords kenbi recognises as the first token of
@@ -303,6 +303,10 @@ proc scanCommentTokens(ctx: var Ctx, toks: ptr CXToken, n: cuint) =
       # tracked resource: every write to it must be `@maintains`-annotated (or RED), and
       # the relation may green an access bounded by it.
       ctx.invariantSites.add (fileOf(loc), line, pa)
+    of "@unique":
+      # declare pointer PARAMETERS of the function below exclusive (`@unique(dst)`): at every
+      # call no other argument may reach the same object, and the body may not keep the pointer.
+      ctx.uniqueSites.add (fileOf(loc), line, pa)
     of "@maintains":
       # this write (line) preserves a declared invariant — so it is not an unguarded
       # write. The preservation is VERIFIED, not trusted (a lie is CONTRACT_NOT_HONORED).

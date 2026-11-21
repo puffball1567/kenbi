@@ -430,6 +430,13 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
   be consumed; a call whose value is dropped (a bare statement, not assigned /
   returned / passed / tested) is `UNUSED_MUST_USE` — the `#[must_use]` discipline
   for ignored error codes and leaked allocations.
+- **exclusive parameter**: `// @unique(param)` above a function declares that, during a
+  call, no other argument reaches the object `param` points into (what C's `restrict` promises
+  and no compiler checks). At every call the argument is compared with each other pointer
+  argument: the same object is `UNIQUE_ALIASED`, a pair nothing shows to be distinct is
+  `UNIQUE_UNPROVEN`. Distinct variables, distinct members of one struct, separate allocations
+  made in the caller, and a parameter the caller itself declares `@unique` are distinct. In the
+  body, storing the pointer or a copy of it where it outlives the call is `UNIQUE_ESCAPES`.
 
 ### Goto vocabulary (optional — declare the structured intent of a goto)
 
@@ -598,6 +605,8 @@ can reach a longjmp without declaring `@longjmps`), `UNKNOWN_LONGJMP_TARGET` / `
 not the declared one), `SETJMP_CLOBBERED` (a non-volatile local read where a longjmp lands),
 `UNSUPPORTED_SETJMP` (a `setjmp` in a form kenbi does not model),
 `FINALLY_BYPASSED` (an owning exit bypasses a declared `@goto_finally` funnel),
+`UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (an `@unique` parameter that another
+argument reaches, or that the body keeps),
 `FREE_NONHEAP` (a `free` of a pointer into stack or other non-heap storage), `BORROW_MOVED` /
 `UNCONTRACTED_MOVE` (a move out of a borrow, or into a callee that declares no intake),
 `REALLOC_UNVERIFIED` / `REALLOC_SELF_REASSIGN` (a `realloc` whose outcome is not settled before

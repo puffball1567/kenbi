@@ -414,6 +414,14 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
   être consommé ; un appel dont la valeur est abandonnée (une instruction nue, ni affectée /
   retournée / passée / testée) est `UNUSED_MUST_USE` — la discipline `#[must_use]` pour les codes
   d'erreur ignorés et les allocations qui fuient.
+- **paramètre exclusif** : `// @unique(param)` au-dessus d'une fonction déclare que, pendant
+  un appel, aucun autre argument n'atteint l'objet vers lequel pointe `param` (ce que promet
+  `restrict` en C et qu'aucun compilateur ne vérifie). À chaque appel, l'argument est comparé à
+  chaque autre argument pointeur : le même objet est `UNIQUE_ALIASED`, une paire que rien ne
+  montre distincte est `UNIQUE_UNPROVEN`. Des variables distinctes, des membres distincts d'une
+  même structure, des allocations séparées faites dans l'appelant et un paramètre que
+  l'appelant déclare lui-même `@unique` sont distincts. Dans le corps, ranger le pointeur ou
+  une copie là où il survit à l'appel est `UNIQUE_ESCAPES`.
 
 ### Vocabulaire de goto (optionnel — déclarer l'intention structurée d'un goto)
 
@@ -593,6 +601,8 @@ une fonction qui peut atteindre un longjmp sans déclarer `@longjmps`), `UNKNOWN
 ou n'est pas celui déclaré), `SETJMP_CLOBBERED` (une variable locale non volatile lue là où un
 longjmp arrive), `UNSUPPORTED_SETJMP` (un `setjmp` sous une forme que kenbi ne modélise pas),
 `FINALLY_BYPASSED` (une sortie possédante contourne un entonnoir `@goto_finally` déclaré),
+`UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (un paramètre `@unique` qu'un autre
+argument atteint, ou que le corps conserve),
 `FREE_NONHEAP` (un `free` d'un pointeur vers la pile ou un autre stockage hors tas),
 `BORROW_MOVED` / `UNCONTRACTED_MOVE` (un move hors d'un emprunt, ou vers un appelé qui ne déclare
 aucune prise en charge), `REALLOC_UNVERIFIED` / `REALLOC_SELF_REASSIGN` (un `realloc` dont

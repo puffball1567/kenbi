@@ -404,6 +404,13 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 - **must-use 戻り値**: 関数の上の `// @must_use` は、その結果が消費されなければならない
   ことを宣言する。値が捨てられる呼び出し（代入 / return / 受け渡し / 検査されない裸の文）は
   `UNUSED_MUST_USE` —— 無視されたエラーコードやリークした確保に対する `#[must_use]` の規律。
+- **排他引数**: 関数の上の `// @unique(param)` は、呼び出しの間、`param` が指すオブジェクトに
+  他の引数からは届かないことを宣言します（C の `restrict` が約束し、コンパイラが検査しない内容
+  です）。呼び出しごとに、その引数を他のすべてのポインタ引数と比べます。同じオブジェクトなら
+  `UNIQUE_ALIASED`、別物だと示せない組は `UNIQUE_UNPROVEN` です。別の変数、同じ構造体の別の
+  メンバ、呼び出し側で行った別々の確保、呼び出し側自身が `@unique` と宣言した引数は別物として
+  扱われます。本体で、そのポインタやそのコピーを呼び出しより長く残る場所へ保存すると
+  `UNIQUE_ESCAPES` です。
 
 ### Goto ボキャブラリ（任意 —— goto の構造化された意図を宣言する）
 
@@ -570,6 +577,8 @@ use <var> | free <var> | move <var> | if / else / endif
 ジャンプ）、`SETJMP_CLOBBERED`（longjmp の着地点で読まれる volatile でない局所変数）、
 `UNSUPPORTED_SETJMP`（kenbi がモデル化しない形の `setjmp`）、
 `FINALLY_BYPASSED`（所有したまま出る exit が、宣言された `@goto_finally` ファネルを迂回する）、
+`UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES`（他の引数から届く、または本体が保持する
+`@unique` 引数）、
 `FREE_NONHEAP`（スタックなどヒープ以外の記憶域を指すポインタの `free`）、`BORROW_MOVED` /
 `UNCONTRACTED_MOVE`（借用からの move、または受け取りを宣言しない callee への move）、
 `REALLOC_UNVERIFIED` / `REALLOC_SELF_REASSIGN`（結果が使用前に確定しない `realloc`、または唯一の

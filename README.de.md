@@ -421,6 +421,14 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
   bloße Anweisung, nicht zugewiesen / zurückgegeben / übergeben / getestet) ist
   `UNUSED_MUST_USE` — die `#[must_use]`-Disziplin für ignorierte Fehlercodes und
   geleckte Allokationen.
+- **exklusiver Parameter**: `// @unique(param)` über einer Funktion deklariert, dass während
+  eines Aufrufs kein anderes Argument das Objekt erreicht, in das `param` zeigt (was `restrict`
+  in C verspricht und kein Compiler prüft). An jedem Aufruf wird das Argument mit jedem anderen
+  Zeigerargument verglichen: dasselbe Objekt ist `UNIQUE_ALIASED`, ein Paar, dessen
+  Verschiedenheit nichts zeigt, ist `UNIQUE_UNPROVEN`. Verschiedene Variablen, verschiedene
+  Member einer Struktur, getrennte Allokationen im Aufrufer und ein Parameter, den der Aufrufer
+  selbst als `@unique` deklariert, gelten als verschieden. Im Rumpf ist das Speichern des
+  Zeigers oder einer Kopie an einem Ort, der den Aufruf überdauert, `UNIQUE_ESCAPES`.
 
 ### Goto-Vokabular (optional — die strukturierte Absicht eines goto deklarieren)
 
@@ -607,6 +615,8 @@ C++ ein Objekt mit nicht-trivialem Destruktor, das noch im Gültigkeitsbereich i
 dem deklarierten jmp_buf), `SETJMP_CLOBBERED` (eine nicht-volatile lokale Variable, gelesen wo ein
 longjmp landet), `UNSUPPORTED_SETJMP` (ein `setjmp` in einer Form, die kenbi nicht modelliert),
 `FINALLY_BYPASSED` (ein besitzender Ausgang umgeht einen deklarierten `@goto_finally`-Trichter),
+`UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (ein `@unique`-Parameter, den ein anderes
+Argument erreicht oder den der Rumpf behält),
 `FREE_NONHEAP` (ein `free` eines Zeigers in Stack- oder anderen Nicht-Heap-Speicher),
 `BORROW_MOVED` / `UNCONTRACTED_MOVE` (ein Move aus einem Borrow heraus oder in einen Callee, der
 keine Übernahme deklariert), `REALLOC_UNVERIFIED` / `REALLOC_SELF_REASSIGN` (ein `realloc`, dessen

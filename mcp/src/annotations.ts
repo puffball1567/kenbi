@@ -62,6 +62,14 @@ the declared intent and reports where they disagree.
   never frees or keeps it. Callsites: passing an owned pointer is a plain use (not an
   escape). Body: freeing the parameter is \`BORROW_FREED\`, moving it away is
   \`BORROW_MOVED\`.
+- \`// @unique(<param>)\` — during a call, no other argument reaches the object the pointer
+  points into (C's \`restrict\`, checked). Callsites: the argument is compared with every other
+  pointer argument; the same object is \`UNIQUE_ALIASED\`, a pair nothing shows to be distinct is
+  \`UNIQUE_UNPROVEN\` (RED until shown). Shown distinct: different variables, different members of
+  one struct, separate allocations made in the caller, a local whose address exists nowhere else,
+  a caller parameter that is itself \`@unique\`. Body: storing the pointer or a copy of it in a
+  global, a field or through another pointer is \`UNIQUE_ESCAPES\`. Combine with \`@borrows\` when
+  the caller owns the object.
 - \`// @moves(<param>)\` — the callee takes the value out (a channel / thread handoff).
   Callsites: the argument is moved; using it afterwards is \`USE_AFTER_MOVE\`, moving it
   again is \`DOUBLE_MOVE\`.

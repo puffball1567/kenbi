@@ -146,6 +146,16 @@ type
                  ## certain to have run before it.
     ikSetjmp     ## a call to `setjmp` / `sigsetjmp` in a form kenbi does not model (anything
                  ## but the whole condition of an `if` or `switch`, or inside a `try`): refused.
+    ikUniqueCheck ## EXCLUSIVITY at a call: the callee declares parameter `cKey` (`callee|param`)
+                 ## `@unique`, this call passes `a` (key `aKey`) for it and `b` (key `bKey`) as
+                 ## another pointer argument. `off`: 1 the two are the same object as written
+                 ## (UNIQUE_ALIASED); 2 nothing shows them distinct (UNIQUE_UNPROVEN); 0 decided
+                 ## from what the two pointer variables are bound to on this path — bound to
+                 ## one allocation is aliased, to two distinct ones is distinct, anything else
+                 ## unproven. `off2` bit 0 / bit 1: `a` / `b` is a parameter of the caller that
+                 ## still holds the value it was called with.
+    ikUniqueEscape ## the body of a function stores `a`, which is or derives from its `@unique`
+                 ## parameter `b`, where it outlives the call (UNIQUE_ESCAPES).
     ikJmpLocalRead ## a use of the value of `a` (key `aKey`), a non-volatile automatic local or
                  ## parameter of a function with a landing site. On a path a longjmp took back
                  ## into the function, a local changed between the setjmp and the jump is

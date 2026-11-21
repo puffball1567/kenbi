@@ -391,6 +391,12 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 - **must-use 返回值**：函数上方的 `// @must_use` 声明其结果必须被消费；其值被丢弃
   的调用（裸语句，未被赋值 / 返回 / 传递 / 测试）即为 `UNUSED_MUST_USE` —— 即针对
   被忽略的错误码和泄漏的分配的 `#[must_use]` 纪律。
+- **独占参数**：函数上方的 `// @unique(param)` 声明：在一次调用期间，没有其他实参能到达 `param`
+  所指向的对象（即 C 的 `restrict` 所承诺、而编译器并不检查的内容）。在每一处调用，该实参都会与
+  其他每个指针实参比较：指向同一对象为 `UNIQUE_ALIASED`，无法表明互不相同的一对为
+  `UNIQUE_UNPROVEN`。不同的变量、同一结构体的不同成员、在调用方中分别进行的分配，以及调用方自己
+  声明为 `@unique` 的参数，都视为互不相同。在函数体内，把该指针或其副本保存到比调用存活更久的
+  位置为 `UNIQUE_ESCAPES`。
 
 ### Goto 词汇（可选 —— 声明一个 goto 的结构化意图）
 
@@ -543,6 +549,8 @@ use <var> | free <var> | move <var> | if / else / endif
 `SETJMP_CLOBBERED`（在 longjmp 落点读取的非 volatile 局部变量）、`UNSUPPORTED_SETJMP`（kenbi
 不建模的形式的 `setjmp`）、
 `FINALLY_BYPASSED`（一个持有资源的出口绕过了声明的 `@goto_finally` 漏斗）、
+`UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES`（被其他实参到达、或被函数体保留的
+`@unique` 参数）、
 `FREE_NONHEAP`（对指向栈或其他非堆存储的指针执行 `free`）、`BORROW_MOVED` /
 `UNCONTRACTED_MOVE`（从借用中移出，或移入一个未声明接收的被调用者）、
 `REALLOC_UNVERIFIED` / `REALLOC_SELF_REASSIGN`（一个在使用前结果未被确定的 `realloc`，或其

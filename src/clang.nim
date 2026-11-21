@@ -123,6 +123,7 @@ const
   ckParenExpr*           = 111
   ckUnexposedExpr*       = 100
   ckIntegerLiteral*      = 106
+  ckStringLiteral*       = 109
   ckArraySubscriptExpr*  = 113
   ckCStyleCastExpr*      = 117
   ckCXXNewExpr*          = 134
