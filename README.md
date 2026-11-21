@@ -437,6 +437,12 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
   `UNIQUE_UNPROVEN`. Distinct variables, distinct members of one struct, separate allocations
   made in the caller, and a parameter the caller itself declares `@unique` are distinct. In the
   body, storing the pointer or a copy of it where it outlives the call is `UNIQUE_ESCAPES`.
+- **given back after the call**: `@borrows(param)` and `@unique(param)` both promise that nothing
+  holds the pointer once the call has returned, and the body is checked for it. Storing the
+  pointer or a copy of it in a global, a field or through another pointer is `BORROW_ESCAPES` /
+  `UNIQUE_ESCAPES`; so is passing it to a function whose parameter does not make the same
+  promise (`@borrows` or `@unique`, verified in that function's body in turn). The C library's
+  readers and writers (`memcpy`, `strlen`, `printf`, …) and declared deallocators are known.
 
 ### Goto vocabulary (optional — declare the structured intent of a goto)
 
@@ -605,6 +611,7 @@ can reach a longjmp without declaring `@longjmps`), `UNKNOWN_LONGJMP_TARGET` / `
 not the declared one), `SETJMP_CLOBBERED` (a non-volatile local read where a longjmp lands),
 `UNSUPPORTED_SETJMP` (a `setjmp` in a form kenbi does not model),
 `FINALLY_BYPASSED` (an owning exit bypasses a declared `@goto_finally` funnel),
+`BORROW_ESCAPES` (the body stores an `@borrows` pointer, or passes it to a function that may),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (an `@unique` parameter that another
 argument reaches, or that the body keeps),
 `FREE_NONHEAP` (a `free` of a pointer into stack or other non-heap storage), `BORROW_MOVED` /

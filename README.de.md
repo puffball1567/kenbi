@@ -429,6 +429,13 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
   Member einer Struktur, getrennte Allokationen im Aufrufer und ein Parameter, den der Aufrufer
   selbst als `@unique` deklariert, gelten als verschieden. Im Rumpf ist das Speichern des
   Zeigers oder einer Kopie an einem Ort, der den Aufruf überdauert, `UNIQUE_ESCAPES`.
+- **nach dem Aufruf zurückgegeben**: `@borrows(param)` und `@unique(param)` versprechen beide, dass
+  nach der Rückkehr des Aufrufs niemand den Zeiger mehr hält, und der Rumpf wird darauf geprüft.
+  Das Speichern des Zeigers oder einer Kopie in einer globalen Variable, einem Feld oder über
+  einen anderen Zeiger ist `BORROW_ESCAPES` / `UNIQUE_ESCAPES`; ebenso die Übergabe an eine
+  Funktion, deren Parameter nicht dasselbe verspricht (`@borrows` oder `@unique`, wiederum im
+  Rumpf jener Funktion geprüft). Die lesenden und schreibenden Funktionen der C-Bibliothek
+  (`memcpy`, `strlen`, `printf`, …) und deklarierte Freigabefunktionen sind bekannt.
 
 ### Goto-Vokabular (optional — die strukturierte Absicht eines goto deklarieren)
 
@@ -615,6 +622,8 @@ C++ ein Objekt mit nicht-trivialem Destruktor, das noch im Gültigkeitsbereich i
 dem deklarierten jmp_buf), `SETJMP_CLOBBERED` (eine nicht-volatile lokale Variable, gelesen wo ein
 longjmp landet), `UNSUPPORTED_SETJMP` (ein `setjmp` in einer Form, die kenbi nicht modelliert),
 `FINALLY_BYPASSED` (ein besitzender Ausgang umgeht einen deklarierten `@goto_finally`-Trichter),
+`BORROW_ESCAPES` (der Rumpf speichert einen `@borrows`-Zeiger oder übergibt ihn an eine Funktion,
+die das könnte),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (ein `@unique`-Parameter, den ein anderes
 Argument erreicht oder den der Rumpf behält),
 `FREE_NONHEAP` (ein `free` eines Zeigers in Stack- oder anderen Nicht-Heap-Speicher),

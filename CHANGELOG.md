@@ -13,6 +13,12 @@ and the JSON output may change in any minor version.
   other argument reaches the object it points into. Every call is verified — the same object
   passed twice is `UNIQUE_ALIASED`, a pair nothing shows to be distinct is `UNIQUE_UNPROVEN` —
   and the body may not store the pointer where it outlives the call (`UNIQUE_ESCAPES`).
+- `@borrows` and `@unique` parameters are checked for outliving the call: the body may not store
+  the pointer or a copy of it in a global, a field or through another pointer, nor pass it to a
+  function whose parameter is not itself `@borrows` / `@unique` (`BORROW_ESCAPES` /
+  `UNIQUE_ESCAPES`). The C library's readers and writers and declared deallocators are known.
+  A `@borrows` function that hands its pointer to an undeclared function will now draw a
+  finding; declare the receiving parameter.
 
 ### Changed
 

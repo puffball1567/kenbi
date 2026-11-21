@@ -397,6 +397,11 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
   `UNIQUE_UNPROVEN`。不同的变量、同一结构体的不同成员、在调用方中分别进行的分配，以及调用方自己
   声明为 `@unique` 的参数，都视为互不相同。在函数体内，把该指针或其副本保存到比调用存活更久的
   位置为 `UNIQUE_ESCAPES`。
+- **调用结束后归还**：`@borrows(param)` 与 `@unique(param)` 都承诺调用返回后不再有任何地方持有该
+  指针，函数体会据此受到检查。把该指针或其副本保存到全局变量、字段或通过另一指针保存为
+  `BORROW_ESCAPES` / `UNIQUE_ESCAPES`；把它传给形参未作同样承诺（`@borrows` 或 `@unique`，并在
+  该函数体内同样受检）的函数也是如此。C 库的读写函数（`memcpy`、`strlen`、`printf` 等）和已声明的
+  释放函数视为已知。
 
 ### Goto 词汇（可选 —— 声明一个 goto 的结构化意图）
 
@@ -549,6 +554,7 @@ use <var> | free <var> | move <var> | if / else / endif
 `SETJMP_CLOBBERED`（在 longjmp 落点读取的非 volatile 局部变量）、`UNSUPPORTED_SETJMP`（kenbi
 不建模的形式的 `setjmp`）、
 `FINALLY_BYPASSED`（一个持有资源的出口绕过了声明的 `@goto_finally` 漏斗）、
+`BORROW_ESCAPES`（函数体保存了 `@borrows` 指针，或把它传给可能保存它的函数）、
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES`（被其他实参到达、或被函数体保留的
 `@unique` 参数）、
 `FREE_NONHEAP`（对指向栈或其他非堆存储的指针执行 `free`）、`BORROW_MOVED` /

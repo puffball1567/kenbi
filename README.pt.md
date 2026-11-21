@@ -417,6 +417,13 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
   alocações separadas feitas no chamador e um parâmetro que o próprio chamador declara
   `@unique` são distintos. No corpo, guardar o ponteiro ou uma cópia onde ele sobrevive à
   chamada é `UNIQUE_ESCAPES`.
+- **devolvido após a chamada**: `@borrows(param)` e `@unique(param)` prometem ambos que nada
+  retém o ponteiro depois que a chamada termina, e o corpo é verificado quanto a isso. Guardar
+  o ponteiro ou uma cópia em uma variável global, um campo ou através de outro ponteiro é
+  `BORROW_ESCAPES` / `UNIQUE_ESCAPES`; também o é passá-lo a uma função cujo parâmetro não faz
+  a mesma promessa (`@borrows` ou `@unique`, verificada por sua vez no corpo dessa função). As
+  funções de leitura e escrita da biblioteca C (`memcpy`, `strlen`, `printf`, …) e as funções
+  de liberação declaradas são conhecidas.
 
 ### Vocabulário de goto (opcional — declare a intenção estruturada de um goto)
 
@@ -591,6 +598,8 @@ função que pode chegar a um longjmp sem declarar `@longjmps`), `UNKNOWN_LONGJM
 não é o declarado), `SETJMP_CLOBBERED` (uma variável local não volatile lida onde um longjmp
 aterrissa), `UNSUPPORTED_SETJMP` (um `setjmp` em uma forma que o kenbi não modela),
 `FINALLY_BYPASSED` (uma saída possuidora contorna um funil `@goto_finally` declarado),
+`BORROW_ESCAPES` (o corpo guarda um ponteiro `@borrows`, ou o passa a uma função que poderia
+fazê-lo),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (um parâmetro `@unique` que outro
 argumento alcança, ou que o corpo guarda),
 `FREE_NONHEAP` (um `free` de um ponteiro para a pilha ou outro armazenamento fora do heap),

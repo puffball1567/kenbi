@@ -351,6 +351,11 @@ type Ctx* = object  ## module-local state during a single parse (all fields publ
   uqLoops*: seq[tuple[first, last: int]] ## ... the source ranges of its loops
   curUnique*: HashSet[string]       ## ... and the parameters it declares `@unique` itself
   uqHasGoto*: bool                  ## ... and whether it has a `goto` (a possible loop)
+  curKept*: Table[string, tuple[param: string, borrow: bool]]
+                                    ## the variables of the function being lowered that hold a
+                                    ## pointer it may not keep — an `@unique` or `@borrows`
+                                    ## parameter (`borrow` unless declared `@unique`) or a local
+                                    ## copy of one — and the parameter each derives from
   invariantSites*: seq[tuple[file: string, line: int, spec: string]] ## `@invariant(lvalue rel
                                     ## expr)` sites: a declared data-structure invariant relating a
                                     ## PROTECTED field/var to a size (the jsmn `toknext <= num_tokens`).

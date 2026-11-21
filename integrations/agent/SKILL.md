@@ -87,7 +87,9 @@ Rules of thumb:
   call — no other argument reaches the same object (C's `restrict`, checked). Each
   call is verified: the same object passed twice is `UNIQUE_ALIASED`, and a pair
   kenbi cannot show distinct is `UNIQUE_UNPROVEN`. The body may not store the
-  pointer where it outlives the call (`UNIQUE_ESCAPES`). Declare it on functions
+  pointer where it outlives the call, nor pass it to a function whose parameter is
+  not `@borrows` / `@unique` (`UNIQUE_ESCAPES`; `BORROW_ESCAPES` for the same rule
+  on an `@borrows` parameter). Declare it on functions
   whose result is wrong when source and destination overlap.
 
 - **`// @must_use`** above a function: dropping its result (a bare statement, not
@@ -229,7 +231,7 @@ code, then fix that. The message names the line and usually the fix.
 | `CONTRACT_NOT_HONORED` / `BORROW_FREED` / `BORROW_MOVED` | the body does not do what its contract says | fix the body, or correct the contract if it was wrong — then every caller is re-checked against it |
 | `BORROW_OUTLIVES_OWNER` | a borrow or arena object used after its owner died | shorten the use or lengthen the owner |
 | `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` | an `@unique` parameter is passed an object another argument reaches, or may reach | pass a separate object or a copy; make the distinction visible (distinct variables or members, a fresh allocation, `@unique` on the caller's own parameter) |
-| `UNIQUE_ESCAPES` | the body stores an `@unique` pointer where it outlives the call | keep it in locals, or drop `@unique` if the function does keep it |
+| `UNIQUE_ESCAPES` / `BORROW_ESCAPES` | the body stores an `@unique` / `@borrows` pointer where it outlives the call, or passes it to a function that does not declare it gives it back | keep it in locals; declare `@borrows` (or `@unique`) on the receiving parameter if that function only uses it — its body is then checked too; drop the declaration if the function really keeps the pointer |
 | `UNVALIDATED_INDEX` / `UNVALIDATED_SIZE` | an index or length reaches a buffer with no bound check on the path, or in a form kenbi cannot read | add the check before the access; put a computed index in a variable and bound that |
 | `INAPPROPRIATE_BOUND` | a check is present but does not cover the buffer | check against the buffer's real size |
 | `INDEX_MAYBE_NEGATIVE` | a signed index with no lower bound | add `i >= 0`, or use an unsigned type |

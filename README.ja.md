@@ -411,6 +411,12 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
   メンバ、呼び出し側で行った別々の確保、呼び出し側自身が `@unique` と宣言した引数は別物として
   扱われます。本体で、そのポインタやそのコピーを呼び出しより長く残る場所へ保存すると
   `UNIQUE_ESCAPES` です。
+- **呼び出しの後は手放す**: `@borrows(param)` と `@unique(param)` は、どちらも「呼び出しが
+  終わった後はそのポインタを誰も持っていない」という約束で、本体がそれを守っているかを検査します。
+  ポインタやそのコピーを大域変数、フィールド、別のポインタ経由で保存すると `BORROW_ESCAPES` /
+  `UNIQUE_ESCAPES` です。同じ約束（`@borrows` か `@unique`。その関数の本体でも同じ検査をします）を
+  宣言していない引数へ渡した場合も同じです。C ライブラリの読み書き関数（`memcpy`、`strlen`、
+  `printf` など）と宣言済みの解放関数は既知として扱います。
 
 ### Goto ボキャブラリ（任意 —— goto の構造化された意図を宣言する）
 
@@ -577,6 +583,7 @@ use <var> | free <var> | move <var> | if / else / endif
 ジャンプ）、`SETJMP_CLOBBERED`（longjmp の着地点で読まれる volatile でない局所変数）、
 `UNSUPPORTED_SETJMP`（kenbi がモデル化しない形の `setjmp`）、
 `FINALLY_BYPASSED`（所有したまま出る exit が、宣言された `@goto_finally` ファネルを迂回する）、
+`BORROW_ESCAPES`（本体が `@borrows` のポインタを保存する、または保存しうる関数へ渡す）、
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES`（他の引数から届く、または本体が保持する
 `@unique` 引数）、
 `FREE_NONHEAP`（スタックなどヒープ以外の記憶域を指すポインタの `free`）、`BORROW_MOVED` /

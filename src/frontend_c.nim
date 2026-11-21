@@ -1330,7 +1330,6 @@ proc collectUniqueFacts(ctx: var Ctx, fn, body: CXCursor) =
   ctx.uqParams = initHashSet[string]()
   ctx.uqLoops = @[]
   ctx.uqHasGoto = false
-  if ctx.uniqueParams.len == 0: return
   for p in collectChildren(fn):
     if clang_getCursorKind(p) == ckParmDecl:
       ctx.uqParams.incl usr(p)
@@ -1438,15 +1437,21 @@ proc emitUniqueChecks(ctx: Ctx, call: CXCursor, callee: string, line: int, outp:
                     off = v, off2 = (if ctx.entryValue(roots[pi].key): 1 else: 0) or
                                     (if ctx.entryValue(roots[oi].key): 2 else: 0))
 
-proc uniqueEscapes(ctx: var Ctx, fn, body: CXCursor, names: seq[string], outp: var seq[Stmt]) =
-  ## The body side of `@unique`: the pointer, or anything derived from it, must not be stored
-  ## where it outlives the call — a global, a field, or through another pointer.
-  var derived = initTable[string, string]()       # variable -> the parameter it derives from
+proc keptEscapes(ctx: var Ctx, fn, body: CXCursor, unique, borrowed: seq[string],
+                 outp: var seq[Stmt]) =
+  ## The body side of `@unique` and `@borrows`: the pointer, or anything derived from it, must
+  ## not be stored where it outlives the call — a global, a field, or through another pointer.
+  ## Leaves in `ctx.curKept` the variables that hold such a pointer, for the check of what the
+  ## body passes on to other functions.
+  ctx.curKept = initTable[string, tuple[param: string, borrow: bool]]()
   for p in collectChildren(fn):
-    if clang_getCursorKind(p) == ckParmDecl and spelling(p) in names:
-      derived[usr(p)] = spelling(p)
+    if clang_getCursorKind(p) != ckParmDecl: continue
+    if spelling(p) in unique:
+      ctx.curKept[usr(p)] = (spelling(p), false)
       ctx.curUnique.incl usr(p)
-  if derived.len == 0: return
+    elif spelling(p) in borrowed and canonicalPointer(p):
+      ctx.curKept[usr(p)] = (spelling(p), true)
+  if ctx.curKept.len == 0: return
   var stores: seq[tuple[target: CXCursor, hasTarget: bool, targetKey: string, value: CXCursor]]
   proc collect(ctx: Ctx, n: CXCursor,
                stores: var seq[tuple[target: CXCursor, hasTarget: bool, targetKey: string,
@@ -1473,16 +1478,18 @@ proc uniqueEscapes(ctx: var Ctx, fn, body: CXCursor, names: seq[string], outp: v
     grown = false
     for st in stores:
       let r = ctx.ptrRoot(st.value)
-      if r.kind != 'P' or r.key notin derived: continue
+      if r.kind != 'P' or r.key notin ctx.curKept: continue
       let lt = ctx.localTarget(st)
-      if lt.len > 0 and lt notin derived:
-        derived[lt] = derived[r.key]
+      if lt.len > 0 and lt notin ctx.curKept:
+        ctx.curKept[lt] = ctx.curKept[r.key]
         grown = true
   for st in stores:
     let r = ctx.ptrRoot(st.value)
-    if r.kind != 'P' or r.key notin derived: continue
+    if r.kind != 'P' or r.key notin ctx.curKept: continue
     if ctx.localTarget(st).len == 0:
-      outp.add emit(ikUniqueEscape, startLine(st.value), a = r.disp, b = derived[r.key])
+      let kept = ctx.curKept[r.key]
+      outp.add emit(ikUniqueEscape, startLine(st.value), a = r.disp, b = kept.param,
+                    off2 = (if kept.borrow: 1 else: 0))
 
 proc landingSiteAt(ctx: Ctx, stmtOff: int): int =
   ## The landing site whose `if` / `switch` starts at `stmtOff`, or -1.
@@ -2014,6 +2021,48 @@ proc calleeParamName(ctx: Ctx, callee: string, pos: int): string =
   for fn in ctx.funcSigs:
     if (fn.name == callee or fn.qual == callee) and pos < fn.params.len: return fn.params[pos].name
   ""
+
+proc keptPassedOn(ctx: Ctx, body: CXCursor, outp: var seq[Stmt]) =
+  ## The other way a pointer outlives a call: the body hands it to a function that keeps it.
+  ## A pointer the function may not keep (`ctx.curKept`) may be passed only where the receiving
+  ## parameter is declared not to keep it either — `@borrows` or `@unique`, each verified in
+  ## that function's own body, so the promise holds however many calls deep the pointer goes —
+  ## or to a function known to release or only read it. Anything else is reported at the call.
+  if ctx.curKept.len == 0: return
+  proc walk(ctx: Ctx, n: CXCursor, outp: var seq[Stmt]) =
+    let k = clang_getCursorKind(n)
+    if k == ckLambdaExpr: return
+    if k == ckCallExpr:
+      let decl = clang_getCursorReferenced(n)
+      let ind = indirectFnptr(n)
+      var callee = ctx.effectiveCallee(n)
+      if clang_getCursorKind(decl) == ckCXXMethod:
+        let q = spelling(clang_getCursorSemanticParent(decl)) & "::" & spelling(n)
+        if ctx.argContracts.hasKey(q) or ctx.uniqueParams.hasKey(q): callee = q
+      for ai in 0 ..< int(clang_Cursor_getNumArguments(n)):
+        let arg = clang_Cursor_getArgument(n, cuint(ai))
+        if not (canonicalPointer(arg) or isArrayType(unwrap(arg))): continue
+        let r = ctx.ptrRoot(arg)
+        if r.kind != 'P' or r.key notin ctx.curKept: continue
+        let kept = ctx.curKept[r.key]
+        let ci = (if ind.isIndirect: ctx.indirectArgContract(ind.usr, ai)
+                  else: ctx.argContract(callee, ai))
+        var how = 1                               # 1: nothing declared; 2: declared to take it
+        if ci.has and ci.instr in {ikMove, ikAdopt}:
+          if kept.borrow: continue                # reported as BORROW_MOVED
+          how = 2
+        elif ci.has: continue                     # borrows it, or releases it
+        elif not ind.isIndirect:
+          if callee in knownBorrowFns or callee in ctx.deallocators: continue
+          if ai < int(clang_Cursor_getNumArguments(decl)) and
+             spelling(clang_Cursor_getArgument(decl, cuint(ai))) in
+               ctx.uniqueParams.getOrDefault(callee, @[]): continue
+        outp.add emit(ikUniqueEscape, startLine(arg), a = r.disp, b = kept.param,
+                      cKey = (if ind.isIndirect: ind.disp else: callee),
+                      bKey = (if ind.isIndirect: "" else: ctx.calleeParamName(callee, ai)),
+                      off = how, off2 = (if kept.borrow: 1 else: 0))
+    for ch in collectChildren(n): ctx.walk(ch, outp)
+  ctx.walk(body, outp)
 
 # SPATIAL: functions whose argument at this 0-based position is a length / count
 # written into a fixed buffer — an untrusted size here is the classic overflow
@@ -6160,7 +6209,12 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
     block:
       var names = ctx.uniqueParams.getOrDefault(fnKey, @[])
       if names.len == 0: names = ctx.uniqueParams.getOrDefault(spelling(c), @[])
-      if names.len > 0: ctx[].uniqueEscapes(c, body, names, fn.body)
+      var borrowed: seq[string]
+      for (idx, instr, accessor) in ctx.bodyContracts.getOrDefault(fnKey, @[]):
+        if instr == ikBorrow and accessor.len == 0 and idx < params.len:
+          borrowed.add params[idx].name
+      ctx[].keptEscapes(c, body, names, borrowed, fn.body)
+      ctx[].keptPassedOn(body, fn.body)
     for child in collectChildren(body):
       ctx[].lowerStmt(child, fn.body)
     # LANDING PARTS, lowered again now that the whole body has been: the code a longjmp returns

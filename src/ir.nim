@@ -154,8 +154,10 @@ type
                  ## one allocation is aliased, to two distinct ones is distinct, anything else
                  ## unproven. `off2` bit 0 / bit 1: `a` / `b` is a parameter of the caller that
                  ## still holds the value it was called with.
-    ikUniqueEscape ## the body of a function stores `a`, which is or derives from its `@unique`
-                 ## parameter `b`, where it outlives the call (UNIQUE_ESCAPES).
+    ikUniqueEscape ## the body of a function lets `a`, which is or derives from its `@unique`
+                 ## or `@borrows` (off2 = 1) parameter `b`, outlive the call: off 0 it stores it,
+                 ## 1 it passes it to `cKey` (parameter `bKey`), which declares nothing about
+                 ## keeping it, 2 to one declared to take it (UNIQUE_ESCAPES / BORROW_ESCAPES).
     ikJmpLocalRead ## a use of the value of `a` (key `aKey`), a non-volatile automatic local or
                  ## parameter of a function with a landing site. On a path a longjmp took back
                  ## into the function, a local changed between the setjmp and the jump is

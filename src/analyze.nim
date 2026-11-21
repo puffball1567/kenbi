@@ -1063,10 +1063,29 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
           "itself declares `@unique`.")
   of ikUniqueEscape:
     if a.curCovered:
-      a.addDiag(s.line, "UNIQUE_ESCAPES",
-        "'" & s.a & "' is, or derives from, the `@unique` parameter '" & s.b & "', and is stored " &
-        "where it outlives the call: the caller's exclusive access would end while this copy " &
-        "remains. Keep it in locals, or drop `@unique` from the parameter.")
+      let borrow = s.off2 == 1
+      let code = (if borrow: "BORROW_ESCAPES" else: "UNIQUE_ESCAPES")
+      let decl = (if borrow: "`@borrows`" else: "`@unique`")
+      let what = "'" & s.a & "' is, or derives from, the " & decl & " parameter '" & s.b & "'"
+      let why = (if borrow: "the caller may release the object as soon as this call returns, " &
+                            "and the copy would dangle"
+                 else: "the caller's exclusive access would end while the copy remains")
+      if s.off == 0:
+        a.addDiag(s.line, code,
+          what & ", and is stored where it outlives the call: " & why & ". Keep it in locals, " &
+          "or drop " & decl & " from the parameter" &
+          (if borrow: " and declare what the function does take (`@moves` / `@adopts`)." else: "."))
+      else:
+        let callee = (if s.cKey.len > 0: "'" & s.cKey & "'" else: "the function called")
+        let param = (if s.bKey.len > 0: "its parameter '" & s.bKey & "'" else: "that parameter")
+        a.addDiag(s.line, code,
+          what & ", and is passed to " & callee & ", which " &
+          (if s.off == 2: "is declared to take it over"
+           else: "does not declare that it gives it back") &
+          ": if the pointer is kept there, " & why & ". " &
+          (if s.off == 2: "Pass a pointer this function owns, or drop " & decl & " from '" & s.b & "'."
+           else: "Declare " & param & " `@borrows` (or `@unique`) on " & callee &
+                 " — its body is then checked the same way — or drop " & decl & " from '" & s.b & "'."))
   of ikJmpLocalRead:
     # a use of a local a longjmp left indeterminate on this path. Reported once per path:
     # the fix (volatile) is the same for every later use
