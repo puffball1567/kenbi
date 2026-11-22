@@ -38,7 +38,7 @@ reference documentation, not a suggestion engine.
   The result is a text summary followed by kenbi's JSON document. The summary always
   states the scope of the result, with or without findings, because an agent may read
   only the summary:
-  - which checks ran (ownership, bounds, locks, initialisation, tagged unions) and, where
+  - which checks ran (ownership, bounds, locks, initialisation, tagged unions, references) and, where
     a check covered only some functions, which ones it did not cover;
   - how many adopted functions are `verified`, the functions whose contracts the result
     rests on without having analysed them, and every `@unsafe` that suppressed a finding;

@@ -74,7 +74,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 0 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -111,7 +111,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 1 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -131,6 +131,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 | 境界 | `@spatial` | バッファに届く信頼できないインデックスやサイズには、存在し・十分で・オーバーフローしない境界チェックが必要。`@counted_by` と、宣言されたデータ構造不変条件（`@invariant` / `@maintains`） |
 | 初期化 | `@initcheck` | すべてのパスで代入される前に読まれるローカル変数 |
 | タグ付き共用体 | `@typecheck` + `@variant` | タグが証明されていない箇所で使われる共用体メンバ |
+| 参照の有効性 | `@refcheck` + `@invalidates` / `@preserves` | バッファやコンテナの中を指すポインタ・参照・イテレータを、再確保や解放が起きうる呼び出しの後で使う |
 | ロック | `@threadsafe` | ロックなしのアクセス、釣り合わないロック、宣言されたロック順序（AB-BA デッドロック） |
 | 低レベル性質 | `--safety=project.json` | 呼び出し閉包内の禁止された効果、リソースの状態機械、スタックと呼び出しの深さ、メモリ領域、MMIO など。[設定による低レベル検証](#設定による低レベル検証--safety)を参照 |
 
@@ -468,6 +469,21 @@ kenbi が添字や長さとして読めるのは、変数に定数を足し引�
   経路上のチェック、定数、または呼び出し側自身が宣言した不変条件で示せなければ、その呼び出しは
   `INVARIANT_NOT_MAINTAINED` です。
 
+### 管理された記憶域への参照（`@refcheck`）
+
+- 関数の上またはファイルレベルの `// @refcheck`: 他のオブジェクトが管理する記憶域の中を指すポインタ、
+  参照、イテレータ、ビュー（`p = buf->data`、`&v[0]`、`v.begin()`、`s.c_str()`）を持つローカル変数を、
+  経路ごとに追います。その記憶域を再確保または解放しうる呼び出しの後で使うと、呼び出しがそう宣言
+  されているか既知の場合（`realloc`、`free`、標準コンテナ自身のメソッド）は `REF_INVALIDATED`、
+  オブジェクトへの書き込み可能なポインタや参照を受け取りながら何も宣言していない場合は
+  `REF_UNPROVEN` です。呼び出しの後でポインタを取り直してください。
+- 関数の上の `// @invalidates(param)` / `// @preserves(param)` で、どちらなのかを宣言します
+  （メソッドは `this`、大域変数は名前で指定。ライブラリには `@contract` ブロックの `invalidates:` /
+  `preserves:`）。`@preserves` の本体は検証されます。引数が持つ記憶域を解放・再確保する、または
+  同じ約束をしていない関数へ渡すと `REF_NOT_PRESERVED` です。`const` の引数には宣言は要りません。
+- 大域変数から届く記憶域は、プログラムのどの関数からも変更できます。そこを指すポインタを呼び出しを
+  またいで持つには、呼ばれる関数が `@preserves(<大域変数>)` を宣言している必要があります。
+
 ### 初期化（`@initcheck`）とタグ付き共用体（`@typecheck`）
 
 - 関数の上またはファイルレベルの `// @initcheck`: 初期化子なしで宣言されたスカラーまたはポインタの
@@ -594,7 +610,7 @@ use <var> | free <var> | move <var> | if / else / endif
 加えて `UNKNOWN_RESOURCE` / `STALE_UNSAFE` の衛生チェック。opt-in の軸の下では:
 `UNVALIDATED_INDEX`、`UNVALIDATED_SIZE`、`INAPPROPRIATE_BOUND`、`INDEX_MAYBE_NEGATIVE`、
 `UNGUARDED_INVARIANT_WRITE`、`INVARIANT_NOT_MAINTAINED`（`@spatial`）、`USE_OF_UNINITIALIZED`
-（`@initcheck`）、`TYPE_CONFUSION`（`@typecheck`）、そして `UNGUARDED_ACCESS`、`GUARDED_ESCAPE`、
+（`@initcheck`）、`REF_INVALIDATED`、`REF_UNPROVEN`、`REF_NOT_PRESERVED`（`@refcheck`）、`TYPE_CONFUSION`（`@typecheck`）、そして `UNGUARDED_ACCESS`、`GUARDED_ESCAPE`、
 `LOCK_LEAKED`、`DOUBLE_LOCK`、`UNLOCK_WITHOUT_LOCK`、`LOCK_NOT_ACQUIRED`、
 `REQUIRED_LOCK_NOT_HELD`、`LOCK_ORDER_VIOLATION`、`SAME_CLASS_NO_ORDER`、
 `UNDECLARED_INDIRECT_CALL`、`UNDECLARED_FN_TARGET`（`@threadsafe`）。ループ

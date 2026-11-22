@@ -19,6 +19,13 @@ and the JSON output may change in any minor version.
   `UNIQUE_ESCAPES`). The C library's readers and writers and declared deallocators are known.
   A `@borrows` function that hands its pointer to an undeclared function will now draw a
   finding; declare the receiving parameter.
+- A new opt-in check, `// @refcheck`: a pointer, reference, iterator or view into storage another
+  object manages (`p = buf->data`, `&v[0]`, `v.begin()`, `s.c_str()`) may not be used after a
+  call that may have reallocated or released that storage. Functions declare which they are
+  with `// @invalidates(param)` / `// @preserves(param)` (also as `@contract` keys); a
+  `@preserves` body is verified. `realloc`, `free` and the standard containers' methods are
+  known. Findings: `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED`. The scope reported
+  with each result gains a `references` entry.
 
 ### Changed
 

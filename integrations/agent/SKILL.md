@@ -143,6 +143,15 @@ int first_or(const int *buf, unsigned n, unsigned i) {
 **Initialisation — `// @initcheck`.** A local declared without an initializer
 must be assigned on every path before it is read.
 
+**References into buffers and containers — `// @refcheck`.** A local holding a
+pointer, reference, iterator or view into storage another object manages
+(`p = buf->data`, `&v[0]`, `v.begin()`, `s.c_str()`) may not be used after a call
+that may have reallocated or released that storage. Declare each function that
+is handed the object: `// @invalidates(param)` if it may, `// @preserves(param)`
+if it does not (`this` for a method, a global by name). A `@preserves` body is
+checked, so when unsure declare it and run the check. `const` parameters and the
+C library's readers and writers need nothing.
+
 **Tagged unions — `// @typecheck`** with `// @variant(<member>: <tag> == <value>)`
 per member: a member may be used only where its tag is proven
 (`if (n->tag == 1)`, `case 1:`).
@@ -163,7 +172,7 @@ a jump back must be `volatile`.
 > `@contract`, `@list` / `@drains`, `@raii`, `@must_use`, the goto vocabulary
 > (`@goto_noreturn` / `@goto_finally` / `@goto_backward`), and the opt-in axes:
 > `@spatial` (`@counted_by`, `@invariant` / `@maintains`), `@initcheck`, `@typecheck`
-> (`@variant`) and `@threadsafe` (which turns the lock annotations below into verified
+> (`@variant`), `@refcheck` (`@invalidates` / `@preserves`) and `@threadsafe` (which turns the lock annotations below into verified
 > checks). Not available — don't write this expecting a check: in-source protocol
 > typestate (`@proto`; configured state machines exist under `--safety`). The complete,
 > current list is the MCP resource `kenbi://annotations`.
@@ -232,6 +241,9 @@ code, then fix that. The message names the line and usually the fix.
 | `BORROW_OUTLIVES_OWNER` | a borrow or arena object used after its owner died | shorten the use or lengthen the owner |
 | `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` | an `@unique` parameter is passed an object another argument reaches, or may reach | pass a separate object or a copy; make the distinction visible (distinct variables or members, a fresh allocation, `@unique` on the caller's own parameter) |
 | `UNIQUE_ESCAPES` / `BORROW_ESCAPES` | the body stores an `@unique` / `@borrows` pointer where it outlives the call, or passes it to a function that does not declare it gives it back | keep it in locals; declare `@borrows` (or `@unique`) on the receiving parameter if that function only uses it — its body is then checked too; drop the declaration if the function really keeps the pointer |
+| `REF_INVALIDATED` | a pointer, reference or iterator into a buffer or container is used after a call that reallocates or releases it | take it again after the call (`p = buf->data;`, `it = v.erase(it);`), or use an index instead of a pointer |
+| `REF_UNPROVEN` | the same, but the call declares nothing about the object it is handed | declare the callee's parameter `@preserves` if it reallocates nothing there (its body is checked), else `@invalidates` and take the pointer again |
+| `REF_NOT_PRESERVED` | a `@preserves` function releases or reallocates what the parameter holds, or passes it to a function that does not promise the same | change the declaration to `@invalidates`, or declare the function it calls |
 | `UNVALIDATED_INDEX` / `UNVALIDATED_SIZE` | an index or length reaches a buffer with no bound check on the path, or in a form kenbi cannot read | add the check before the access; put a computed index in a variable and bound that |
 | `INAPPROPRIATE_BOUND` | a check is present but does not cover the buffer | check against the buffer's real size |
 | `INDEX_MAYBE_NEGATIVE` | a signed index with no lower bound | add `i >= 0`, or use an unsigned type |

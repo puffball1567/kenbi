@@ -74,7 +74,7 @@ El ciclo sobre [`demo/quickstart.c`](demo/quickstart.c), con las respuestas real
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 0 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -111,7 +111,7 @@ El ciclo sobre [`demo/quickstart.c`](demo/quickstart.c), con las respuestas real
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 1 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -131,6 +131,7 @@ Cada comprobación se activa por separado:
 | límites | `@spatial` | un índice o tamaño no confiable que llega a un búfer necesita una comprobación de límites presente, suficiente y segura frente a desbordamiento; `@counted_by` e invariantes declarados de estructuras de datos (`@invariant` / `@maintains`) |
 | inicialización | `@initcheck` | una variable local leída antes de asignarse en todas las vías |
 | uniones etiquetadas | `@typecheck` + `@variant` | un miembro de unión usado donde su etiqueta no está demostrada |
+| referencias | `@refcheck` + `@invalidates` / `@preserves` | un puntero, una referencia o un iterador dentro de un búfer o contenedor, usado tras una llamada que pudo reasignarlo o liberarlo |
 | locks | `@threadsafe` | acceso sin protección, locks desequilibrados, orden de locks declarado (deadlock AB-BA) |
 | propiedades de bajo nivel | `--safety=project.json` | efectos prohibidos en un cierre de llamadas, máquinas de estados de recursos, profundidad de pila y de llamadas, regiones de memoria, MMIO y más — ver [Verificación configurada de bajo nivel](#verificación-configurada-de-bajo-nivel---safety) |
 
@@ -481,6 +482,24 @@ camino (`if (n >= 1)`) o con un `@invariant(n >= 1)` declarado.
   que mostrar que los argumentos lo cumplen —con una comprobación en el camino, con constantes o
   con el invariante declarado del llamador—; si no, la llamada es `INVARIANT_NOT_MAINTAINED`.
 
+### Referencias a almacenamiento gestionado (`@refcheck`)
+
+- `// @refcheck` sobre una función o a nivel de archivo: una variable local que guarda un puntero,
+  una referencia, un iterador o una vista dentro de almacenamiento que gestiona otro objeto
+  (`p = buf->data`, `&v[0]`, `v.begin()`, `s.c_str()`) se sigue a lo largo de cada camino. Usarla
+  tras una llamada que pudo reasignar o liberar ese almacenamiento es `REF_INVALIDATED` cuando la
+  llamada lo declara o se sabe que lo hace (`realloc`, `free`, los métodos de los contenedores
+  estándar), y `REF_UNPROVEN` cuando la llamada recibe un puntero o una referencia modificable al
+  objeto y no declara nada. Vuelva a tomar el puntero después de la llamada.
+- `// @invalidates(param)` / `// @preserves(param)` sobre una función declaran cuál es el caso
+  (`this` para un método, una variable global por su nombre; `invalidates:` / `preserves:` en un
+  bloque `@contract` para una biblioteca). El cuerpo de una función `@preserves` se verifica:
+  liberar o reasignar lo que guarda el parámetro, o pasarlo a una función que no hace la misma
+  promesa, es `REF_NOT_PRESERVED`. Un parámetro `const` no necesita declaración.
+- El almacenamiento alcanzable desde una variable global puede ser modificado por cualquier
+  función del programa; conservar un puntero a él a través de una llamada exige que la función
+  llamada declare `@preserves(<global>)`.
+
 ### Inicialización (`@initcheck`) y uniones etiquetadas (`@typecheck`)
 
 - `// @initcheck` sobre una función o a nivel de archivo: una variable local escalar o puntero
@@ -615,7 +634,7 @@ del uso, o cuyo único handle se sobrescribe), `MISSING_COPY_CONTROL` / `SELF_AS
 rechazada en lugar de descartada), más las comprobaciones de higiene `UNKNOWN_RESOURCE` /
 `STALE_UNSAFE`. Bajo los ejes opcionales: `UNVALIDATED_INDEX`, `UNVALIDATED_SIZE`,
 `INAPPROPRIATE_BOUND`, `INDEX_MAYBE_NEGATIVE`, `UNGUARDED_INVARIANT_WRITE`,
-`INVARIANT_NOT_MAINTAINED` (`@spatial`), `USE_OF_UNINITIALIZED` (`@initcheck`), `TYPE_CONFUSION`
+`INVARIANT_NOT_MAINTAINED` (`@spatial`), `USE_OF_UNINITIALIZED` (`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION`
 (`@typecheck`), y `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`, `LOCK_LEAKED`, `DOUBLE_LOCK`,
 `UNLOCK_WITHOUT_LOCK`, `LOCK_NOT_ACQUIRED`, `REQUIRED_LOCK_NOT_HELD`, `LOCK_ORDER_VIOLATION`,
 `SAME_CLASS_NO_ORDER`, `UNDECLARED_INDIRECT_CALL`, `UNDECLARED_FN_TARGET` (`@threadsafe`). Los

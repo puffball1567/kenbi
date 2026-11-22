@@ -158,6 +158,19 @@ type
                  ## or `@borrows` (off2 = 1) parameter `b`, outlive the call: off 0 it stores it,
                  ## 1 it passes it to `cKey` (parameter `bKey`), which declares nothing about
                  ## keeping it, 2 to one declared to take it (UNIQUE_ESCAPES / BORROW_ESCAPES).
+    ikRefDerive  ## the local `a` (key `aKey`) is assigned: it now holds a pointer, reference or
+                 ## iterator reached through the pointer `bKey` names (root, steps, display and
+                 ## storage, separated by U+001F; "" for none), together with whatever the local
+                 ## `cKey` holds when it is a copy or an offset of that one.
+    ikRefUse     ## a use of the local `a` (key `aKey`); off 1: by the range-`for` it stands for.
+    ikRefInvalidate ## a call to `b` may have reallocated or released storage: everything at or
+                 ## below the steps `bKey` of root `aKey` (off 0 declared or known to, 1 nothing
+                 ## shows it does not), exactly the block that pointer holds (off 2, a release),
+                 ## or anything reached from a global (off 3; `bKey` lists the globals the
+                 ## callee declares it preserves, `cKey` those it declares it invalidates).
+                 ## `a` is the argument or object as written.
+    ikRefNotPreserved ## the body of a function that declares `b` `@preserves` passes `a` to
+                 ## `cKey`, which may reallocate or release it (off as for ikRefInvalidate).
     ikJmpLocalRead ## a use of the value of `a` (key `aKey`), a non-volatile automatic local or
                  ## parameter of a function with a landing site. On a path a longjmp took back
                  ## into the function, a local changed between the setjmp and the jump is
@@ -886,6 +899,11 @@ type
     # proven `== value` on the path is TYPE_CONFUSION. Opt-in so other files are unaffected.
     typecheckFuncs*: HashSet[string]  ## functions with a `@typecheck` marker
     typecheckAll*: bool               ## a file-level `@typecheck` marker covers every function
+    # --- reference-validity coverage — a SEPARATE opt-in axis (`@refcheck`). A pointer,
+    # reference or iterator into storage another object manages, used after a call that may
+    # have reallocated or released that storage, is REF_INVALIDATED / REF_UNPROVEN.
+    refFuncs*: HashSet[string]        ## functions with a `@refcheck` marker
+    refAll*: bool                     ## a file-level `@refcheck` marker covers every function
 
 proc mayFallOff*(body: seq[Stmt]): bool =
   ## Can control reach the end of `body`, and so run what follows it? Only a body that ends in a

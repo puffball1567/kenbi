@@ -74,7 +74,7 @@ Die Schleife an [`demo/quickstart.c`](demo/quickstart.c), mit den tatsächlichen
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 0 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -111,7 +111,7 @@ Die Schleife an [`demo/quickstart.c`](demo/quickstart.c), mit den tatsächlichen
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 1 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -131,6 +131,7 @@ Jede Prüfung wird einzeln aktiviert:
 | Grenzen | `@spatial` | ein nicht vertrauenswürdiger Index oder eine Größe, die einen Puffer erreicht, benötigt eine vorhandene, ausreichende, überlaufsichere Grenzprüfung; `@counted_by` und deklarierte Datenstruktur-Invarianten (`@invariant` / `@maintains`) |
 | Initialisierung | `@initcheck` | eine lokale Variable, die gelesen wird, bevor sie auf jedem Pfad zugewiesen wurde |
 | getaggte Unions | `@typecheck` + `@variant` | ein Union-Member, der verwendet wird, wo sein Tag nicht bewiesen ist |
+| Referenzen | `@refcheck` + `@invalidates` / `@preserves` | ein Zeiger, eine Referenz oder ein Iterator in einen Puffer oder Container, verwendet nach einem Aufruf, der ihn neu allokiert oder freigegeben haben kann |
 | Locks | `@threadsafe` | ungeschützter Zugriff, unausgeglichene Locks, deklarierte Lock-Reihenfolge (AB-BA-Deadlock) |
 | Low-Level-Eigenschaften | `--safety=project.json` | verbotene Effekte in einer Aufrufhülle, Zustandsautomaten für Ressourcen, Stack- und Aufruftiefe, Speicherregionen, MMIO und mehr – siehe [Konfigurierte Low-Level-Verifikation](#konfigurierte-low-level-verifikation---safety) |
 
@@ -496,6 +497,25 @@ durch eine Prüfung auf dem Pfad (`if (n >= 1)`) oder ein deklariertes `@invaria
   Konstanten oder durch die deklarierte Invariante des Aufrufers –, sonst ist der Aufruf
   `INVARIANT_NOT_MAINTAINED`.
 
+### Referenzen in verwalteten Speicher (`@refcheck`)
+
+- `// @refcheck` über einer Funktion oder auf Dateiebene: Eine lokale Variable, die einen Zeiger,
+  eine Referenz, einen Iterator oder eine Sicht in Speicher hält, den ein anderes Objekt verwaltet
+  (`p = buf->data`, `&v[0]`, `v.begin()`, `s.c_str()`), wird auf jedem Pfad verfolgt. Ihre
+  Verwendung nach einem Aufruf, der diesen Speicher neu allokiert oder freigegeben haben kann, ist
+  `REF_INVALIDATED`, wenn der Aufruf dies deklariert oder bekanntermaßen tut (`realloc`, `free`,
+  die Methoden der Standardcontainer), und `REF_UNPROVEN`, wenn der Aufruf einen schreibbaren
+  Zeiger oder eine Referenz auf das Objekt erhält und nichts deklariert. Den Zeiger nach dem
+  Aufruf neu holen.
+- `// @invalidates(param)` / `// @preserves(param)` über einer Funktion deklarieren, was zutrifft
+  (`this` für eine Methode, eine globale Variable mit ihrem Namen; `invalidates:` / `preserves:`
+  in einem `@contract`-Block für eine Bibliothek). Ein `@preserves`-Rumpf wird geprüft: Freigeben
+  oder Neuallokieren dessen, was der Parameter hält, oder die Übergabe an eine Funktion, die nicht
+  dasselbe verspricht, ist `REF_NOT_PRESERVED`. Ein `const`-Parameter braucht keine Deklaration.
+- Speicher, der über eine globale Variable erreichbar ist, kann von jeder Funktion des Programms
+  verändert werden; ein Zeiger dorthin, der über einen Aufruf hinweg gehalten wird, verlangt, dass
+  die aufgerufene Funktion `@preserves(<global>)` deklariert.
+
 ### Initialisierung (`@initcheck`) und getaggte Unions (`@typecheck`)
 
 - `// @initcheck` über einer Funktion oder auf Dateiebene: Eine ohne Initialisierer deklarierte
@@ -635,7 +655,7 @@ Freigabe in einem Konstrukt, das kenbi nicht modelliert, abgelehnt statt verworf
 Hygieneprüfungen `UNKNOWN_RESOURCE` / `STALE_UNSAFE`. Unter den Opt-in-Achsen:
 `UNVALIDATED_INDEX`, `UNVALIDATED_SIZE`, `INAPPROPRIATE_BOUND`, `INDEX_MAYBE_NEGATIVE`,
 `UNGUARDED_INVARIANT_WRITE`, `INVARIANT_NOT_MAINTAINED` (`@spatial`), `USE_OF_UNINITIALIZED`
-(`@initcheck`), `TYPE_CONFUSION` (`@typecheck`) sowie `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
+(`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION` (`@typecheck`) sowie `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
 `LOCK_LEAKED`, `DOUBLE_LOCK`, `UNLOCK_WITHOUT_LOCK`, `LOCK_NOT_ACQUIRED`,
 `REQUIRED_LOCK_NOT_HELD`, `LOCK_ORDER_VIOLATION`, `SAME_CLASS_NO_ORDER`,
 `UNDECLARED_INDIRECT_CALL`, `UNDECLARED_FN_TARGET` (`@threadsafe`). Schleifen

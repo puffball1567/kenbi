@@ -142,6 +142,8 @@ const
   tyRecord*              = 105
   tyEnum*                = 106
   tyPointer*             = 101
+  tyLValueReference*     = 103
+  tyRValueReference*     = 104
   tyConstantArray*       = 112
   tyIncompleteArray*     = 114
   tyVariableArray*       = 115
@@ -213,6 +215,7 @@ proc clang_isExpression*(k: cint): cuint
 proc clang_getTypeDeclaration*(t: CXType): CXCursor
 proc clang_getCursorDefinition*(c: CXCursor): CXCursor
 proc clang_CXXMethod_isVirtual*(c: CXCursor): cuint
+proc clang_CXXMethod_isConst*(c: CXCursor): cuint
 proc clang_getPointeeType*(t: CXType): CXType
 proc clang_getArrayElementType*(t: CXType): CXType
 proc clang_Type_getAlignOf*(t: CXType): clonglong

@@ -344,6 +344,25 @@ the declared intent and reports where they disagree.
   \`USE_OF_UNINITIALIZED\` (\`if (c) v = 1; return v;\` is refused; assign on both branches or
   at the declaration).
 
+## Reference-validity axis (pointers into buffers and containers, opt-in)
+- \`// @refcheck\` above a function or at file level. A local that holds a pointer, a
+  reference, an iterator or a view into storage another object manages (\`p = buf->data\`,
+  \`&v[0]\`, \`v.begin()\`, \`s.c_str()\`, \`up.get()\`) is followed along each path. Using it
+  after a call that may have reallocated or released that storage is \`REF_INVALIDATED\` when
+  the call is declared or known to (\`realloc\`, \`free\`, the standard containers' own
+  methods), and \`REF_UNPROVEN\` (RED until shown) when the call is handed a writable pointer
+  or reference to the object and declares nothing. A range-\`for\` counts as holding iterators
+  into what it goes over. Fix: take the pointer again after the call.
+- \`// @invalidates(<param>)\` / \`// @preserves(<param>)\` above a function declare which it
+  is — \`this\` for a method, a global by name; \`invalidates:\` / \`preserves:\` in a
+  \`@contract\` block for a library. A \`@preserves\` body is verified: releasing or
+  reallocating what the parameter holds, or passing it to a function that does not make the
+  same promise, is \`REF_NOT_PRESERVED\`. A \`const\` parameter needs no declaration, and the C
+  library's readers and writers are known. When unsure, declare \`@preserves\` and run the
+  check: a finding in the body names the line that reallocates.
+- Storage reached from a global can be changed by any function of the program: a pointer into
+  it held across a call needs that function to declare \`@preserves(<global>)\`.
+
 ## Type-confusion axis (tagged unions, opt-in)
 - \`// @typecheck\` above a function or at file level, plus
   \`// @variant(<member>: <tag> == <value>)\` per union member —

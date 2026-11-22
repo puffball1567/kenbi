@@ -63,6 +63,8 @@ const contractKeys = {
   "must_use":  "@must_use",
   "nothrow":   "@nothrow",
   "longjmps":  "@longjmps",
+  "invalidates": "@invalidates",
+  "preserves": "@preserves",
 }.toTable
 
 proc parseContractsForComment(ctx: var Ctx, text: string, file: string, line: int) =
@@ -119,7 +121,8 @@ proc parseContractComment(ctx: var Ctx, text: string, line: int) =
     if key notin contractKeys:
       ctx.prog.advisories.add Advisory(line: line, code: "UNKNOWN_CONTRACT_KEY",
         msg: "`@contract " & fn & "` names '" & key & "', which is not a contract kenbi " &
-             "knows. Keys: frees, borrows, moves, adopts, owns, owns_out, must_use, nothrow, longjmps.")
+             "knows. Keys: frees, borrows, moves, adopts, owns, owns_out, must_use, nothrow, longjmps, " &
+             "invalidates, preserves.")
       continue
     let kw = contractKeys[key]
     if kv.len == 1 or kv[1].strip().len == 0:
@@ -224,7 +227,8 @@ const engineCoreDirectives* = [
   "@kenbi", "@verify", "@spatial", "@threadsafe", "@initcheck", "@typecheck", "@variant",
   "@counted_by", "@invariant", "@maintains", "@mem", "@move", "@goto_noreturn",
   "@goto_finally", "@goto_backward", "@copy", "@unsafe", "@escapes", "@realloc", "@raii", "@arena",
-  "@allocator", "@lock_order", "@drains", "@list", "@contract", "@contracts_for", "@unique"]
+  "@allocator", "@lock_order", "@drains", "@list", "@contract", "@contracts_for", "@unique",
+  "@refcheck", "@invalidates", "@preserves"]
 
 proc allKenbiDirectives*(): HashSet[string] =
   ## The COMPLETE set of directive keywords kenbi recognises as the first token of
@@ -307,6 +311,19 @@ proc scanCommentTokens(ctx: var Ctx, toks: ptr CXToken, n: cuint) =
       # declare pointer PARAMETERS of the function below exclusive (`@unique(dst)`): at every
       # call no other argument may reach the same object, and the body may not keep the pointer.
       ctx.uniqueSites.add (fileOf(loc), line, pa)
+    of "@refcheck":
+      # opt-in marker for the SEPARATE reference-validity axis: a pointer, reference or iterator
+      # into storage another object manages, used after that object may have reallocated or
+      # released it, is REF_INVALIDATED / REF_UNPROVEN. Independent opt-in.
+      ctx.refSites.add (fileOf(loc), line)
+    of "@invalidates":
+      # the function below may reallocate or release storage reached through these parameters
+      # (`@invalidates(buf)`): pointers taken into it before a call are invalid after it.
+      ctx.invalidatesSites.add (fileOf(loc), line, pa)
+    of "@preserves":
+      # the function below reallocates and releases nothing reached through these parameters
+      # (`@preserves(buf)`); its body is verified against the declaration.
+      ctx.preservesSites.add (fileOf(loc), line, pa)
     of "@maintains":
       # this write (line) preserves a declared invariant — so it is not an unguarded
       # write. The preservation is VERIFIED, not trusted (a lie is CONTRACT_NOT_HONORED).

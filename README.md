@@ -96,7 +96,7 @@ summary is followed by kenbi's full JSON document, left out here):
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 0 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -134,7 +134,7 @@ summary is followed by kenbi's full JSON document, left out here):
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 1 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -155,6 +155,7 @@ Each check is opted into separately:
 | bounds | `@spatial` | an untrusted index or size reaching a buffer needs a present, sufficient, overflow-safe bound check; `@counted_by` and declared data-structure invariants (`@invariant` / `@maintains`) |
 | initialisation | `@initcheck` | a local read before it is assigned on every path |
 | tagged unions | `@typecheck` + `@variant` | a union member used where its tag is not proven |
+| references | `@refcheck` + `@invalidates` / `@preserves` | a pointer, reference or iterator into a buffer or container used after a call that may have reallocated or released it |
 | locks | `@threadsafe` | unguarded access, unbalanced locks, declared lock order (AB-BA deadlock) |
 | low-level properties | `--safety=project.json` | forbidden effects in a call closure, resource state machines, stack and call depth, memory regions, MMIO and more — see [Configured low-level verification](#configured-low-level-verification---safety) |
 
@@ -494,6 +495,23 @@ by a check on the path (`if (n >= 1)`) or by a declared `@invariant(n >= 1)`.
   must be shown to satisfy it — by a check on the path, by constants, or by the caller's own
   declared invariant — else the call is `INVARIANT_NOT_MAINTAINED`.
 
+### References into managed storage (`@refcheck`)
+
+- `// @refcheck` above a function or at file level: a local that holds a pointer, a reference, an
+  iterator or a view into storage another object manages (`p = buf->data`, `&v[0]`, `v.begin()`,
+  `s.c_str()`) is followed along each path. Using it after a call that may have reallocated or
+  released that storage is `REF_INVALIDATED` when the call is declared or known to (`realloc`,
+  `free`, the standard containers' own methods) and `REF_UNPROVEN` when the call is handed a
+  writable pointer or reference to the object and declares nothing. Take the pointer again
+  after the call.
+- `// @invalidates(param)` / `// @preserves(param)` above a function declare which it is (`this`
+  for a method, a global by name; `invalidates:` / `preserves:` in a `@contract` block for a
+  library). A `@preserves` body is verified: releasing or reallocating what the parameter holds,
+  or passing it to a function that does not make the same promise, is `REF_NOT_PRESERVED`. A
+  `const` parameter needs no declaration.
+- Storage reached from a global can be changed by any function of the program, so a pointer into
+  it held across a call needs that function to declare `@preserves(<global>)`.
+
 ### Initialisation (`@initcheck`) and tagged unions (`@typecheck`)
 
 - `// @initcheck` above a function or at file level: a scalar or pointer local declared without
@@ -622,7 +640,7 @@ use, or whose only handle is overwritten), `MISSING_COPY_CONTROL` / `SELF_ASSIGN
 rather than dropped), plus `UNKNOWN_RESOURCE` / `STALE_UNSAFE` hygiene checks. Under the opt-in
 axes: `UNVALIDATED_INDEX`, `UNVALIDATED_SIZE`, `INAPPROPRIATE_BOUND`, `INDEX_MAYBE_NEGATIVE`,
 `UNGUARDED_INVARIANT_WRITE`, `INVARIANT_NOT_MAINTAINED` (`@spatial`), `USE_OF_UNINITIALIZED`
-(`@initcheck`), `TYPE_CONFUSION` (`@typecheck`), and `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
+(`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION` (`@typecheck`), and `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
 `LOCK_LEAKED`, `DOUBLE_LOCK`, `UNLOCK_WITHOUT_LOCK`, `LOCK_NOT_ACQUIRED`,
 `REQUIRED_LOCK_NOT_HELD`, `LOCK_ORDER_VIOLATION`, `SAME_CLASS_NO_ORDER`,
 `UNDECLARED_INDIRECT_CALL`, `UNDECLARED_FN_TARGET` (`@threadsafe`). Loops

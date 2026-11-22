@@ -73,7 +73,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 0 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -110,7 +110,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 1 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -130,6 +130,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 | 边界 | `@spatial` | 到达缓冲区的不可信索引或大小，需要一个存在的、充分的、不会溢出的边界检查；`@counted_by` 以及声明的数据结构不变式（`@invariant` / `@maintains`） |
 | 初始化 | `@initcheck` | 局部变量在尚未于每条路径上都被赋值之前就被读取 |
 | 带标签联合体 | `@typecheck` + `@variant` | 在其标签未被证明的位置使用联合体成员 |
+| 引用有效性 | `@refcheck` + `@invalidates` / `@preserves` | 指向缓冲区或容器内部的指针、引用或迭代器，在可能重新分配或释放它的调用之后被使用 |
 | 锁 | `@threadsafe` | 未受保护的访问、不平衡的加锁、声明的加锁顺序（AB-BA 死锁） |
 | 底层性质 | `--safety=project.json` | 调用闭包中被禁止的效应、资源状态机、栈与调用深度、内存区域、MMIO 等——见[配置驱动的底层验证](#配置驱动的底层验证--safety) |
 
@@ -447,6 +448,20 @@ kenbi 能读懂的索引或长度是：变量加减一个常量（`buf[i]`、`bu
   每一处调用验证它：必须通过路径上的检查、常量，或调用方自己声明的不变式表明实参满足该条件，否则
   该调用为 `INVARIANT_NOT_MAINTAINED`。
 
+### 指向受管存储的引用（`@refcheck`）
+
+- 函数上方或文件级的 `// @refcheck`：持有指向另一对象所管理存储内部的指针、引用、迭代器或视图
+  （`p = buf->data`、`&v[0]`、`v.begin()`、`s.c_str()`）的局部变量会沿每条路径被跟踪。在可能重新
+  分配或释放该存储的调用之后使用它：若该调用已声明或已知会这样做（`realloc`、`free`、标准容器
+  自身的方法）为 `REF_INVALIDATED`；若该调用得到指向该对象的可写指针或引用却未作任何声明，为
+  `REF_UNPROVEN`。请在调用之后重新获取指针。
+- 函数上方的 `// @invalidates(param)` / `// @preserves(param)` 声明属于哪一种（方法用 `this`，
+  全局变量用其名称；库函数用 `@contract` 块中的 `invalidates:` / `preserves:`）。`@preserves` 的
+  函数体会被验证：释放或重新分配该参数所持有的存储，或把它传给未作同样承诺的函数，为
+  `REF_NOT_PRESERVED`。`const` 参数无需声明。
+- 从全局变量可达的存储可被程序中的任何函数修改；要跨调用持有指向它的指针，被调用的函数必须声明
+  `@preserves(<全局变量>)`。
+
 ### 初始化（`@initcheck`）与带标签联合体（`@typecheck`）
 
 - 函数上方或文件级的 `// @initcheck`：一个声明时没有初始化器的标量或指针局部变量，必须在
@@ -565,7 +580,7 @@ use <var> | free <var> | move <var> | if / else / endif
 外加 `UNKNOWN_RESOURCE` / `STALE_UNSAFE` 卫生检查。在选择加入的轴下：`UNVALIDATED_INDEX`、
 `UNVALIDATED_SIZE`、`INAPPROPRIATE_BOUND`、`INDEX_MAYBE_NEGATIVE`、
 `UNGUARDED_INVARIANT_WRITE`、`INVARIANT_NOT_MAINTAINED`（`@spatial`）、`USE_OF_UNINITIALIZED`
-（`@initcheck`）、`TYPE_CONFUSION`（`@typecheck`），以及 `UNGUARDED_ACCESS`、`GUARDED_ESCAPE`、
+（`@initcheck`）、`REF_INVALIDATED`、`REF_UNPROVEN`、`REF_NOT_PRESERVED`（`@refcheck`）、`TYPE_CONFUSION`（`@typecheck`），以及 `UNGUARDED_ACCESS`、`GUARDED_ESCAPE`、
 `LOCK_LEAKED`、`DOUBLE_LOCK`、`UNLOCK_WITHOUT_LOCK`、`LOCK_NOT_ACQUIRED`、
 `REQUIRED_LOCK_NOT_HELD`、`LOCK_ORDER_VIOLATION`、`SAME_CLASS_NO_ORDER`、
 `UNDECLARED_INDIRECT_CALL`、`UNDECLARED_FN_TARGET`（`@threadsafe`）。循环

@@ -784,7 +784,8 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
      ikLowBound, ikLowInvariantCheck, ikScalarStep, ikArgLowCheck, ikArgRelCheck,
      ikLockAcquire, ikLockRelease, ikGuardedAccess, ikRequiredLockCall, ikGuardedEscape,
      ikIndirectCall, ikFnAssign,
-     ikInitWrite, ikInitRead, ikVariantAccess: discard
+     ikInitWrite, ikInitRead, ikVariantAccess,
+     ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved: discard
   of ikMustUse:
     # the front-end emits this only at a statement-level call whose result is
     # discarded; the callee is declared `@must_use`, so dropping it is the bug.
@@ -4177,6 +4178,164 @@ proc analyzeTypeConfusion(fn: Func): seq[Diag] =
   walk(fn.body, known)
   diags
 
+proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
+  ## Reference validity. A local that holds a pointer, reference or iterator into storage some
+  ## other object manages (ikRefDerive) must not be used (ikRefUse) once a call may have
+  ## reallocated or released that storage (ikRefInvalidate). MAY-analysis: what a local may
+  ## refer into, and whether it may be invalid, are joined by union, so a use is reported when
+  ## any path reaches it with the storage possibly gone. A loop body is walked twice so that
+  ## what one iteration invalidates reaches the next, and the function twice so that a backward
+  ## `goto` does. The promise of a function that declares `@preserves` (ikRefNotPreserved) is
+  ## checked whether or not the axis is on: its callers rely on it.
+  type
+    Cause = tuple[line, kind: int, callee, obj: string]
+    RefState = object
+      dead: bool
+      src: Table[string, HashSet[string]]
+      bad: Table[string, Cause]
+  var diags: seq[Diag]
+  var seen = initHashSet[string]()
+  var gotoIn = initTable[string, RefState]()
+  proc report(line: int, code, msg: string) =
+    let k = $line & "|" & code & "|" & msg
+    if k in seen: return
+    seen.incl k
+    diags.add Diag(line: line, code: code, msg: msg, sev: sevError)
+  proc join(x: var RefState, y: RefState) =
+    if y.dead: return
+    if x.dead:
+      x = y
+      return
+    for k, v in y.src:
+      if k in x.src: x.src[k].incl v
+      else: x.src[k] = v
+    for k, v in y.bad:
+      if k notin x.bad: x.bad[k] = v
+  proc invalidate(st: var RefState, s: Stmt) =
+    let region = (if s.bKey.len > 0: s.bKey.split('/') else: @[])
+    let keeps = s.bKey.split(';')
+    let changes = s.cKey.split(';')
+    for p, sources in st.src:
+      for source in sources:
+        let f = source.split("\x1f")
+        if f.len < 4: continue
+        let steps = (if f[1].len > 0: f[1].split('/') else: @[])
+        var kind = -1
+        case s.off
+        of 3:
+          if f[3] == "g" and f[2] notin keeps: kind = (if f[2] in changes: 0 else: 1)
+        of 2:
+          if f[0] == s.aKey and steps == region: kind = 2
+        else:
+          if f[0] == s.aKey and region.len <= steps.len and steps[0 ..< region.len] == region:
+            kind = s.off
+        if kind >= 0:
+          st.bad[p] = (s.line, kind, s.b, f[2])
+          break
+  proc walk(stmts: seq[Stmt], st: var RefState, breaks, conts: var seq[RefState]) =
+    for s in stmts:
+      case s.kind
+      of stInstr:
+        if st.dead: continue
+        case s.ik
+        of ikRefDerive:
+          var now = initHashSet[string]()
+          if s.cKey.len > 0 and s.cKey in st.src: now = st.src[s.cKey]
+          if s.bKey.len > 0: now.incl s.bKey
+          if s.cKey.len > 0 and s.cKey != s.aKey and s.cKey in st.bad: st.bad[s.aKey] = st.bad[s.cKey]
+          else: st.bad.del s.aKey
+          if now.len > 0: st.src[s.aKey] = now
+          else: st.src.del s.aKey
+        of ikRefUse:
+          if s.aKey in st.bad:
+            let c = st.bad[s.aKey]
+            st.bad.del s.aKey                      # once per path: the fix is the same for every use
+            if not axisOn: continue
+            let what = (if s.off == 1: "This loop is still going over '" & s.a & "'"
+                        else: "'" & s.a & "' refers into storage that '" & c.obj & "' manages") &
+                       ", and "
+            let callee = (if c.callee.len > 0: "'" & c.callee & "'" else: "a call")
+            let again = (if s.off == 1: "Leave the loop after changing what it goes over, or " &
+                                        "loop by index."
+                         else: "Take '" & s.a & "' again after the call.")
+            if c.kind == 1:
+              report(s.line, "REF_UNPROVEN",
+                what & "nothing shows that " & callee & " at line " & $c.line & " leaves that " &
+                "storage in place. If it reallocates and releases nothing there, declare the " &
+                "parameter `@preserves` on " & callee & " — its body is then checked; if it may, " &
+                "declare it `@invalidates`. " & again)
+            else:
+              report(s.line, "REF_INVALIDATED",
+                what & callee & " at line " & $c.line &
+                (if c.kind == 2: " releases or moves it" else: " may reallocate or release it") &
+                ": this use may reach storage that is gone. " & again)
+        of ikRefInvalidate: invalidate(st, s)
+        of ikRefNotPreserved:
+          let callee = (if s.cKey.len > 0: "'" & s.cKey & "'" else: "a call")
+          report(s.line, "REF_NOT_PRESERVED",
+            "this function declares '" & s.b & "' `@preserves`, but passes '" & s.a & "' to " &
+            callee & ", which " &
+            (if s.off == 2: "releases or moves the storage it holds"
+             elif s.off == 0: "may reallocate or release what it holds"
+             else: "does not declare that it leaves it in place") &
+            ". Callers keep pointers into it across the call on the strength of the declaration. " &
+            (if s.off == 1: "Declare the parameter `@preserves` on " & callee &
+                            " if that holds there too, or declare"
+             else: "Declare") & " this function `@invalidates(" & s.b & ")` instead.")
+        of ikReturn, ikThrow: st.dead = true
+        of ikBreak:
+          breaks.add st
+          st.dead = true
+        of ikContinue:
+          conts.add st
+          st.dead = true
+        of ikGoto:
+          if s.a in gotoIn: join(gotoIn[s.a], st)
+          else: gotoIn[s.a] = st
+          st.dead = true
+        else: discard
+      of stIf:
+        var other = st
+        walk(s.thenBody, st, breaks, conts)
+        walk(s.elseBody, other, breaks, conts)
+        join(st, other)
+      of stLoop:
+        var acc = st                               # the loop may not run at all
+        var cur = st
+        for round in 0 ..< 2:
+          var inner, innerConts: seq[RefState]
+          var body = cur
+          walk(s.loopBody, body, inner, innerConts)
+          for c in innerConts: join(body, c)
+          for b in inner: join(acc, b)
+          join(acc, body)
+          join(cur, body)
+        st = acc
+      of stSwitch:
+        var acc = (if s.hasDefault: RefState(dead: true) else: st)
+        var inner: seq[RefState]
+        for c in s.cases:
+          var cv = st
+          walk(c, cv, inner, conts)
+          join(acc, cv)
+        for b in inner: join(acc, b)
+        st = acc
+      of stTry:
+        var entry = st
+        walk(s.tryBody, st, breaks, conts)
+        join(entry, st)                            # a handler is entered from anywhere in the body
+        for h in s.handlers:
+          var hv = entry
+          walk(h, hv, breaks, conts)
+          join(st, hv)
+      of stLabel:
+        if s.labelName in gotoIn: join(st, gotoIn[s.labelName])
+  for round in 0 ..< 2:
+    var st: RefState
+    var breaks, conts: seq[RefState]
+    walk(fn.body, st, breaks, conts)
+  diags
+
 type
   Axis* = enum
     ## The independent checks kenbi runs on a function, each opted into separately.
@@ -4185,6 +4344,7 @@ type
     axLocks = "locks"               ## `@threadsafe`
     axInit = "initialisation"       ## `@initcheck`
     axUnions = "taggedUnions"       ## `@typecheck`
+    axRefs = "references"           ## `@refcheck`
 
 proc axesOf*(prog: Program, fn: Func): set[Axis] =
   ## Which checks run on `fn`. analyzeFull runs exactly these, and the reported scope of a
@@ -4196,6 +4356,7 @@ proc axesOf*(prog: Program, fn: Func): set[Axis] =
   if prog.concurrentAll or fn.name in prog.concurrentFuncs: result.incl axLocks
   if prog.initAll or fn.name in prog.initFuncs: result.incl axInit
   if prog.typecheckAll or fn.name in prog.typecheckFuncs: result.incl axUnions
+  if prog.refAll or fn.name in prog.refFuncs: result.incl axRefs
 
 proc analyzeFull*(prog: Program): tuple[diags: seq[Diag], cov: CoverageStats, unit: ProjectUnit] =
   ## Analyze + compute adoption/safety coverage. `analyze*` is the diags-only view. `unit` is
@@ -4230,6 +4391,9 @@ proc analyzeFull*(prog: Program): tuple[diags: seq[Diag], cov: CoverageStats, un
       # TYPE-CONFUSION (tagged union) axis — independent opt-in (`@typecheck`).
       if axUnions in axes:
         for d in analyzeTypeConfusion(fn): a.diags.add d
+      # REFERENCE VALIDITY axis — independent opt-in (`@refcheck`). The promise of a function
+      # that declares `@preserves` is checked on every function, opted in or not.
+      for d in analyzeRefs(fn, axRefs in axes): a.diags.add d
       var hasRed = false
       var vouched = false
       for i in mark ..< a.diags.len:
