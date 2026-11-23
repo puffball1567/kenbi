@@ -496,6 +496,14 @@ verificação no caminho (`if (n >= 1)`) ou por um `@invariant(n >= 1)` declarad
 - O armazenamento alcançável a partir de uma variável global pode ser alterado por qualquer
   função do programa; manter um ponteiro para ele através de uma chamada exige que a função
   chamada declare `@preserves(<global>)`.
+- `// @returns_into(param)` acima de uma função declara que seu resultado aponta para dentro de
+  armazenamento alcançado através de `param`; a cópia do chamador é então seguida como um
+  ponteiro lido do objeto (`// @returns_into()`: para dentro de nenhum de seus argumentos;
+  `returns_into:` em um bloco `@contract`). Uma função que retorna tal ponteiro sem declará-lo é
+  `REF_RETURN_UNDECLARED`. O resultado de uma função que nada declara pode apontar para dentro
+  do que qualquer argumento ponteiro guarda: usá-lo depois que esse argumento é invalidado é
+  `REF_UNPROVEN`. Sabe-se que `strchr`, `memcpy` e semelhantes retornam um ponteiro para dentro
+  do bloco de seu argumento.
 
 ### Inicialização (`@initcheck`) e uniões etiquetadas (`@typecheck`)
 
@@ -630,7 +638,7 @@ liberação em uma construção que o kenbi não modela, recusada em vez de desc
 verificações de higiene `UNKNOWN_RESOURCE` / `STALE_UNSAFE`. Sob os eixos opt-in:
 `UNVALIDATED_INDEX`, `UNVALIDATED_SIZE`, `INAPPROPRIATE_BOUND`, `INDEX_MAYBE_NEGATIVE`,
 `UNGUARDED_INVARIANT_WRITE`, `INVARIANT_NOT_MAINTAINED` (`@spatial`), `USE_OF_UNINITIALIZED`
-(`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION` (`@typecheck`), e `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
+(`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_RETURN_UNDECLARED`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION` (`@typecheck`), e `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
 `LOCK_LEAKED`, `DOUBLE_LOCK`, `UNLOCK_WITHOUT_LOCK`, `LOCK_NOT_ACQUIRED`,
 `REQUIRED_LOCK_NOT_HELD`, `LOCK_ORDER_VIOLATION`, `SAME_CLASS_NO_ORDER`,
 `UNDECLARED_INDIRECT_CALL`, `UNDECLARED_FN_TARGET` (`@threadsafe`). Os laços

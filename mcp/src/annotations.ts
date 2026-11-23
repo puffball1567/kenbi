@@ -360,6 +360,15 @@ the declared intent and reports where they disagree.
   same promise, is \`REF_NOT_PRESERVED\`. A \`const\` parameter needs no declaration, and the C
   library's readers and writers are known. When unsure, declare \`@preserves\` and run the
   check: a finding in the body names the line that reallocates.
+- \`// @returns_into(<param>)\` above a function declares that its result points into storage
+  reached through that parameter — an accessor such as \`char *buf_data(struct Buf *b)\`. The
+  caller's copy is then followed like a pointer read out of the object. \`// @returns_into()\`
+  declares that the result points into none of the arguments; \`returns_into:\` is the
+  \`@contract\` key. A function that returns a pointer into what a parameter holds without
+  declaring it is \`REF_RETURN_UNDECLARED\`. The result of a function that declares nothing may
+  point into what any pointer argument holds: using it after that argument is invalidated is
+  \`REF_UNPROVEN\`. \`strchr\`, \`memcpy\` and the like are known to return a pointer into
+  their argument's block; a fresh allocation (\`@owns\`) points into nothing the caller holds.
 - Storage reached from a global can be changed by any function of the program: a pointer into
   it held across a call needs that function to declare \`@preserves(<global>)\`.
 

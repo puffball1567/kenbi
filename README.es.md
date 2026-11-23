@@ -499,6 +499,14 @@ camino (`if (n >= 1)`) o con un `@invariant(n >= 1)` declarado.
 - El almacenamiento alcanzable desde una variable global puede ser modificado por cualquier
   función del programa; conservar un puntero a él a través de una llamada exige que la función
   llamada declare `@preserves(<global>)`.
+- `// @returns_into(param)` sobre una función declara que su resultado apunta dentro de
+  almacenamiento alcanzado a través de `param`; la copia del llamador se sigue entonces como un
+  puntero leído del objeto (`// @returns_into()`: dentro de ninguno de sus argumentos;
+  `returns_into:` en un bloque `@contract`). Una función que devuelve tal puntero sin declararlo
+  es `REF_RETURN_UNDECLARED`. El resultado de una función que no declara nada puede apuntar
+  dentro de lo que guarda cualquier argumento puntero: usarlo después de que ese argumento quede
+  invalidado es `REF_UNPROVEN`. De `strchr`, `memcpy` y similares se sabe que devuelven un
+  puntero dentro del bloque de su argumento.
 
 ### Inicialización (`@initcheck`) y uniones etiquetadas (`@typecheck`)
 
@@ -634,7 +642,7 @@ del uso, o cuyo único handle se sobrescribe), `MISSING_COPY_CONTROL` / `SELF_AS
 rechazada en lugar de descartada), más las comprobaciones de higiene `UNKNOWN_RESOURCE` /
 `STALE_UNSAFE`. Bajo los ejes opcionales: `UNVALIDATED_INDEX`, `UNVALIDATED_SIZE`,
 `INAPPROPRIATE_BOUND`, `INDEX_MAYBE_NEGATIVE`, `UNGUARDED_INVARIANT_WRITE`,
-`INVARIANT_NOT_MAINTAINED` (`@spatial`), `USE_OF_UNINITIALIZED` (`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION`
+`INVARIANT_NOT_MAINTAINED` (`@spatial`), `USE_OF_UNINITIALIZED` (`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_RETURN_UNDECLARED`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION`
 (`@typecheck`), y `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`, `LOCK_LEAKED`, `DOUBLE_LOCK`,
 `UNLOCK_WITHOUT_LOCK`, `LOCK_NOT_ACQUIRED`, `REQUIRED_LOCK_NOT_HELD`, `LOCK_ORDER_VIOLATION`,
 `SAME_CLASS_NO_ORDER`, `UNDECLARED_INDIRECT_CALL`, `UNDECLARED_FN_TARGET` (`@threadsafe`). Los

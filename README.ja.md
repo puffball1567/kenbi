@@ -483,6 +483,13 @@ kenbi が添字や長さとして読めるのは、変数に定数を足し引�
   同じ約束をしていない関数へ渡すと `REF_NOT_PRESERVED` です。`const` の引数には宣言は要りません。
 - 大域変数から届く記憶域は、プログラムのどの関数からも変更できます。そこを指すポインタを呼び出しを
   またいで持つには、呼ばれる関数が `@preserves(<大域変数>)` を宣言している必要があります。
+- 関数の上の `// @returns_into(param)` は、戻り値が `param` から届く記憶域の中を指すことを宣言します。
+  呼び出し側が受け取ったポインタは、オブジェクトから直接読んだポインタと同じように追われます
+  （`// @returns_into()` はどの引数の中も指さないという宣言。`@contract` ブロックでは `returns_into:`）。
+  そのようなポインタを宣言なしで返す関数は `REF_RETURN_UNDECLARED` です。何も宣言していない関数の
+  戻り値は、ポインタ引数のどれかが持つ記憶域の中を指すかもしれないものとして扱い、その引数が
+  無効化された後で使うと `REF_UNPROVEN` です。`strchr` や `memcpy` などは、引数のブロックの中を指す
+  ポインタを返すものとして既知です。
 
 ### 初期化（`@initcheck`）とタグ付き共用体（`@typecheck`）
 
@@ -610,7 +617,7 @@ use <var> | free <var> | move <var> | if / else / endif
 加えて `UNKNOWN_RESOURCE` / `STALE_UNSAFE` の衛生チェック。opt-in の軸の下では:
 `UNVALIDATED_INDEX`、`UNVALIDATED_SIZE`、`INAPPROPRIATE_BOUND`、`INDEX_MAYBE_NEGATIVE`、
 `UNGUARDED_INVARIANT_WRITE`、`INVARIANT_NOT_MAINTAINED`（`@spatial`）、`USE_OF_UNINITIALIZED`
-（`@initcheck`）、`REF_INVALIDATED`、`REF_UNPROVEN`、`REF_NOT_PRESERVED`（`@refcheck`）、`TYPE_CONFUSION`（`@typecheck`）、そして `UNGUARDED_ACCESS`、`GUARDED_ESCAPE`、
+（`@initcheck`）、`REF_INVALIDATED`、`REF_UNPROVEN`、`REF_RETURN_UNDECLARED`、`REF_NOT_PRESERVED`（`@refcheck`）、`TYPE_CONFUSION`（`@typecheck`）、そして `UNGUARDED_ACCESS`、`GUARDED_ESCAPE`、
 `LOCK_LEAKED`、`DOUBLE_LOCK`、`UNLOCK_WITHOUT_LOCK`、`LOCK_NOT_ACQUIRED`、
 `REQUIRED_LOCK_NOT_HELD`、`LOCK_ORDER_VIOLATION`、`SAME_CLASS_NO_ORDER`、
 `UNDECLARED_INDIRECT_CALL`、`UNDECLARED_FN_TARGET`（`@threadsafe`）。ループ

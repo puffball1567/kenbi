@@ -159,9 +159,12 @@ type
                  ## 1 it passes it to `cKey` (parameter `bKey`), which declares nothing about
                  ## keeping it, 2 to one declared to take it (UNIQUE_ESCAPES / BORROW_ESCAPES).
     ikRefDerive  ## the local `a` (key `aKey`) is assigned: it now holds a pointer, reference or
-                 ## iterator reached through the pointer `bKey` names (root, steps, display and
-                 ## storage, separated by U+001F; "" for none), together with whatever the local
-                 ## `cKey` holds when it is a copy or an offset of that one.
+                 ## iterator reached through the pointers `bKey` names (each root, steps, display,
+                 ## storage and — when a callee that declares nothing returned it — that callee,
+                 ## separated by U+001F; several separated by U+001E), together with whatever
+                 ## the locals `cKey` hold when it is a copy or an offset of them.
+    ikRefReturn  ## the function returns `a`, which points into what its parameter `b` holds,
+                 ## without declaring `@returns_into(b)` (off 1: it declares other parameters).
     ikRefUse     ## a use of the local `a` (key `aKey`); off 1: by the range-`for` it stands for.
     ikRefInvalidate ## a call to `b` may have reallocated or released storage: everything at or
                  ## below the steps `bKey` of root `aKey` (off 0 declared or known to, 1 nothing

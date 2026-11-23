@@ -503,6 +503,14 @@ vérification sur le chemin (`if (n >= 1)`) ou par un `@invariant(n >= 1)` décl
 - Un stockage accessible depuis une variable globale peut être modifié par n'importe quelle
   fonction du programme ; conserver un pointeur vers lui à travers un appel exige que la fonction
   appelée déclare `@preserves(<globale>)`.
+- `// @returns_into(param)` au-dessus d'une fonction déclare que son résultat pointe dans un stockage
+  atteint par `param` ; la copie de l'appelant est alors suivie comme un pointeur lu dans l'objet
+  (`// @returns_into()` : dans aucun de ses arguments ; `returns_into:` dans un bloc `@contract`).
+  Une fonction qui renvoie un tel pointeur sans le déclarer est `REF_RETURN_UNDECLARED`. Le
+  résultat d'une fonction qui ne déclare rien peut pointer dans ce que détient n'importe quel
+  argument pointeur : l'utiliser après l'invalidation de cet argument est `REF_UNPROVEN`.
+  `strchr`, `memcpy` et leurs semblables sont connus pour renvoyer un pointeur dans le bloc de
+  leur argument.
 
 ### Initialisation (`@initcheck`) et unions étiquetées (`@typecheck`)
 
@@ -641,7 +649,7 @@ une libération dans une construction que kenbi ne modélise pas, refusée plut�
 que les contrôles d'hygiène `UNKNOWN_RESOURCE` / `STALE_UNSAFE`. Sous les axes opt-in :
 `UNVALIDATED_INDEX`, `UNVALIDATED_SIZE`, `INAPPROPRIATE_BOUND`, `INDEX_MAYBE_NEGATIVE`,
 `UNGUARDED_INVARIANT_WRITE`, `INVARIANT_NOT_MAINTAINED` (`@spatial`), `USE_OF_UNINITIALIZED`
-(`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION` (`@typecheck`), et `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
+(`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_RETURN_UNDECLARED`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION` (`@typecheck`), et `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
 `LOCK_LEAKED`, `DOUBLE_LOCK`, `UNLOCK_WITHOUT_LOCK`, `LOCK_NOT_ACQUIRED`,
 `REQUIRED_LOCK_NOT_HELD`, `LOCK_ORDER_VIOLATION`, `SAME_CLASS_NO_ORDER`,
 `UNDECLARED_INDIRECT_CALL`, `UNDECLARED_FN_TARGET` (`@threadsafe`). Les boucles

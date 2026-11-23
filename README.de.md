@@ -515,6 +515,14 @@ durch eine Prüfung auf dem Pfad (`if (n >= 1)`) oder ein deklariertes `@invaria
 - Speicher, der über eine globale Variable erreichbar ist, kann von jeder Funktion des Programms
   verändert werden; ein Zeiger dorthin, der über einen Aufruf hinweg gehalten wird, verlangt, dass
   die aufgerufene Funktion `@preserves(<global>)` deklariert.
+- `// @returns_into(param)` über einer Funktion deklariert, dass ihr Ergebnis in Speicher zeigt, der
+  über `param` erreichbar ist; die Kopie des Aufrufers wird dann wie ein aus dem Objekt gelesener
+  Zeiger verfolgt (`// @returns_into()`: in keines ihrer Argumente; `returns_into:` in einem
+  `@contract`-Block). Eine Funktion, die einen solchen Zeiger zurückgibt, ohne es zu deklarieren,
+  ist `REF_RETURN_UNDECLARED`. Das Ergebnis einer Funktion, die nichts deklariert, kann in das
+  zeigen, was irgendein Zeigerargument hält: seine Verwendung, nachdem dieses Argument ungültig
+  wurde, ist `REF_UNPROVEN`. Von `strchr`, `memcpy` und ähnlichen ist bekannt, dass sie einen
+  Zeiger in den Block ihres Arguments zurückgeben.
 
 ### Initialisierung (`@initcheck`) und getaggte Unions (`@typecheck`)
 
@@ -655,7 +663,7 @@ Freigabe in einem Konstrukt, das kenbi nicht modelliert, abgelehnt statt verworf
 Hygieneprüfungen `UNKNOWN_RESOURCE` / `STALE_UNSAFE`. Unter den Opt-in-Achsen:
 `UNVALIDATED_INDEX`, `UNVALIDATED_SIZE`, `INAPPROPRIATE_BOUND`, `INDEX_MAYBE_NEGATIVE`,
 `UNGUARDED_INVARIANT_WRITE`, `INVARIANT_NOT_MAINTAINED` (`@spatial`), `USE_OF_UNINITIALIZED`
-(`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION` (`@typecheck`) sowie `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
+(`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_RETURN_UNDECLARED`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION` (`@typecheck`) sowie `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
 `LOCK_LEAKED`, `DOUBLE_LOCK`, `UNLOCK_WITHOUT_LOCK`, `LOCK_NOT_ACQUIRED`,
 `REQUIRED_LOCK_NOT_HELD`, `LOCK_ORDER_VIOLATION`, `SAME_CLASS_NO_ORDER`,
 `UNDECLARED_INDIRECT_CALL`, `UNDECLARED_FN_TARGET` (`@threadsafe`). Schleifen

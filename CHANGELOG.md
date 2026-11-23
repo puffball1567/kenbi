@@ -26,6 +26,11 @@ and the JSON output may change in any minor version.
   `@preserves` body is verified. `realloc`, `free` and the standard containers' methods are
   known. Findings: `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED`. The scope reported
   with each result gains a `references` entry.
+- `// @returns_into(param)` (also a `@contract` key) declares that a function's result points
+  into storage reached through a parameter, so a pointer obtained from an accessor is followed
+  under `@refcheck` like one read out of the object. A function that returns such a pointer
+  without declaring it is `REF_RETURN_UNDECLARED`; the result of a function that declares
+  nothing is taken to point into what any of its pointer arguments may hold.
 
 ### Changed
 

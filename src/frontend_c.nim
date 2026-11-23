@@ -2103,6 +2103,13 @@ const
     ## free functions of the standard library that leave their reference arguments in place
   refStdChanges = ["move", "swap", "exchange"]
     ## ... and those that leave them moved from or exchanged
+  refGroupSep = "\x1e"
+  refIntoArg = {"strchr": 0, "strrchr": 0, "strstr": 0, "strcasestr": 0, "strpbrk": 0,
+                "memchr": 0, "memrchr": 0, "strtok": 0, "index": 0, "rindex": 0, "strcpy": 0,
+                "strncpy": 0, "stpcpy": 0, "strcat": 0, "strncat": 0, "memcpy": 0, "memmove": 0,
+                "memset": 0, "fgets": 0, "basename": 0, "dirname": 0, "bsearch": 1, "wcschr": 0,
+                "wcsrchr": 0, "wcsstr": 0, "wmemchr": 0}.toTable
+    ## C library functions whose result points into the block this argument points into
 
 proc refStrip(c: CXCursor): CXCursor =
   ## `c` without parentheses, casts and the copy a by-value class argument is wrapped in.
@@ -2236,23 +2243,108 @@ proc refHandle(decl: CXCursor): int =
     if "iter" in name or "string_view" in name or "span<" in name: return 3
   0
 
-proc refDerivation(ctx: Ctx, decl, rhs: CXCursor): tuple[source, inherit: string] =
-  ## What assigning `rhs` to the variable `decl` makes it refer into: the pointer it is reached
-  ## through, and the local it copies or offsets when there is one.
+proc refPlainCall(e: CXCursor): tuple[has: bool, call: CXCursor] =
+  ## The call to an ordinary function — not a method, an operator or a constructor — whose
+  ## result the pointer expression `e` is, or is an offset or a member of.
+  var u = refStrip(e)
+  for _ in 0 ..< 16:
+    let k = clang_getCursorKind(u)
+    let kids = collectChildren(u)
+    if k == ckCallExpr:
+      let dk = clang_getCursorKind(clang_getCursorReferenced(u))
+      if dk in refMethodKinds or dk == ckConstructor or spelling(u).startsWith("operator"): return
+      return (true, u)
+    if kids.len == 0: return
+    if k in [ckMemberRefExpr, ckArraySubscriptExpr, ckUnaryOperator]: u = refStrip(kids[0])
+    elif k == ckBinaryOperator and kids.len == 2:
+      u = refStrip(if canonKind(kids[0]) == tyPointer: kids[0] else: kids[1])
+    else: return
+
+proc refCallSources(ctx: Ctx, call: CXCursor): tuple[sources, inherits: seq[string]] =
+  ## What the result of a call to an ordinary function points into. A function that declares
+  ## `@returns_into` says so; the C library's searches and copies return a pointer into their
+  ## argument's block; a fresh allocation and any other library function point into nothing the
+  ## caller holds. The result of any other function may point into what any of its pointer or
+  ## reference arguments holds — a source recorded with the callee's name, so that a use after
+  ## that argument is invalidated is reported as unproven.
+  let decl = clang_getCursorReferenced(call)
+  let dk = clang_getCursorKind(decl)
+  let ind = (if dk == ckFunctionDecl: (isIndirect: false, usr: "", disp: "")
+             else: indirectFnptr(call))
+  let callee = (if ind.isIndirect: ind.disp else: ctx.effectiveCallee(call))
+  if dk != ckFunctionDecl and not ind.isIndirect: return
+  let na = int(clang_Cursor_getNumArguments(call))
+  proc same(ctx: Ctx, arg: CXCursor, res: var tuple[sources, inherits: seq[string]]) =
+    ## the result points where the argument does
+    let region = ctx.refPointee(arg)
+    let s = refSource(region)
+    if s.len > 0: res.sources.add s
+    if region.ok and region.root in ctx.refTargets: res.inherits.add region.root
+  if not ind.isIndirect:
+    var names = @[callee]
+    if qualName(decl).len > 0: names.add qualName(decl)
+    var declared = false
+    var into: seq[string]
+    for n in names:
+      if n in ctx.returnsInto:
+        declared = true
+        into.add ctx.returnsInto[n]
+    if not declared:
+      if callee in ctx.returnContracts: return             # a fresh object
+      if callee in refIntoArg:
+        if refIntoArg[callee] < na:
+          ctx.same(clang_Cursor_getArgument(call, cuint(refIntoArg[callee])), result)
+        return
+      if inStd(decl):
+        # an algorithm returns one of the iterators it was given, or one between them
+        for ai in 0 ..< na: ctx.same(clang_Cursor_getArgument(call, cuint(ai)), result)
+        return
+      if clang_Location_isInSystemHeader(clang_getCursorLocation(decl)) != 0: return
+    let np = int(clang_Cursor_getNumArguments(decl))
+    for ai in 0 ..< na:
+      let arg = clang_Cursor_getArgument(call, cuint(ai))
+      var pname = ""
+      var kind = canonKind(arg)
+      if ai < np:
+        let pd = clang_Cursor_getArgument(decl, cuint(ai))
+        pname = spelling(pd)
+        kind = canonKind(pd)
+      if declared and pname notin into and ("$" & $(ai + 1)) notin into: continue
+      var region: RefPath
+      if kind == tyPointer: region = ctx.refPointee(arg)
+      elif kind == tyLValueReference: region = ctx.refLvalue(arg)
+      else: continue
+      if not region.ok: continue
+      region.steps.add [".#", "*"]
+      result.sources.add refSource(region) & (if declared: "" else: refSep & callee)
+    return
+  for ai in 0 ..< na:                                      # through a function pointer
+    let arg = clang_Cursor_getArgument(call, cuint(ai))
+    if canonKind(arg) != tyPointer: continue
+    var region = ctx.refPointee(arg)
+    if not region.ok: continue
+    region.steps.add [".#", "*"]
+    result.sources.add refSource(region) & refSep & callee
+
+proc refDerivation(ctx: Ctx, decl, rhs: CXCursor): tuple[sources, inherits: seq[string]] =
+  ## What assigning `rhs` to the variable `decl` makes it refer into: the pointers it is
+  ## reached through, and the locals it copies or offsets.
   let h = refHandle(decl)
   if h == 0: return
+  let pc = refPlainCall(rhs)
+  if pc.has: return ctx.refCallSources(pc.call)
   let u = refStrip(rhs)
   var region: RefPath
   if h == 3:
     if clang_getCursorKind(u) == ckDeclRefExpr:
-      if referencedUsr(u) in ctx.refTargets: result.inherit = referencedUsr(u)
+      if referencedUsr(u) in ctx.refTargets: result.inherits.add referencedUsr(u)
       return
     if clang_getCursorKind(u) != ckCallExpr: return
     region = ctx.refCallRegion(u)
   elif h == 2: region = ctx.refLvalue(rhs)
   else: region = ctx.refPointee(rhs)
-  result.source = refSource(region)
-  if region.ok and region.root in ctx.refTargets: result.inherit = region.root
+  if refSource(region).len > 0: result.sources.add refSource(region)
+  if region.ok and region.root in ctx.refTargets: result.inherits.add region.root
 
 proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
   ## What the reference-validity events of the function being lowered need: which locals can
@@ -2265,7 +2357,11 @@ proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
                                             line: int]]()
   var promised = ctx.preservesParams.getOrDefault(fnKey, @[])
   if promised.len == 0: promised = ctx.preservesParams.getOrDefault(spelling(fn), @[])
-  ctx.refActive = ctx.refSites.len > 0 or promised.len > 0
+  ctx.refParamOf = initTable[string, string]()
+  ctx.refReturnsDeclared = fnKey in ctx.returnsInto or spelling(fn) in ctx.returnsInto
+  ctx.refReturns = ctx.returnsInto.getOrDefault(fnKey, @[]) &
+                   ctx.returnsInto.getOrDefault(spelling(fn), @[])
+  ctx.refActive = ctx.refSites.len > 0 or promised.len > 0 or ctx.refReturnsDeclared
   if not ctx.refActive: return
   var pnames: seq[string]
   var pi = 0
@@ -2274,6 +2370,8 @@ proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
     inc pi
     pnames.add spelling(p)
     if spelling(p) in promised or ("$" & $pi) in promised: ctx.refPromised[usr(p)] = spelling(p)
+    ctx.refParamOf[usr(p)] = spelling(p)
+    if ("$" & $pi) in ctx.refReturns: ctx.refReturns.add spelling(p)
   for n in promised:
     if n == "this": ctx.refPromised["this"] = "this"
     elif n notin pnames and not n.startsWith("$"): ctx.refPromisedGlobals.incl n
@@ -2314,9 +2412,19 @@ proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
       let key = usr(st.decl)
       if key notin ctx.refTargets:
         let d = ctx.refDerivation(st.decl, st.value)
-        if d.source.len > 0 or d.inherit.len > 0:
+        if d.sources.len > 0 or d.inherits.len > 0:
           ctx.refTargets.incl key
           grown = true
+      if key notin ctx.refParamOf:
+        # a local that refers into what a parameter holds
+        let d = ctx.refDerivation(st.decl, st.value)
+        var roots = d.inherits
+        for s in d.sources: roots.add s.split(refSep)[0]
+        for r in roots:
+          if r in ctx.refParamOf:
+            ctx.refParamOf[key] = ctx.refParamOf[r]
+            grown = true
+            break
       if key notin ctx.refPromised and refHandle(st.decl) in [1, 2]:
         # a local copy of a pointer into what the function declares it preserves
         let r = (if refHandle(st.decl) == 2: ctx.refLvalue(st.value) else: ctx.refPointee(st.value))
@@ -2456,7 +2564,8 @@ proc refEvents(ctx: Ctx, n: CXCursor, outp: var seq[Stmt]) =
               outp: var seq[Stmt]) =
     if usr(decl) notin ctx.refTargets: return
     let d = ctx.refDerivation(decl, rhs)
-    outp.add emit(ikRefDerive, line, a = disp, aKey = usr(decl), bKey = d.source, cKey = d.inherit)
+    outp.add emit(ikRefDerive, line, a = disp, aKey = usr(decl),
+                  bKey = d.sources.join(refGroupSep), cKey = d.inherits.join(refGroupSep))
   proc rebindable(l: CXCursor): bool =
     ## a variable an assignment gives a new value (a reference is written through instead)
     clang_getCursorKind(l) == ckDeclRefExpr and
@@ -2513,6 +2622,25 @@ proc refStmtEvents(ctx: Ctx, c: CXCursor, outp, post: var seq[Stmt]) =
   if k == ckDeclStmt or clang_isExpression(k) != 0: ctx.refEvents(c, outp)
   elif k == ckReturnStmt:
     for ch in kids: ctx.refEvents(ch, outp)
+    # what the function hands back: a pointer into what a parameter holds is something the
+    # caller must know about, so the function declares it
+    if kids.len == 1 and canonKind(kids[0]) in [tyPointer, tyLValueReference, tyRecord]:
+      var roots: seq[string]
+      let pc = refPlainCall(kids[0])
+      if pc.has:
+        let d = ctx.refCallSources(pc.call)
+        roots = d.inherits
+        for s in d.sources: roots.add s.split(refSep)[0]
+      else:
+        let region = ctx.refPointee(kids[0])
+        if refSource(region).len > 0 or (region.ok and region.root in ctx.refTargets):
+          roots.add region.root
+      for r in roots:
+        let name = ctx.refParamOf.getOrDefault(r)
+        if name.len > 0 and name notin ctx.refReturns:
+          outp.add emit(ikRefReturn, startLine(c), a = ctx.cursorTokens(kids[0]).join(""),
+                        b = name, off = (if ctx.refReturnsDeclared: 1 else: 0))
+          break
   elif k in [ckIfStmt, ckSwitchStmt]:
     var last = 1
     if kids.len >= 3 and clang_getCursorKind(kids[0]) in [ckDeclStmt, ckVarDecl]: last = 2
@@ -5520,7 +5648,7 @@ proc resolveNamedContracts(ctx: var Ctx) =
     if nc.kw == "@nothrow" and nc.param.len == 0:
       ctx.nothrowFuncs.incl nc.fn          # vouch by name; no signature needed
       continue
-    if nc.kw in ["@invalidates", "@preserves"]: continue   # bound by name in resolveRefs
+    if nc.kw in ["@invalidates", "@preserves", "@returns_into"]: continue   # bound in resolveRefs
     if nc.kw == "@longjmps":
       ctx.longjmpFuncs.incl nc.fn          # a library function, declared by name
       if nc.param.len > 0: ctx.longjmpTargets[nc.fn] = nc.param   # `longjmps: <jmp_buf>`
@@ -6045,9 +6173,19 @@ proc resolveRefs(ctx: var Ctx) =
         if name.strip.len == 0: continue
         if invalidates: ctx.invalidatesParams.mgetOrPut(fn, @[]).add name.strip
         else: ctx.preservesParams.mgetOrPut(fn, @[]).add name.strip
+  ctx.returnsInto = initTable[string, seq[string]]()
+  for site in ctx.returnsIntoSites:
+    let fn = ctx.siteFuncName(site.file, site.line)
+    if fn.len == 0: continue
+    discard ctx.returnsInto.mgetOrPut(fn, @[])          # `@returns_into()`: into none
+    for name in site.spec.split(','):
+      if name.strip.len > 0: ctx.returnsInto[fn].add name.strip
   for nc in ctx.namedContracts:
     if nc.kw == "@invalidates": ctx.invalidatesParams.mgetOrPut(nc.fn, @[]).add nc.param
     elif nc.kw == "@preserves": ctx.preservesParams.mgetOrPut(nc.fn, @[]).add nc.param
+    elif nc.kw == "@returns_into":
+      discard ctx.returnsInto.mgetOrPut(nc.fn, @[])
+      if nc.param.len > 0: ctx.returnsInto[nc.fn].add nc.param
   ctx.prog.refFuncs = initHashSet[string]()
   for site in ctx.refSites:
     var bestLine = high(int)

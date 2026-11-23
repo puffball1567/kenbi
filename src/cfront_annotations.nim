@@ -65,6 +65,7 @@ const contractKeys = {
   "longjmps":  "@longjmps",
   "invalidates": "@invalidates",
   "preserves": "@preserves",
+  "returns_into": "@returns_into",
 }.toTable
 
 proc parseContractsForComment(ctx: var Ctx, text: string, file: string, line: int) =
@@ -122,7 +123,7 @@ proc parseContractComment(ctx: var Ctx, text: string, line: int) =
       ctx.prog.advisories.add Advisory(line: line, code: "UNKNOWN_CONTRACT_KEY",
         msg: "`@contract " & fn & "` names '" & key & "', which is not a contract kenbi " &
              "knows. Keys: frees, borrows, moves, adopts, owns, owns_out, must_use, nothrow, longjmps, " &
-             "invalidates, preserves.")
+             "invalidates, preserves, returns_into.")
       continue
     let kw = contractKeys[key]
     if kv.len == 1 or kv[1].strip().len == 0:
@@ -228,7 +229,7 @@ const engineCoreDirectives* = [
   "@counted_by", "@invariant", "@maintains", "@mem", "@move", "@goto_noreturn",
   "@goto_finally", "@goto_backward", "@copy", "@unsafe", "@escapes", "@realloc", "@raii", "@arena",
   "@allocator", "@lock_order", "@drains", "@list", "@contract", "@contracts_for", "@unique",
-  "@refcheck", "@invalidates", "@preserves"]
+  "@refcheck", "@invalidates", "@preserves", "@returns_into"]
 
 proc allKenbiDirectives*(): HashSet[string] =
   ## The COMPLETE set of directive keywords kenbi recognises as the first token of
@@ -320,6 +321,10 @@ proc scanCommentTokens(ctx: var Ctx, toks: ptr CXToken, n: cuint) =
       # the function below may reallocate or release storage reached through these parameters
       # (`@invalidates(buf)`): pointers taken into it before a call are invalid after it.
       ctx.invalidatesSites.add (fileOf(loc), line, pa)
+    of "@returns_into":
+      # the result of the function below points into storage reached through these parameters
+      # (`@returns_into(buf)`); `@returns_into()` declares that it points into none of them.
+      ctx.returnsIntoSites.add (fileOf(loc), line, pa)
     of "@preserves":
       # the function below reallocates and releases nothing reached through these parameters
       # (`@preserves(buf)`); its body is verified against the declaration.

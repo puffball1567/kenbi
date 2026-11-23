@@ -357,6 +357,14 @@ type Ctx* = object  ## module-local state during a single parse (all fields publ
   invalidatesParams*: Table[string, seq[string]] ## function -> what it may reallocate or release
                                     ## the storage of: parameter names, `$N`, `this`, globals
   preservesParams*: Table[string, seq[string]]   ## function -> what it declares it leaves in place
+  returnsIntoSites*: seq[tuple[file: string, line: int, spec: string]] ## `@returns_into(p)` sites
+  returnsInto*: Table[string, seq[string]] ## function -> the parameters whose storage its result
+                                    ## points into (parameter names or `$N`); present and
+                                    ## empty when it declares that it points into none
+  refParamOf*: Table[string, string] ## in the function being lowered: a parameter, or a local
+                                    ## that refers into what one holds -> that parameter's name
+  refReturnsDeclared*: bool         ## ... whether it declares `@returns_into`
+  refReturns*: seq[string]          ## ... and the parameters it names
   refActive*: bool                  ## the function being lowered emits reference events
   refTargets*: HashSet[string]      ## ... its locals that can hold a pointer, reference or
                                     ## iterator into storage something else manages

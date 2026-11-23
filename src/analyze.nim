@@ -785,7 +785,7 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
      ikLockAcquire, ikLockRelease, ikGuardedAccess, ikRequiredLockCall, ikGuardedEscape,
      ikIndirectCall, ikFnAssign,
      ikInitWrite, ikInitRead, ikVariantAccess,
-     ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved: discard
+     ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved, ikRefReturn: discard
   of ikMustUse:
     # the front-end emits this only at a statement-level call whose result is
     # discarded; the callee is declared `@must_use`, so dropping it is the bug.
@@ -4188,7 +4188,7 @@ proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
   ## `goto` does. The promise of a function that declares `@preserves` (ikRefNotPreserved) is
   ## checked whether or not the axis is on: its callers rely on it.
   type
-    Cause = tuple[line, kind: int, callee, obj: string]
+    Cause = tuple[line, kind: int, callee, obj, via: string]
     RefState = object
       dead: bool
       src: Table[string, HashSet[string]]
@@ -4225,12 +4225,15 @@ proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
         of 3:
           if f[3] == "g" and f[2] notin keeps: kind = (if f[2] in changes: 0 else: 1)
         of 2:
-          if f[0] == s.aKey and steps == region: kind = 2
+          # the block that pointer holds, and everything reached through it
+          if f[0] == s.aKey and (steps == region or
+             (steps.len > region.len and steps[0 .. region.len] == region & @["*"])): kind = 2
         else:
           if f[0] == s.aKey and region.len <= steps.len and steps[0 ..< region.len] == region:
             kind = s.off
         if kind >= 0:
-          st.bad[p] = (s.line, kind, s.b, f[2])
+          let via = (if f.len > 4: f[4] else: "")
+          st.bad[p] = (s.line, (if via.len > 0: 1 else: kind), s.b, f[2], via)
           break
   proc walk(stmts: seq[Stmt], st: var RefState, breaks, conts: var seq[RefState]) =
     for s in stmts:
@@ -4240,9 +4243,17 @@ proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
         case s.ik
         of ikRefDerive:
           var now = initHashSet[string]()
-          if s.cKey.len > 0 and s.cKey in st.src: now = st.src[s.cKey]
-          if s.bKey.len > 0: now.incl s.bKey
-          if s.cKey.len > 0 and s.cKey != s.aKey and s.cKey in st.bad: st.bad[s.aKey] = st.bad[s.cKey]
+          var inherited = false
+          var cause: Cause
+          for c in s.cKey.split('\x1e'):
+            if c.len == 0: continue
+            if c in st.src: now.incl st.src[c]
+            if c != s.aKey and c in st.bad and not inherited:
+              inherited = true
+              cause = st.bad[c]
+          for b in s.bKey.split('\x1e'):
+            if b.len > 0: now.incl b
+          if inherited: st.bad[s.aKey] = cause
           else: st.bad.del s.aKey
           if now.len > 0: st.src[s.aKey] = now
           else: st.src.del s.aKey
@@ -4258,7 +4269,14 @@ proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
             let again = (if s.off == 1: "Leave the loop after changing what it goes over, or " &
                                         "loop by index."
                          else: "Take '" & s.a & "' again after the call.")
-            if c.kind == 1:
+            if c.kind == 1 and c.via.len > 0:
+              report(s.line, "REF_UNPROVEN",
+                "'" & s.a & "' was returned by '" & c.via & "', which does not declare what its " &
+                "result points into, and " & callee & " at line " & $c.line & " may reallocate " &
+                "or release what '" & c.obj & "' holds. Declare `@returns_into(<parameter>)` on '" &
+                c.via & "' — with nothing between the parentheses if the result points into none " &
+                "of its arguments. " & again)
+            elif c.kind == 1:
               report(s.line, "REF_UNPROVEN",
                 what & "nothing shows that " & callee & " at line " & $c.line & " leaves that " &
                 "storage in place. If it reallocates and releases nothing there, declare the " &
@@ -4282,6 +4300,15 @@ proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
             (if s.off == 1: "Declare the parameter `@preserves` on " & callee &
                             " if that holds there too, or declare"
              else: "Declare") & " this function `@invalidates(" & s.b & ")` instead.")
+        of ikRefReturn:
+          if axisOn or s.off == 1:
+            report(s.line, "REF_RETURN_UNDECLARED",
+              "this function returns '" & s.a & "', which points into what its parameter '" & s.b &
+              "' holds, " & (if s.off == 1: "but its `@returns_into` does not name '" & s.b & "'"
+                             else: "without declaring it") &
+              ". A caller that keeps the result while that storage is reallocated or released " &
+              "is left with a dangling pointer, and can only be checked if it is told. Declare " &
+              "`@returns_into(" & s.b & ")` above the function.")
         of ikReturn, ikThrow: st.dead = true
         of ikBreak:
           breaks.add st

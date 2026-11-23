@@ -461,6 +461,11 @@ kenbi 能读懂的索引或长度是：变量加减一个常量（`buf[i]`、`bu
   `REF_NOT_PRESERVED`。`const` 参数无需声明。
 - 从全局变量可达的存储可被程序中的任何函数修改；要跨调用持有指向它的指针，被调用的函数必须声明
   `@preserves(<全局变量>)`。
+- 函数上方的 `// @returns_into(param)` 声明其返回值指向经由 `param` 可达的存储内部；调用方得到的
+  指针随后会像从对象中直接读出的指针一样被跟踪（`// @returns_into()`：不指向任何实参内部；
+  `@contract` 块中为 `returns_into:`）。返回此类指针却未声明的函数为 `REF_RETURN_UNDECLARED`。
+  未作任何声明的函数，其返回值可能指向任一指针实参所持有的存储内部：在该实参失效之后使用它为
+  `REF_UNPROVEN`。`strchr`、`memcpy` 等已知会返回指向其实参所在内存块内部的指针。
 
 ### 初始化（`@initcheck`）与带标签联合体（`@typecheck`）
 
@@ -580,7 +585,7 @@ use <var> | free <var> | move <var> | if / else / endif
 外加 `UNKNOWN_RESOURCE` / `STALE_UNSAFE` 卫生检查。在选择加入的轴下：`UNVALIDATED_INDEX`、
 `UNVALIDATED_SIZE`、`INAPPROPRIATE_BOUND`、`INDEX_MAYBE_NEGATIVE`、
 `UNGUARDED_INVARIANT_WRITE`、`INVARIANT_NOT_MAINTAINED`（`@spatial`）、`USE_OF_UNINITIALIZED`
-（`@initcheck`）、`REF_INVALIDATED`、`REF_UNPROVEN`、`REF_NOT_PRESERVED`（`@refcheck`）、`TYPE_CONFUSION`（`@typecheck`），以及 `UNGUARDED_ACCESS`、`GUARDED_ESCAPE`、
+（`@initcheck`）、`REF_INVALIDATED`、`REF_UNPROVEN`、`REF_RETURN_UNDECLARED`、`REF_NOT_PRESERVED`（`@refcheck`）、`TYPE_CONFUSION`（`@typecheck`），以及 `UNGUARDED_ACCESS`、`GUARDED_ESCAPE`、
 `LOCK_LEAKED`、`DOUBLE_LOCK`、`UNLOCK_WITHOUT_LOCK`、`LOCK_NOT_ACQUIRED`、
 `REQUIRED_LOCK_NOT_HELD`、`LOCK_ORDER_VIOLATION`、`SAME_CLASS_NO_ORDER`、
 `UNDECLARED_INDIRECT_CALL`、`UNDECLARED_FN_TARGET`（`@threadsafe`）。循环

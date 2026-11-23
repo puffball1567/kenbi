@@ -511,6 +511,13 @@ by a check on the path (`if (n >= 1)`) or by a declared `@invariant(n >= 1)`.
   `const` parameter needs no declaration.
 - Storage reached from a global can be changed by any function of the program, so a pointer into
   it held across a call needs that function to declare `@preserves(<global>)`.
+- `// @returns_into(param)` above a function declares that its result points into storage reached
+  through `param`, so the caller's copy is followed like a pointer read out of the object
+  (`// @returns_into()`: into none of its arguments; `returns_into:` in a `@contract` block). A
+  function that returns such a pointer without declaring it is `REF_RETURN_UNDECLARED`. The
+  result of a function that declares nothing may point into what any pointer argument holds:
+  using it after that argument is invalidated is `REF_UNPROVEN`. `strchr`, `memcpy` and the
+  like are known to return a pointer into their argument's block.
 
 ### Initialisation (`@initcheck`) and tagged unions (`@typecheck`)
 
@@ -640,7 +647,7 @@ use, or whose only handle is overwritten), `MISSING_COPY_CONTROL` / `SELF_ASSIGN
 rather than dropped), plus `UNKNOWN_RESOURCE` / `STALE_UNSAFE` hygiene checks. Under the opt-in
 axes: `UNVALIDATED_INDEX`, `UNVALIDATED_SIZE`, `INAPPROPRIATE_BOUND`, `INDEX_MAYBE_NEGATIVE`,
 `UNGUARDED_INVARIANT_WRITE`, `INVARIANT_NOT_MAINTAINED` (`@spatial`), `USE_OF_UNINITIALIZED`
-(`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION` (`@typecheck`), and `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
+(`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_RETURN_UNDECLARED`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION` (`@typecheck`), and `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
 `LOCK_LEAKED`, `DOUBLE_LOCK`, `UNLOCK_WITHOUT_LOCK`, `LOCK_NOT_ACQUIRED`,
 `REQUIRED_LOCK_NOT_HELD`, `LOCK_ORDER_VIOLATION`, `SAME_CLASS_NO_ORDER`,
 `UNDECLARED_INDIRECT_CALL`, `UNDECLARED_FN_TARGET` (`@threadsafe`). Loops
