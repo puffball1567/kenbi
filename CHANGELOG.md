@@ -70,11 +70,6 @@ and the JSON output may change in any minor version.
 
 ### Fixed
 
-- `@unique`: a local object passed beside a pointer to a block the calling function allocated
-  is shown distinct even when the local's address is taken more than once; it was reported as
-  `UNIQUE_UNPROVEN`.
-- `@refcheck`: stepping or assigning an iterator whose class lives outside `std` (libstdc++'s
-  `__gnu_cxx::__normal_iterator`) no longer counts as changing the storage it refers into.
 - Bounds: `i++`, `--i`, `i += k` and `i = i ± k` move the bounds of the value they change, as a
   statement or inside an expression (`buf[i++]`, `buf[++i]`), on variables and fields. Before,
   `if (i < n) { i++; buf[i]; }` passed. `i &= K` / `i %= K` bound the value to `K` instead of
