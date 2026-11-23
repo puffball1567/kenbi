@@ -529,6 +529,11 @@ by a check on the path (`if (n >= 1)`) or by a declared `@invariant(n >= 1)`.
   `free`, the standard containers' own methods) and `REF_UNPROVEN` when the call is handed a
   writable pointer or reference to the object and declares nothing. Take the pointer again
   after the call.
+- What is followed: pointer, reference and iterator variables; views (`string_view`, `span`),
+  also when built from their parts; a pointer kept in a member of a local struct or in a local
+  array (each member on its own, the elements of an array together); and closures — a lambda
+  holds a copy of what it captures by value, reads what it captures by reference when its body
+  runs, and its body is read wherever the closure is used.
 - `// @invalidates(param)` / `// @preserves(param)` above a function declare which it is (`this`
   for a method, a global by name; `invalidates:` / `preserves:` in a `@contract` block for a
   library). A `@preserves` body is verified: releasing or reallocating what the parameter holds,
@@ -907,7 +912,7 @@ parsing C/C++ is a replaceable part.
 ## Tests
 
 `tests/*.mc` drive the engine directly (17 cases). `tests/c/*.c` and `tests/cpp/*.cpp` carry
-those scenarios plus the annotation-specific checks in real C and C++ (367 cases); the runner
+those scenarios plus the annotation-specific checks in real C and C++ (369 cases); the runner
 lowers each through libclang and asserts the produced diagnostics — **including their source
 line** — against the `//EXPECT CODE` markers in each file (on the line itself, or
 `//EXPECT CODE@LINE`). A wrong line or a missing/extra

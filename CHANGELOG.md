@@ -25,7 +25,10 @@ and the JSON output may change in any minor version.
   with `// @invalidates(param)` / `// @preserves(param)` (also as `@contract` keys); a
   `@preserves` body is verified. `realloc`, `free` and the standard containers' methods are
   known. Findings: `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED`. The scope reported
-  with each result gains a `references` entry.
+  with each result gains a `references` entry. Followed: pointer, reference and iterator
+  variables, views (also built from their parts), pointers kept in members of local structs
+  and in local arrays, and closures (what a lambda captures, and what its body does where the
+  closure is used).
 - `// @returns_into(param)` (also a `@contract` key) declares that a function's result points
   into storage reached through a parameter, so a pointer obtained from an accessor is followed
   under `@refcheck` like one read out of the object. A function that returns such a pointer

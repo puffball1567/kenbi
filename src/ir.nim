@@ -167,6 +167,7 @@ type
                  ## the locals `cKey` hold when it is a copy or an offset of them.
     ikRefReturn  ## the function returns `a`, which points into what its parameter `b` holds,
                  ## without declaring `@returns_into(b)` (off 1: it declares other parameters).
+                 ## off 1: one element of an array is assigned, so what the others hold stays.
     ikRefUse     ## a use of the local `a` (key `aKey`); off 1: by the range-`for` it stands for.
     ikRefInvalidate ## a call to `b` may have reallocated or released storage: everything at or
                  ## below the steps `bKey` of root `aKey` (off 0 declared or known to, 1 nothing

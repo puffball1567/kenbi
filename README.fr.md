@@ -521,6 +521,12 @@ vérification sur le chemin (`if (n >= 1)`) ou par un `@invariant(n >= 1)` décl
   l'appel le déclare ou est connu pour le faire (`realloc`, `free`, les méthodes des conteneurs
   standard), et `REF_UNPROVEN` quand l'appel reçoit un pointeur ou une référence modifiable vers
   l'objet et ne déclare rien. Reprenez le pointeur après l'appel.
+- Ce qui est suivi : les variables pointeur, référence et itérateur ; les vues (`string_view`,
+  `span`), y compris construites à partir de leurs parties ; un pointeur conservé dans un membre
+  d'une structure locale ou dans un tableau local (chaque membre séparément, les éléments d'un
+  tableau ensemble) ; et les fermetures — une lambda détient une copie de ce qu'elle capture par
+  valeur, lit ce qu'elle capture par référence quand son corps s'exécute, et son corps est lu
+  partout où la fermeture est utilisée.
 - `// @invalidates(param)` / `// @preserves(param)` au-dessus d'une fonction déclarent ce qu'il en
   est (`this` pour une méthode, une variable globale par son nom ; `invalidates:` / `preserves:`
   dans un bloc `@contract` pour une bibliothèque). Le corps d'une fonction `@preserves` est
@@ -925,7 +931,7 @@ front-end, si bien que l'analyse syntaxique du C/C++ est une partie remplaçable
 ## Tests
 
 `tests/*.mc` pilotent directement le moteur (17 cas). `tests/c/*.c` et `tests/cpp/*.cpp` portent
-ces scénarios plus les contrôles spécifiques aux annotations en C et C++ réels (367 cas) ; le
+ces scénarios plus les contrôles spécifiques aux annotations en C et C++ réels (369 cas) ; le
 lanceur abaisse chacun via libclang et vérifie les diagnostics produits — **y compris leur ligne
 source** — par rapport aux marqueurs `//EXPECT CODE` de chaque fichier (sur la ligne elle-même,
 ou `//EXPECT CODE@LINE`). Une mauvaise ligne ou un diagnostic manquant / superflu fait échouer la

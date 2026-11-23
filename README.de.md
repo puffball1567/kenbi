@@ -532,6 +532,12 @@ durch eine Prüfung auf dem Pfad (`if (n >= 1)`) oder ein deklariertes `@invaria
   die Methoden der Standardcontainer), und `REF_UNPROVEN`, wenn der Aufruf einen schreibbaren
   Zeiger oder eine Referenz auf das Objekt erhält und nichts deklariert. Den Zeiger nach dem
   Aufruf neu holen.
+- Was verfolgt wird: Zeiger-, Referenz- und Iteratorvariablen; Sichten (`string_view`, `span`),
+  auch wenn sie aus ihren Teilen gebaut werden; ein Zeiger in einem Member einer lokalen Struktur
+  oder in einem lokalen Array (jeder Member für sich, die Elemente eines Arrays gemeinsam); und
+  Closures — ein Lambda hält eine Kopie dessen, was es per Wert erfasst, liest das per Referenz
+  Erfasste, wenn sein Rumpf läuft, und sein Rumpf wird überall dort gelesen, wo die Closure
+  verwendet wird.
 - `// @invalidates(param)` / `// @preserves(param)` über einer Funktion deklarieren, was zutrifft
   (`this` für eine Methode, eine globale Variable mit ihrem Namen; `invalidates:` / `preserves:`
   in einem `@contract`-Block für eine Bibliothek). Ein `@preserves`-Rumpf wird geprüft: Freigeben
@@ -940,7 +946,7 @@ IR, sodass das Parsen von C/C++ ein austauschbarer Teil ist.
 ## Tests
 
 `tests/*.mc` treiben die Engine direkt an (17 Fälle). `tests/c/*.c` und `tests/cpp/*.cpp` tragen
-diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (367 Fälle); der
+diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (369 Fälle); der
 Runner überführt jedes über libclang und prüft die erzeugten Diagnosen — **einschließlich ihrer
 Quellzeile** — gegen die `//EXPECT CODE`-Marker in jeder Datei (in der Zeile selbst oder
 `//EXPECT CODE@LINE`). Eine falsche Zeile oder eine fehlende / überzählige

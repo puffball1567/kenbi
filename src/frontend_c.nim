@@ -2336,18 +2336,66 @@ proc refDerivation(ctx: Ctx, decl, rhs: CXCursor): tuple[sources, inherits: seq[
   if h == 0: return
   let pc = refPlainCall(rhs)
   if pc.has: return ctx.refCallSources(pc.call)
-  let u = refStrip(rhs)
+  var u = refStrip(rhs)
   var region: RefPath
   if h == 3:
+    # built from one argument of another type (`span<int> sp(v)`): a view of it, not a copy
+    let raw = unwrap(rhs)
+    if clang_getCursorKind(raw) == ckCallExpr and
+       clang_getCursorKind(clang_getCursorReferenced(raw)) == ckConstructor and
+       clang_Cursor_getNumArguments(raw) == 1 and
+       $clang_getTypeSpelling(clang_getCanonicalType(clang_getCursorType(
+         clang_Cursor_getArgument(raw, 0)))) !=
+       $clang_getTypeSpelling(clang_getCanonicalType(clang_getCursorType(decl))): u = raw
     if clang_getCursorKind(u) == ckDeclRefExpr:
       if referencedUsr(u) in ctx.refTargets: result.inherits.add referencedUsr(u)
       return
     if clang_getCursorKind(u) != ckCallExpr: return
+    let ctor = clang_getCursorReferenced(u)
+    if clang_getCursorKind(ctor) == ckConstructor:
+      # a view built from its parts (`string_view(s.data(), n)`, `span(v)`): it refers into
+      # what each pointer or iterator it is given points into, and into each object it is
+      # given by reference
+      for ai in 0 ..< int(clang_Cursor_getNumArguments(u)):
+        let arg = clang_Cursor_getArgument(u, cuint(ai))
+        var part: RefPath
+        let pk = (if ai < int(clang_Cursor_getNumArguments(ctor)):
+                    canonKind(clang_Cursor_getArgument(ctor, cuint(ai)))
+                  else: canonKind(arg))
+        if pk == tyPointer or (pk == tyRecord and refHandle(arg) == 3):
+          part = ctx.refPointee(arg)
+        elif pk in [tyLValueReference, tyRValueReference] and canonKind(arg) == tyRecord and
+             clang_getCursorKind(refStrip(arg)) in [ckDeclRefExpr, ckMemberRefExpr]:
+          part = ctx.refLvalue(arg)
+          if part.ok: part.steps.add [".#", "*"]
+        else: continue
+        if refSource(part).len > 0: result.sources.add refSource(part)
+        if part.ok and part.root in ctx.refTargets: result.inherits.add part.root
+      return
     region = ctx.refCallRegion(u)
   elif h == 2: region = ctx.refLvalue(rhs)
   else: region = ctx.refPointee(rhs)
   if refSource(region).len > 0: result.sources.add refSource(region)
   if region.ok and region.root in ctx.refTargets: result.inherits.add region.root
+
+proc refAggSlot(ctx: Ctx, e: CXCursor): tuple[key, root: string, steps: seq[string],
+                                               element: bool]
+
+proc refInitLeaves(n: CXCursor, res: var seq[CXCursor]) =
+  ## The expressions of a brace initialiser, nested ones included.
+  for ch in collectChildren(n):
+    if clang_getCursorKind(unwrap(ch)) == 119: refInitLeaves(unwrap(ch), res)   # InitListExpr
+    elif clang_isExpression(clang_getCursorKind(ch)) != 0: res.add ch
+
+proc refInitDerivation(ctx: Ctx, init: CXCursor): tuple[sources, inherits: seq[string]] =
+  ## What a struct or array initialised with braces holds references into: whatever any of its
+  ## initialisers does.
+  var leaves: seq[CXCursor]
+  refInitLeaves(init, leaves)
+  for e in leaves:
+    let d = ctx.refDerivation(e, e)
+    result.sources.add d.sources
+    result.inherits.add d.inherits
 
 proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
   ## What the reference-validity events of the function being lowered need: which locals can
@@ -2378,17 +2426,30 @@ proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
   for n in promised:
     if n == "this": ctx.refPromised["this"] = "this"
     elif n notin pnames and not n.startsWith("$"): ctx.refPromisedGlobals.incl n
+  ctx.refAggFields = initTable[string, seq[tuple[key: string, steps: seq[string]]]]()
+  ctx.refLambdas = initTable[string, CXCursor]()
   var stores: seq[tuple[decl, value: CXCursor]]
-  proc collect(ctx: var Ctx, n: CXCursor, stores: var seq[tuple[decl, value: CXCursor]]) =
+  var memberStores: seq[tuple[target, value: CXCursor]]
+  var braceInits: seq[tuple[decl, init: CXCursor]]
+  proc collect(ctx: var Ctx, n: CXCursor, stores: var seq[tuple[decl, value: CXCursor]],
+               memberStores: var seq[tuple[target, value: CXCursor]],
+               braceInits: var seq[tuple[decl, init: CXCursor]]) =
     let k = clang_getCursorKind(n)
-    if k == ckLambdaExpr: return
     let kids = collectChildren(n)
     if k == ckVarDecl and kids.len > 0 and clang_isExpression(clang_getCursorKind(kids[^1])) != 0:
-      if hasAutomaticStorage(n): stores.add (n, kids[^1])
+      if hasAutomaticStorage(n):
+        if clang_getCursorKind(refStrip(kids[^1])) == ckLambdaExpr:
+          # a closure: it holds what it captured, and runs its body wherever it is used
+          ctx.refLambdas[usr(n)] = refStrip(kids[^1])
+          ctx.refTargets.incl usr(n)
+        elif clang_getCursorKind(unwrap(kids[^1])) == 119: braceInits.add (n, unwrap(kids[^1]))
+        else: stores.add (n, kids[^1])
     elif k == ckBinaryOperator and kids.len == 2 and ctx.binOperator(n) == "=":
       let l = unwrap(kids[0])
       if clang_getCursorKind(l) == ckDeclRefExpr and referencedUsr(l) in ctx.uqLocals:
         stores.add (clang_getCursorReferenced(l), kids[1])
+      elif clang_getCursorKind(l) in [ckMemberRefExpr, ckArraySubscriptExpr]:
+        memberStores.add (l, kids[1])
     elif k == ckCallExpr and spelling(n) == "operator=" and clang_Cursor_getNumArguments(n) == 2:
       let l = unwrap(clang_Cursor_getArgument(n, 0))
       if clang_getCursorKind(l) == ckDeclRefExpr and referencedUsr(l) in ctx.uqLocals:
@@ -2406,11 +2467,29 @@ proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
         ctx.refRangeBodies[startOffset(kids[^1])] =
           (synth, ctx.cursorTokens(kids[^2]).join(""), (if refers: usr(v) else: ""),
            spelling(v), refSource(region), startLine(n))
-    for ch in kids: ctx.collect(ch, stores)
-  ctx.collect(body, stores)
+    for ch in kids: ctx.collect(ch, stores, memberStores, braceInits)
+  ctx.collect(body, stores, memberStores, braceInits)
   var grown = true
   while grown:
     grown = false
+    for b in braceInits:
+      # a local struct or array initialised with braces: followed as a whole
+      let key = usr(b.decl) & "\x1d"
+      if key in ctx.refTargets: continue
+      let d = ctx.refInitDerivation(b.init)
+      if d.sources.len > 0 or d.inherits.len > 0:
+        ctx.refTargets.incl key
+        ctx.refAggFields.mgetOrPut(usr(b.decl), @[]).add (key, newSeq[string]())
+        grown = true
+    for st in memberStores:
+      # a member of a local struct, or an element of a local array, that is given a reference
+      let slot = ctx.refAggSlot(st.target)
+      if slot.key.len == 0 or slot.key in ctx.refTargets: continue
+      let d = ctx.refDerivation(st.target, st.value)
+      if d.sources.len > 0 or d.inherits.len > 0:
+        ctx.refTargets.incl slot.key
+        ctx.refAggFields.mgetOrPut(slot.root, @[]).add (slot.key, slot.steps)
+        grown = true
     for st in stores:
       let key = usr(st.decl)
       if key notin ctx.refTargets:
@@ -2545,7 +2624,9 @@ proc refCallEffects(ctx: Ctx, call: CXCursor, outp: var seq[Stmt]) =
   # a function of the program can reach its globals without being handed anything
   if ind.isIndirect or ((dk in refMethodKinds or dk in [ckFunctionDecl, ckConstructor]) and not std and
      clang_Location_isInSystemHeader(clang_getCursorLocation(decl)) == 0 and
-     callee notin knownBorrowFns and callee notin ctx.deallocators):
+     callee notin knownBorrowFns and callee notin ctx.deallocators and
+     not (dk in refMethodKinds and spelling(clang_getCursorSemanticParent(decl)).len == 0)):
+    # (a closure's call operator is not one of them: its body is read where it runs)
     var keeps, changes: seq[string]
     for n in names:
       keeps.add ctx.preservesParams.getOrDefault(n, @[])
@@ -2557,12 +2638,79 @@ proc refCallEffects(ctx: Ctx, call: CXCursor, outp: var seq[Stmt]) =
         outp.add emit(ikRefNotPreserved, line, a = g, b = g, cKey = callee,
                       off = (if g in changes: 0 else: 1))
 
+proc refAggSlot(ctx: Ctx, e: CXCursor): tuple[key, root: string, steps: seq[string],
+                                               element: bool] =
+  ## The member of a local struct, or the element of a local array, that the lvalue `e` names
+  ## — storage inside the local itself, not something reached through a pointer. `element`:
+  ## an array is indexed on the way, so the key stands for every element.
+  let p = ctx.refLvalue(e)
+  if not p.ok or p.global or p.root == "this" or "*" in p.steps or ".#" in p.steps: return
+  if p.root notin ctx.uqLocals or p.root in ctx.uqParams: return
+  var u = unwrap(e)
+  for _ in 0 ..< 16:
+    let k = clang_getCursorKind(u)
+    if k == ckArraySubscriptExpr: result.element = true
+    if k notin [ckMemberRefExpr, ckArraySubscriptExpr]: break
+    let kids = collectChildren(u)
+    if kids.len == 0: break
+    u = unwrap(kids[0])
+  if p.steps.len == 0 and not result.element: return ("", "", @[], false)   # the variable itself
+  result.root = p.root
+  result.steps = p.steps
+  result.key = p.root & "\x1d" & p.steps.join("/")
+
+proc refEvents(ctx: Ctx, n: CXCursor, outp: var seq[Stmt])
+
+var refLambdaDepth {.threadvar.}: int
+
+proc refLambdaBody(ctx: Ctx, lambda: CXCursor, outp: var seq[Stmt]) =
+  ## The events of a lambda's body, at a place where it may run: where it is called, or handed
+  ## to something that may call it. The body is read as one sequence — which of its branches
+  ## run is not followed — so what any path through it invalidates counts.
+  if refLambdaDepth >= 2: return                  # a closure that refers to itself
+  let kids = collectChildren(lambda)
+  if kids.len == 0 or clang_getCursorKind(kids[^1]) != ckCompoundStmt: return
+  inc refLambdaDepth
+  ctx.refEvents(kids[^1], outp)
+  dec refLambdaDepth
+
+proc refLambdaCaptures(ctx: Ctx, lambda: CXCursor): seq[string] =
+  ## The locals holding references that the lambda captures BY VALUE — a copy that stays what
+  ## it was when the closure was made. (One captured by reference is read when the body runs.)
+  let toks = ctx.cursorTokens(lambda)
+  var byRefDefault = false
+  var byRef, byValue: seq[string]
+  var i = 1
+  while i < toks.len and toks[i] != "]":
+    if toks[i] == "&":
+      if i + 1 < toks.len and toks[i + 1] notin [",", "]"]:
+        byRef.add toks[i + 1]
+        inc i
+      else: byRefDefault = true
+    elif toks[i] notin [",", "="]: byValue.add toks[i]
+    inc i
+  let first = startOffset(lambda)
+  let last = endOffset(lambda)
+  var seen = initHashSet[string]()
+  proc walk(ctx: Ctx, n: CXCursor, res: var seq[string], seen: var HashSet[string]) =
+    if clang_getCursorKind(n) == ckDeclRefExpr:
+      let key = referencedUsr(n)
+      let at = startOffset(clang_getCursorReferenced(n))
+      if key in ctx.refTargets and key notin seen and not (at >= first and at < last):
+        seen.incl key
+        let name = spelling(n)
+        if name in byValue or (name notin byRef and not byRefDefault): res.add key
+    for ch in collectChildren(n): ctx.walk(ch, res, seen)
+  ctx.walk(lambda, result, seen)
+
 proc refEvents(ctx: Ctx, n: CXCursor, outp: var seq[Stmt]) =
   ## The reference-validity events of one expression or declaration, in evaluation order: the
   ## uses of the locals that hold references, what each call may invalidate, and what an
   ## assignment makes its target refer into.
   let k = clang_getCursorKind(n)
-  if k == ckLambdaExpr: return
+  if k == ckLambdaExpr:
+    ctx.refLambdaBody(n, outp)                    # written where it is handed over: it may run
+    return
   let kids = collectChildren(n)
   let line = startLine(n)
   proc derive(ctx: Ctx, decl: CXCursor, disp: string, rhs: CXCursor, line: int,
@@ -2579,18 +2727,53 @@ proc refEvents(ctx: Ctx, n: CXCursor, outp: var seq[Stmt]) =
   case k
   of ckDeclRefExpr:
     let key = referencedUsr(n)
+    if key in ctx.refLambdas: ctx.refLambdaBody(ctx.refLambdas[key], outp)   # it may run here
     if key in ctx.refTargets: outp.add emit(ikRefUse, line, a = spelling(n), aKey = key)
+    # a struct or an array used as a whole: every reference kept in it
+    for f in ctx.refAggFields.getOrDefault(key, @[]):
+      outp.add emit(ikRefUse, line, a = spelling(n), aKey = f.key)
     return
+  of ckMemberRefExpr, ckArraySubscriptExpr:
+    # a member of a local struct that keeps references: the ones in that member only
+    let slot = ctx.refAggSlot(n)
+    if slot.key.len > 0 and slot.root in ctx.refAggFields:
+      let disp = ctx.cursorTokens(n).join("")
+      for f in ctx.refAggFields[slot.root]:
+        let m = min(f.steps.len, slot.steps.len)
+        if f.steps[0 ..< m] == slot.steps[0 ..< m]:
+          outp.add emit(ikRefUse, line, a = disp, aKey = f.key)
+      if k == ckArraySubscriptExpr and kids.len == 2: ctx.refEvents(kids[1], outp)
+      return
   of ckVarDecl:
+    if usr(n) in ctx.refLambdas:
+      # the closure holds a copy of each reference it captures by value
+      var held: seq[string]
+      for key in ctx.refLambdaCaptures(ctx.refLambdas[usr(n)]): held.add key
+      outp.add emit(ikRefDerive, line, a = spelling(n), aKey = usr(n),
+                    cKey = held.join(refGroupSep))
+      return
     for ch in kids: ctx.refEvents(ch, outp)
-    if kids.len > 0 and clang_isExpression(clang_getCursorKind(kids[^1])) != 0:
+    if (usr(n) & "\x1d") in ctx.refTargets and kids.len > 0 and
+       clang_getCursorKind(unwrap(kids[^1])) == 119:
+      let d = ctx.refInitDerivation(unwrap(kids[^1]))
+      outp.add emit(ikRefDerive, line, a = spelling(n), aKey = usr(n) & "\x1d",
+                    bKey = d.sources.join(refGroupSep), cKey = d.inherits.join(refGroupSep))
+    elif kids.len > 0 and clang_isExpression(clang_getCursorKind(kids[^1])) != 0:
       ctx.derive(n, spelling(n), kids[^1], line, outp)
     return
   of ckBinaryOperator:
     if kids.len == 2 and ctx.binOperator(n) == "=":
       ctx.refEvents(kids[1], outp)
       let l = unwrap(kids[0])
+      let slot = (if clang_getCursorKind(l) in [ckMemberRefExpr, ckArraySubscriptExpr]:
+                    ctx.refAggSlot(l) else: (key: "", root: "", steps: newSeq[string](), element: false))
       if rebindable(l): ctx.derive(clang_getCursorReferenced(l), spelling(l), kids[1], line, outp)
+      elif slot.key.len > 0 and slot.key in ctx.refTargets:
+        # the member is given a new value: what it held before is no longer used through it
+        let d = ctx.refDerivation(l, kids[1])
+        outp.add emit(ikRefDerive, line, a = ctx.cursorTokens(l).join(""), aKey = slot.key,
+                      bKey = d.sources.join(refGroupSep), cKey = d.inherits.join(refGroupSep),
+                      off = (if slot.element: 1 else: 0))
       else: ctx.refEvents(kids[0], outp)
       return
   of ckCallExpr:
@@ -2618,6 +2801,48 @@ proc refRangeBody(ctx: Ctx, body: CXCursor, lowered: seq[Stmt]): seq[Stmt] =
     result.add emit(ikRefDerive, rb.line, a = rb.varDisp, aKey = rb.varKey, bKey = rb.source)
   result.add lowered
   result.add emit(ikRefUse, rb.line, a = rb.disp, aKey = rb.synth, off = 1)
+
+proc withoutRefEvents(stmts: seq[Stmt]): seq[Stmt] =
+  ## A lowered body without its reference-validity events. A lambda's body is spliced in where
+  ## the lambda is called; its reference events are read from the source at each place the
+  ## closure is used instead (`refLambdaBody`), a call among them, so they are not kept twice.
+  for s in stmts:
+    case s.kind
+    of stInstr:
+      if s.ik notin {ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved, ikRefReturn}:
+        result.add s
+    of stIf:
+      var c = Stmt(line: s.line, kind: stIf)
+      c[] = s[]
+      c.thenBody = withoutRefEvents(s.thenBody)
+      c.elseBody = withoutRefEvents(s.elseBody)
+      result.add c
+    of stLoop:
+      var c = Stmt(line: s.line, kind: stLoop)
+      c[] = s[]
+      c.loopBody = withoutRefEvents(s.loopBody)
+      # the loop's own header statements start where they did, less what was removed before them
+      var before = 0
+      for i in 0 ..< min(s.headerAt, s.loopBody.len):
+        let h = s.loopBody[i]
+        if h.kind == stInstr and
+           h.ik in {ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved, ikRefReturn}: inc before
+      c.headerAt = s.headerAt - before
+      result.add c
+    of stSwitch:
+      var c = Stmt(line: s.line, kind: stSwitch)
+      c[] = s[]
+      c.cases = @[]
+      for body in s.cases: c.cases.add withoutRefEvents(body)
+      result.add c
+    of stTry:
+      var c = Stmt(line: s.line, kind: stTry)
+      c[] = s[]
+      c.tryBody = withoutRefEvents(s.tryBody)
+      c.handlers = @[]
+      for h in s.handlers: c.handlers.add withoutRefEvents(h)
+      result.add c
+    of stLabel: result.add s
 
 proc refStmtEvents(ctx: Ctx, c: CXCursor, outp, post: var seq[Stmt]) =
   ## The events of the part of statement `c` that runs when control reaches it (as for
@@ -2805,12 +3030,13 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
       if ok.len >= 1:
         let obj = unwrap(ok[0])
         if clang_getCursorKind(obj) == ckDeclRefExpr and referencedUsr(obj) in ctx.lambdaBodies:
-          for st in ctx.lambdaBodies[referencedUsr(obj)]: outp.add relined(st, line)
+          for st in withoutRefEvents(ctx.lambdaBodies[referencedUsr(obj)]):
+            outp.add relined(st, line)
           return
         if clang_getCursorKind(obj) == ckLambdaExpr:
           let lb = collectChildren(obj)
           if lb.len >= 1:
-            for st in ctx.lowerBody(@[lb[^1]]): outp.add st
+            for st in withoutRefEvents(ctx.lowerBody(@[lb[^1]])): outp.add st
           return
   if callee == "operator=":
     let ok = collectChildren(call)

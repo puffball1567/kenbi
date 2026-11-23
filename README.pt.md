@@ -515,6 +515,11 @@ verificação no caminho (`if (n >= 1)`) ou por um `@invariant(n >= 1)` declarad
   `REF_INVALIDATED` quando a chamada declara isso ou é sabido que o faz (`realloc`, `free`, os
   métodos dos contêineres padrão), e `REF_UNPROVEN` quando a chamada recebe um ponteiro ou uma
   referência modificável ao objeto e nada declara. Obtenha o ponteiro de novo após a chamada.
+- O que é seguido: variáveis ponteiro, referência e iterador; visões (`string_view`, `span`),
+  também quando construídas a partir de suas partes; um ponteiro guardado em um membro de uma
+  estrutura local ou em um array local (cada membro separadamente, os elementos de um array em
+  conjunto); e closures — uma lambda guarda uma cópia do que captura por valor, lê o que captura
+  por referência quando seu corpo executa, e seu corpo é lido onde quer que a closure seja usada.
 - `// @invalidates(param)` / `// @preserves(param)` acima de uma função declaram qual é o caso
   (`this` para um método, uma variável global pelo nome; `invalidates:` / `preserves:` em um bloco
   `@contract` para uma biblioteca). O corpo de uma função `@preserves` é verificado: liberar ou
@@ -909,7 +914,7 @@ front-end, de modo que analisar C/C++ é uma peça substituível.
 ## Testes
 
 `tests/*.mc` acionam o motor diretamente (17 casos). `tests/c/*.c` e `tests/cpp/*.cpp` carregam
-esses cenários mais as verificações específicas de anotações em C e C++ reais (367 casos); o
+esses cenários mais as verificações específicas de anotações em C e C++ reais (369 casos); o
 runner rebaixa cada um via libclang e verifica os diagnósticos produzidos — **incluindo a sua
 linha de origem** — contra os marcadores `//EXPECT CODE` em cada arquivo (na própria linha, ou
 `//EXPECT CODE@LINE`). Uma linha errada ou um diagnóstico faltante / excedente faz a suíte

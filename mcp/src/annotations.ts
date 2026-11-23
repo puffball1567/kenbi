@@ -353,6 +353,12 @@ the declared intent and reports where they disagree.
   methods), and \`REF_UNPROVEN\` (RED until shown) when the call is handed a writable pointer
   or reference to the object and declares nothing. A range-\`for\` counts as holding iterators
   into what it goes over. Fix: take the pointer again after the call.
+- What is followed: pointer, reference and iterator variables; views (\`string_view\`,
+  \`span\`), also when built from their parts (\`string_view(s.data(), n)\`); a pointer kept in a
+  member of a local struct (\`slice.ptr = buf->data\`) or in a local array — each member on its
+  own, the elements of an array together; and closures: a lambda holds a copy of what it
+  captures by value, reads what it captures by reference when its body runs, and its body is
+  read wherever the closure is used (called, or handed to something that may call it).
 - \`// @invalidates(<param>)\` / \`// @preserves(<param>)\` above a function declare which it
   is — \`this\` for a method, a global by name; \`invalidates:\` / \`preserves:\` in a
   \`@contract\` block for a library. A \`@preserves\` body is verified: releasing or

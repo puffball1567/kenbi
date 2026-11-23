@@ -361,6 +361,11 @@ type Ctx* = object  ## module-local state during a single parse (all fields publ
   returnsInto*: Table[string, seq[string]] ## function -> the parameters whose storage its result
                                     ## points into (parameter names or `$N`); present and
                                     ## empty when it declares that it points into none
+  refAggFields*: Table[string, seq[tuple[key: string, steps: seq[string]]]]
+                                    ## in the function being lowered: a local struct or array ->
+                                    ## the members of it that hold a reference into managed
+                                    ## storage, each followed under a key of its own
+  refLambdas*: Table[string, CXCursor] ## ... a local bound to a lambda -> the lambda
   refParamOf*: Table[string, string] ## in the function being lowered: a parameter, or a local
                                     ## that refers into what one holds -> that parameter's name
   refReturnsDeclared*: bool         ## ... whether it declares `@returns_into`

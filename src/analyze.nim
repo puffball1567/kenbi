@@ -4263,7 +4263,11 @@ proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
               cause = st.bad[c]
           for b in s.bKey.split('\x1e'):
             if b.len > 0: now.incl b
-          if inherited: st.bad[s.aKey] = cause
+          if s.off == 1:
+            # one element among several: the others keep what they hold
+            if s.aKey in st.src: now.incl st.src[s.aKey]
+            if inherited and s.aKey notin st.bad: st.bad[s.aKey] = cause
+          elif inherited: st.bad[s.aKey] = cause
           else: st.bad.del s.aKey
           if now.len > 0: st.src[s.aKey] = now
           else: st.src.del s.aKey
