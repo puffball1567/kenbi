@@ -20,9 +20,10 @@ GENDIR = os.path.join(ROOT, "mcp", "src", "generated")
 OUT = os.path.join(GENDIR, "findings.ts")
 CATALOGUE_OUT = os.path.join(GENDIR, "catalogue.ts")
 DIRS = {"A": "juliet", "B": "juliet_annotated", "C": "juliet_rewritten"}
-AXIS_ORDER = ["ownership", "spatial", "init", "typecheck", "concurrency"]
+AXIS_ORDER = ["ownership", "spatial", "init", "typecheck", "refcheck", "concurrency"]
 AXIS_TITLE = {"ownership": "Ownership & lifetime", "spatial": "Spatial (bounds)",
               "init": "Initialisation", "typecheck": "Type confusion",
+              "refcheck": "References into buffers and containers",
               "concurrency": "Concurrency (locks / deadlock)"}
 
 # Leading explanatory comments the code snippet does not need (the STATE sentence becomes `why`;

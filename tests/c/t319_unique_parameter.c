@@ -16,6 +16,7 @@ char g_buf[16];
 
 // @unique(dst)
 // @borrows(dst)
+// @borrows(src)
 void copy_into(char *dst, const char *src, unsigned n);
 
 // the same pointer twice
@@ -110,6 +111,27 @@ void allocation_and_parameter(const char *q) {
   if (!b) return;
   copy_into(b, q, 8);
   free(b);
+}
+
+// ... and a local object is not a block allocated here, however often its address is taken
+// @kenbi
+void local_and_allocation(void) {
+  /* @mem t::c { alloc: malloc, free: free, owner: b } */
+  char *b = malloc(8);
+  if (!b) return;
+  char tmp[8];
+  copy_into(tmp, b, 8);
+  copy_into(b, tmp, 8);
+  free(b);
+}
+
+// ... but a pointer that may be anything can point at the local
+// @kenbi
+void local_and_unknown_pointer(struct Ctx *c) {
+  char tmp[8];
+  char *p = c->buf;
+  copy_into(tmp, p, 8);                           //EXPECT UNIQUE_UNPROVEN
+  copy_into(p, tmp, 8);                           //EXPECT UNIQUE_UNPROVEN
 }
 
 // the body keeps the pointer

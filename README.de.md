@@ -940,7 +940,7 @@ IR, sodass das Parsen von C/C++ ein austauschbarer Teil ist.
 ## Tests
 
 `tests/*.mc` treiben die Engine direkt an (17 Fälle). `tests/c/*.c` und `tests/cpp/*.cpp` tragen
-diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (349 Fälle); der
+diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (367 Fälle); der
 Runner überführt jedes über libclang und prüft die erzeugten Diagnosen — **einschließlich ihrer
 Quellzeile** — gegen die `//EXPECT CODE`-Marker in jeder Datei (in der Zeile selbst oder
 `//EXPECT CODE@LINE`). Eine falsche Zeile oder eine fehlende / überzählige

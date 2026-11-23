@@ -152,8 +152,10 @@ type
                  ## (UNIQUE_ALIASED); 2 nothing shows them distinct (UNIQUE_UNPROVEN); 0 decided
                  ## from what the two pointer variables are bound to on this path — bound to
                  ## one allocation is aliased, to two distinct ones is distinct, anything else
-                 ## unproven. `off2` bit 0 / bit 1: `a` / `b` is a parameter of the caller that
-                 ## still holds the value it was called with.
+                 ## unproven; 3 one of the two is a local object, and the other, a pointer
+                 ## variable, is distinct from it when bound to a block this function allocated.
+                 ## `off2` bit 0 / bit 1: `a` / `b` is a parameter of the caller that still holds
+                 ## the value it was called with; bit 2: `a` is the local object of an `off` 3.
     ikUniqueEscape ## the body of a function lets `a`, which is or derives from its `@unique`
                  ## or `@borrows` (off2 = 1) parameter `b`, outlive the call: off 0 it stores it,
                  ## 1 it passes it to `cKey` (parameter `bKey`), which declares nothing about

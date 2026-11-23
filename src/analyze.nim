@@ -1049,6 +1049,16 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
         elif a.fresh(oa) and ob < 0 and (s.off2 and 2) != 0: verdict = -1
         elif a.fresh(ob) and oa < 0 and (s.off2 and 1) != 0: verdict = -1
         else: verdict = 2
+      elif verdict == 3:
+        # a local object beside a pointer variable (the unique argument is the object when
+        # off2 has bit 4): a block allocated in this function is not that local
+        proc freshBlock(a: Analyzer, key: string): bool =
+          if key in a.unknownOrigin or key in a.ambiguousHandles: return false
+          let o = a.varOrigin.getOrDefault(key, -1)
+          o >= 0 and o notin a.contractOrigins and o notin a.borrowedOrigins and
+            o notin a.undeclaredParams and o notin a.fieldOrigins and
+            o notin a.conflatedOrigins and o notin a.listOrigins and o notin a.arenaObjects
+        verdict = (if a.freshBlock(if (s.off2 and 4) != 0: s.bKey else: s.aKey): -1 else: 2)
       let f = s.cKey.split('|')
       if verdict == 1:
         a.addDiag(s.line, "UNIQUE_ALIASED",

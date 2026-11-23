@@ -909,7 +909,7 @@ front-end, de modo que analisar C/C++ é uma peça substituível.
 ## Testes
 
 `tests/*.mc` acionam o motor diretamente (17 casos). `tests/c/*.c` e `tests/cpp/*.cpp` carregam
-esses cenários mais as verificações específicas de anotações em C e C++ reais (349 casos); o
+esses cenários mais as verificações específicas de anotações em C e C++ reais (367 casos); o
 runner rebaixa cada um via libclang e verifica os diagnósticos produzidos — **incluindo a sua
 linha de origem** — contra os marcadores `//EXPECT CODE` em cada arquivo (na própria linha, ou
 `//EXPECT CODE@LINE`). Uma linha errada ou um diagnóstico faltante / excedente faz a suíte

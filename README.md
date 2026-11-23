@@ -907,7 +907,7 @@ parsing C/C++ is a replaceable part.
 ## Tests
 
 `tests/*.mc` drive the engine directly (17 cases). `tests/c/*.c` and `tests/cpp/*.cpp` carry
-those scenarios plus the annotation-specific checks in real C and C++ (349 cases); the runner
+those scenarios plus the annotation-specific checks in real C and C++ (367 cases); the runner
 lowers each through libclang and asserts the produced diagnostics — **including their source
 line** — against the `//EXPECT CODE` markers in each file (on the line itself, or
 `//EXPECT CODE@LINE`). A wrong line or a missing/extra

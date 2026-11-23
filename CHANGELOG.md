@@ -39,6 +39,10 @@ and the JSON output may change in any minor version.
   by file, code and message, so they are followed as code moves. With a baseline, JSON findings
   carry `baseline` (`new` / `known`) and SARIF results `baselineState`.
 
+- `explain_finding` (MCP) has worked examples for the new findings: `UNIQUE_ALIASED`,
+  `BORROW_ESCAPES`, `REF_INVALIDATED` (C and C++), `REF_UNPROVEN`, `REF_NOT_PRESERVED` and
+  `REF_RETURN_UNDECLARED`. The three-state corpus they are generated from has 61 entries.
+
 ### Changed
 
 - Bounds (`@spatial`): an index or a length that is not a variable plus or minus a constant — a
@@ -66,6 +70,11 @@ and the JSON output may change in any minor version.
 
 ### Fixed
 
+- `@unique`: a local object passed beside a pointer to a block the calling function allocated
+  is shown distinct even when the local's address is taken more than once; it was reported as
+  `UNIQUE_UNPROVEN`.
+- `@refcheck`: stepping or assigning an iterator whose class lives outside `std` (libstdc++'s
+  `__gnu_cxx::__normal_iterator`) no longer counts as changing the storage it refers into.
 - Bounds: `i++`, `--i`, `i += k` and `i = i ± k` move the bounds of the value they change, as a
   statement or inside an expression (`buf[i++]`, `buf[++i]`), on variables and fields. Before,
   `if (i < n) { i++; buf[i]; }` passed. `i &= K` / `i %= K` bound the value to `K` instead of

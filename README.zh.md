@@ -830,7 +830,7 @@ kenbi 无法建模的内容会被拒绝而不是被跳过：`UNSTRUCTURED_GOTO`�
 ## 测试
 
 `tests/*.mc` 直接驱动引擎（17 个用例）。`tests/c/*.c` 与 `tests/cpp/*.cpp` 以真实
-C 和 C++ 承载这些场景外加注解专属的检查（349 个用例）；运行器通过 libclang 下降每个
+C 和 C++ 承载这些场景外加注解专属的检查（367 个用例）；运行器通过 libclang 下降每个
 文件，并将产生的诊断 —— **连同其源代码行号** —— 与各文件中的 `//EXPECT CODE` 标记进行
 核对（标记位于该行本身，或写作 `//EXPECT CODE@LINE`）。行号错误，或诊断缺失 / 多余，都会
 使测试集失败。`tests/run_tests_project.nim` 检查项目范围的覆盖率结果，`tests/run_tests_*.py`

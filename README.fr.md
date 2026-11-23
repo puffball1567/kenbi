@@ -925,7 +925,7 @@ front-end, si bien que l'analyse syntaxique du C/C++ est une partie remplaçable
 ## Tests
 
 `tests/*.mc` pilotent directement le moteur (17 cas). `tests/c/*.c` et `tests/cpp/*.cpp` portent
-ces scénarios plus les contrôles spécifiques aux annotations en C et C++ réels (349 cas) ; le
+ces scénarios plus les contrôles spécifiques aux annotations en C et C++ réels (367 cas) ; le
 lanceur abaisse chacun via libclang et vérifie les diagnostics produits — **y compris leur ligne
 source** — par rapport aux marqueurs `//EXPECT CODE` de chaque fichier (sur la ligne elle-même,
 ou `//EXPECT CODE@LINE`). Une mauvaise ligne ou un diagnostic manquant / superflu fait échouer la

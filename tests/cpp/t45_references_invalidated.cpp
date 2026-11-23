@@ -88,6 +88,29 @@ struct Pool {
   void touch() { cells.push_back(1); }            //EXPECT REF_NOT_PRESERVED
 };
 
+// the position saved before the erase is invalid as well
+void saved_next(std::vector<int> &v) {
+  auto it = v.begin();
+  while (it != v.end()) {
+    if (*it == 0) {
+      auto next = it + 1;
+      v.erase(it);
+      it = next;                                  //EXPECT REF_INVALIDATED
+    } else {
+      ++it;
+    }
+  }
+}
+
+// stepping an iterator changes nothing of what it refers into
+void stepped_copy(std::vector<int> &v) {
+  auto it = v.begin();
+  auto second = it + 1;
+  ++it;
+  --it;
+  (void)*second;
+}
+
 // the iterator the erase returns replaces the erased one
 void iterator_erase_idiom(std::vector<int> &v) {
   for (auto it = v.begin(); it != v.end(); ) {

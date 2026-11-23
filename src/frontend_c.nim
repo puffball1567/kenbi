@@ -1385,7 +1385,8 @@ proc soleAddressHere(ctx: Ctx, key: string, at: int): bool =
 proc uniqueVerdict(ctx: Ctx, u, o: PtrRoot, at: int): int =
   ## Can the exclusive argument `u` and the other argument `o` reach the same object?
   ## -1 no; 1 yes, as written; 2 nothing shows they cannot; 0 it depends on what the two
-  ## pointer variables are bound to on the path.
+  ## pointer variables are bound to on the path; 3 one is a local object and it depends on what
+  ## the other, a pointer variable, is bound to.
   if u.kind == 'L' or o.kind == 'L': return -1
   if u.kind == 'U' or o.kind == 'U': return 2
   if u.kind == o.kind and u.key == o.key:
@@ -1407,6 +1408,7 @@ proc uniqueVerdict(ctx: Ctx, u, o: PtrRoot, at: int): int =
     # a pointer the function was called with cannot point into its own frame; nor can any
     # other pointer when this is the only place the local's address is taken
     if ctx.entryValue(ptrv.key) or ctx.soleAddressHere(obj.key, at): return -1
+    return 3            # ... nor one bound to a block this function allocated: decided on the path
   2
 
 proc emitUniqueChecks(ctx: Ctx, call: CXCursor, callee: string, line: int, outp: var seq[Stmt]) =
@@ -1435,7 +1437,8 @@ proc emitUniqueChecks(ctx: Ctx, call: CXCursor, callee: string, line: int, outp:
       outp.add emit(ikUniqueCheck, line, a = roots[pi].disp, aKey = roots[pi].key,
                     b = roots[oi].disp, bKey = roots[oi].key, cKey = callee & "|" & pname,
                     off = v, off2 = (if ctx.entryValue(roots[pi].key): 1 else: 0) or
-                                    (if ctx.entryValue(roots[oi].key): 2 else: 0))
+                                    (if ctx.entryValue(roots[oi].key): 2 else: 0) or
+                                    (if roots[pi].kind == 'O': 4 else: 0))
 
 proc keptEscapes(ctx: var Ctx, fn, body: CXCursor, unique, borrowed: seq[string],
                  outp: var seq[Stmt]) =
@@ -2455,9 +2458,11 @@ proc refMethodEffect(ctx: Ctx, decl: CXCursor): int =
   for name in [cls & "::" & m, m]:
     if "this" in ctx.invalidatesParams.getOrDefault(name, @[]): return 0
     if "this" in ctx.preservesParams.getOrDefault(name, @[]): return -1
+  let handle = cls.toLowerAscii
+  if "iter" in handle or "string_view" in handle: return -1   # a reference itself: it manages nothing
   if inStd(decl):
     if m in refKeeps: return -1
-    if cls notin refOwners: return -1             # an iterator, a view: it manages nothing
+    if cls notin refOwners: return -1             # a pair, a stream: nothing handed out of it
     if m == "operator[]": return (if cls.startsWith("unordered_"): 0 else: -1)
     if m in refInserts: return (if cls in refNodeBased: -1 else: 0)
     if m in refChanges: return 0
