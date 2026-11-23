@@ -973,6 +973,52 @@
    ],
    "file": "CWE475_Undefined_Behavior_for_Input_to_API__overlap_01.c",
    "provenance": null
+  },
+  {
+   "id": "CWE475_Undefined_Behavior_for_Input_to_API__unproven_distinct_02",
+   "cwe": "CWE-475",
+   "class": [
+    "UNIQUE_UNPROVEN"
+   ],
+   "axis": "ownership",
+   "intent": "pass two pointers you were handed to a function whose destination must be exclusive",
+   "title": "Nothing shows that the two pointers a function forwards point to different objects",
+   "contracts": [
+    "@unique",
+    "@borrows"
+   ],
+   "file": "CWE475_Undefined_Behavior_for_Input_to_API__unproven_distinct_02.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE475_Undefined_Behavior_for_Input_to_API__exclusive_kept_03",
+   "cwe": "CWE-475",
+   "class": [
+    "UNIQUE_ESCAPES"
+   ],
+   "axis": "ownership",
+   "intent": "remember something about an exclusive pointer after the call",
+   "title": "A function keeps the pointer it declared exclusive for the length of the call",
+   "contracts": [
+    "@unique"
+   ],
+   "file": "CWE475_Undefined_Behavior_for_Input_to_API__exclusive_kept_03.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE758_Undefined_Behavior__setjmp_local_01",
+   "cwe": "CWE-758",
+   "class": [
+    "SETJMP_CLOBBERED"
+   ],
+   "axis": "ownership",
+   "intent": "count retries across a longjmp",
+   "title": "A non-volatile local changed after `setjmp` is read after the jump returns",
+   "contracts": [
+    "@longjmps_to"
+   ],
+   "file": "CWE758_Undefined_Behavior__setjmp_local_01.c",
+   "provenance": null
   }
  ]
 }

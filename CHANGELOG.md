@@ -5,6 +5,13 @@ All notable changes to kenbi are recorded here. The format follows
 [Semantic Versioning](https://semver.org/); before 1.0 the interfaces, the annotation vocabulary
 and the JSON output may change in any minor version.
 
+## [Unreleased]
+
+### Added
+
+- `explain_finding` (MCP) has worked examples for `UNIQUE_UNPROVEN`, `UNIQUE_ESCAPES` and
+  `SETJMP_CLOBBERED`. The three-state corpus has 64 entries.
+
 ## [0.2.0] - 2026-11-24
 
 ### Added
@@ -183,6 +190,7 @@ Also: `--project` closure over a `compile_commands.json`, `--emit-contracts`, `k
 which checks ran on which functions, and what a result without findings rests on without
 having checked it.
 
+[Unreleased]: https://github.com/puffball1567/kenbi/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/puffball1567/kenbi/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/puffball1567/kenbi/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/puffball1567/kenbi/compare/v0.1.1...v0.1.2

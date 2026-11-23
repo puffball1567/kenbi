@@ -1800,5 +1800,90 @@ export const FINDINGS: Record<string, FindingEntry[]> =
         "why": "the bytes are copied out to a separate local first, so the exclusive destination and the source are different objects. GREEN."
       }
     }
+  ],
+  "UNIQUE_UNPROVEN": [
+    {
+      "id": "CWE475_Undefined_Behavior_for_Input_to_API__unproven_distinct_02",
+      "cwe": "CWE-475",
+      "class": [
+        "UNIQUE_UNPROVEN"
+      ],
+      "axis": "ownership",
+      "intent": "pass two pointers you were handed to a function whose destination must be exclusive",
+      "title": "Nothing shows that the two pointers a function forwards point to different objects",
+      "contracts": [
+        "@unique",
+        "@borrows"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @unique(dst)\n// @borrows(dst)\n// @borrows(src)\nvoid copy_bytes(char *dst, const char *src, unsigned n);\n\n// @kenbi\nvoid CWE475_Undefined_Behavior_for_Input_to_API__unproven_distinct_02_bad(char *out, const char *in)\n{\n    /* POTENTIAL FLAW: `out` and `in` may point into the same object */\n    copy_bytes(out, in, 8);\n}\n",
+        "why": "`copy_bytes` declares its destination exclusive (`@unique`), and this function passes it two pointers it was handed itself. Nothing says its own callers pass different objects, so nothing shows the two are distinct: UNIQUE_UNPROVEN."
+      },
+      "B": {
+        "code": "// @unique(dst)\n// @borrows(dst)\n// @borrows(src)\nvoid copy_bytes(char *dst, const char *src, unsigned n);\n\n// @kenbi\nvoid CWE475_Undefined_Behavior_for_Input_to_API__unproven_distinct_02_bad(char *out, const char *in)\n{\n    char *dst = out;\n    /* POTENTIAL FLAW: `dst` is `out` under another name */\n    copy_bytes(dst, in, 8);\n}\n",
+        "why": "a half-fix: the destination is copied into a local pointer first. A new name is not a new object — the local points wherever `out` does — so it is STILL UNIQUE_UNPROVEN."
+      },
+      "C": {
+        "code": "// @unique(dst)\n// @borrows(dst)\n// @borrows(src)\nvoid copy_bytes(char *dst, const char *src, unsigned n);\n\n// @kenbi\n// @unique(out)\n// @borrows(out)\n// @borrows(in)\nvoid CWE475_Undefined_Behavior_for_Input_to_API__unproven_distinct_02_fixed(char *out, const char *in)\n{\n    copy_bytes(out, in, 8);   /* FIXED: `out` is exclusive by this function's own declaration */\n}\n",
+        "why": "the function declares its own destination exclusive. Inside it, `out` then cannot be what `in` points into, and the requirement moves to this function's callers, where each call is checked the same way. GREEN."
+      }
+    }
+  ],
+  "UNIQUE_ESCAPES": [
+    {
+      "id": "CWE475_Undefined_Behavior_for_Input_to_API__exclusive_kept_03",
+      "cwe": "CWE-475",
+      "class": [
+        "UNIQUE_ESCAPES"
+      ],
+      "axis": "ownership",
+      "intent": "remember something about an exclusive pointer after the call",
+      "title": "A function keeps the pointer it declared exclusive for the length of the call",
+      "contracts": [
+        "@unique"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "static char *last_written;\n\n// @kenbi\n// @unique(dst)\nvoid CWE475_Undefined_Behavior_for_Input_to_API__exclusive_kept_03_bad(char *dst, unsigned n)\n{\n    for (unsigned i = 0; i < n; i++) dst[i] = 0;\n    /* POTENTIAL FLAW: the exclusive pointer is stored where it outlives the call */\n    last_written = dst;\n}\n",
+        "why": "`fill` declares its destination exclusive (`@unique`): for the length of the call nothing else reaches that object. It then keeps the pointer in a global, so something else does reach it once the call has returned: UNIQUE_ESCAPES."
+      },
+      "B": {
+        "code": "static char *last_written;\n\n// @kenbi\n// @unique(dst)\nvoid CWE475_Undefined_Behavior_for_Input_to_API__exclusive_kept_03_bad(char *dst, unsigned n)\n{\n    for (unsigned i = 0; i < n; i++) dst[i] = 0;\n    char *end = dst + n;\n    /* POTENTIAL FLAW: `end` is derived from the exclusive pointer */\n    last_written = end;\n}\n",
+        "why": "a half-fix: a pointer to the end of the block is kept instead of the pointer itself. It points into the same object, so it is STILL UNIQUE_ESCAPES."
+      },
+      "C": {
+        "code": "static unsigned last_count;\n\n// @kenbi\n// @unique(dst)\nvoid CWE475_Undefined_Behavior_for_Input_to_API__exclusive_kept_03_fixed(char *dst, unsigned n)\n{\n    for (unsigned i = 0; i < n; i++) dst[i] = 0;\n    last_count = n;   /* FIXED: a count, not a pointer */\n}\n",
+        "why": "what the function needs to remember is how much it wrote, not where: it keeps the count, and no pointer outlives the call. GREEN."
+      }
+    }
+  ],
+  "SETJMP_CLOBBERED": [
+    {
+      "id": "CWE758_Undefined_Behavior__setjmp_local_01",
+      "cwe": "CWE-758",
+      "class": [
+        "SETJMP_CLOBBERED"
+      ],
+      "axis": "ownership",
+      "intent": "count retries across a longjmp",
+      "title": "A non-volatile local changed after `setjmp` is read after the jump returns",
+      "contracts": [
+        "@longjmps_to"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "#include <setjmp.h>\n\nstatic jmp_buf retry_point;\n\n// @longjmps_to(retry_point)\nvoid attempt(int n);\n\n// @kenbi\nint CWE758_Undefined_Behavior__setjmp_local_01_bad(void)\n{\n    int tries = 0;\n    if (setjmp(retry_point)) {\n        /* POTENTIAL FLAW: `tries` was incremented after the setjmp and is read after the jump */\n        if (tries > 3) return -1;\n    }\n    tries++;\n    attempt(tries);\n    return 0;\n}\n",
+        "why": "`tries` is changed after the `setjmp` and read after a `longjmp` has come back to it. A non-volatile local changed in between has an indeterminate value there (C11 7.13.2.1): the compiler may have kept it in a register the jump restored. SETJMP_CLOBBERED."
+      },
+      "B": {
+        "code": "#include <setjmp.h>\n\nstatic jmp_buf retry_point;\n\n// @longjmps_to(retry_point)\nvoid attempt(int n);\n\n// @kenbi\nint CWE758_Undefined_Behavior__setjmp_local_01_bad(void)\n{\n    int tries = 0;\n    int seen = 0;\n    if (setjmp(retry_point)) {\n        /* POTENTIAL FLAW: `seen` is as indeterminate as `tries` was */\n        if (seen > 3) return -1;\n    }\n    tries++;\n    seen = tries;\n    attempt(tries);\n    return 0;\n}\n",
+        "why": "a half-fix: the counter is copied into a second local before the call, and the copy is read after the jump. The copy is changed after the `setjmp` and non-volatile too, so it is STILL SETJMP_CLOBBERED."
+      },
+      "C": {
+        "code": "#include <setjmp.h>\n\nstatic jmp_buf retry_point;\n\n// @longjmps_to(retry_point)\nvoid attempt(int n);\n\n// @kenbi\nint CWE758_Undefined_Behavior__setjmp_local_01_fixed(void)\n{\n    volatile int tries = 0;   /* FIXED: volatile */\n    if (setjmp(retry_point)) {\n        if (tries > 3) return -1;\n    }\n    tries++;\n    attempt(tries);\n    return 0;\n}\n",
+        "why": "the counter is `volatile`: every change is written to memory, so the value read after the jump is the one last stored. GREEN."
+      }
+    }
   ]
 };
