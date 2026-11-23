@@ -221,7 +221,8 @@ nimble build -d:release -d:kenbiLibclang=libclang.dll
 ## 用法
 
 ```
-kenbi [--format=text|json] [--compile-commands=PATH] [--project[=PATH]] [--emit-contracts]
+kenbi [--format=text|json|sarif] [--compile-commands=PATH] [--project[=PATH]]
+      [--baseline=PATH | --write-baseline=PATH] [--emit-contracts]
       <file> [more...] [-- <extra clang args>]
 kenbi [--format=text|json] --safety=project.json
 kenbi --version
@@ -240,9 +241,29 @@ kenbi --version
   从给出的第一个文件向上逐级目录查找数据库。
 - `--format=json` 输出带稳定代码的机器可读结果（用于 CI、编辑器和 agent）；
   `--format=text`（默认）则是人类可读的。
+- `--format=sarif` 把发现写成 SARIF 2.1.0 日志，即 GitHub code scanning 等服务读取的格式。每条发现
+  带有不依赖行号的指纹，因此周围代码移动时，警报仍会被持续跟踪。
+- `--write-baseline=PATH` 记录一次运行的发现（并以 `0` 退出）；此后 `--baseline=PATH` 只报告不在该
+  记录中的发现，也只有它们决定退出码。已记录的发现仍然是发现——输出会统计并说明——但在已有发现的
+  代码中引入 kenbi 或开启新检查时，它们不会碍事。匹配依据是文件、代码和消息，而非行号。JSON 中
+  每条发现带 `baseline: "new" | "known"`；SARIF 中为 `baselineState`。
 - `--safety=project.json` 运行[配置驱动的底层验证](#配置驱动的底层验证--safety)中所述的
   配置驱动的底层检查。
 - 退出码：`0` 干净 · `1` 发现问题 · `2` 用法 / 解析错误。
+
+### 在 CI 中使用
+
+先记录一次起点并提交，此后每次运行只因新增的发现而失败：
+
+```yaml
+- run: kenbi --format=sarif --baseline=kenbi-baseline.json --project > kenbi.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: kenbi.sarif
+```
+
+每当修复了发现，就重新运行 `kenbi --write-baseline=kenbi-baseline.json --project`，让记录随之缩小。
 
 
 ## 选择加入：文件、函数或代码块

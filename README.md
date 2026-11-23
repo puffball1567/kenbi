@@ -248,7 +248,8 @@ nimble build -d:release -d:kenbiLibclang=libclang.dll
 ## Usage
 
 ```
-kenbi [--format=text|json] [--compile-commands=PATH] [--project[=PATH]] [--emit-contracts]
+kenbi [--format=text|json|sarif] [--compile-commands=PATH] [--project[=PATH]]
+      [--baseline=PATH | --write-baseline=PATH] [--emit-contracts]
       <file> [more...] [-- <extra clang args>]
 kenbi [--format=text|json] --safety=project.json
 kenbi --version
@@ -269,9 +270,33 @@ kenbi --version
   FFI edge). Without a path the database is found by walking up from the first file given.
 - `--format=json` emits machine-readable findings with stable codes (for CI,
   editors, and agents); `--format=text` (default) is human-readable.
+- `--format=sarif` writes the findings as a SARIF 2.1.0 log, the format GitHub code scanning and
+  other services read. Each finding carries a fingerprint that does not depend on its line, so an
+  alert is followed as the code around it moves.
+- `--write-baseline=PATH` records the findings of a run (and exits `0`); `--baseline=PATH` then
+  reports only the findings that are not in that record, and only those decide the exit code.
+  Recorded findings are still findings — the output counts them and says so — but they are not
+  in the way while you adopt kenbi, or turn on a new check, in code that already has some.
+  Findings are matched by file, code and message, not by line. In JSON each finding gets
+  `baseline: "new" | "known"`; in SARIF, `baselineState`.
 - `--safety=project.json` runs the configured low-level checks described in
   [Configured low-level verification](#configured-low-level-verification---safety).
 - Exit code: `0` clean · `1` issues found · `2` usage / parse error.
+
+### In CI
+
+Record the starting point once and commit it, then let each run fail only on what is new:
+
+```yaml
+- run: kenbi --format=sarif --baseline=kenbi-baseline.json --project > kenbi.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: kenbi.sarif
+```
+
+Run `kenbi --write-baseline=kenbi-baseline.json --project` again whenever findings are fixed, so
+the record shrinks with them.
 
 
 ## Opting in: file, function, or block

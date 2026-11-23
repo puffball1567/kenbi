@@ -224,7 +224,8 @@ nimble build -d:release -d:kenbiLibclang=libclang.dll
 ## Uso
 
 ```
-kenbi [--format=text|json] [--compile-commands=PATH] [--project[=PATH]] [--emit-contracts]
+kenbi [--format=text|json|sarif] [--compile-commands=PATH] [--project[=PATH]]
+      [--baseline=PATH | --write-baseline=PATH] [--emit-contracts]
       <file> [more...] [-- <extra clang args>]
 kenbi [--format=text|json] --safety=project.json
 kenbi --version
@@ -246,9 +247,35 @@ kenbi --version
   subindo a partir do primeiro arquivo informado.
 - `--format=json` emite achados legíveis por máquina com códigos estáveis (para CI, editores e
   agentes); `--format=text` (padrão) é legível por humanos.
+- `--format=sarif` escreve os achados como um log SARIF 2.1.0, o formato que o GitHub code scanning
+  e outros serviços leem. Cada achado carrega uma impressão digital que não depende da sua linha,
+  de modo que um alerta é acompanhado quando o código ao redor se move.
+- `--write-baseline=PATH` registra os achados de uma execução (e termina com `0`);
+  `--baseline=PATH` passa então a relatar apenas os achados que não estão nesse registro, e só
+  eles decidem o código de saída. Os achados registrados continuam sendo achados — a saída os
+  conta e diz isso — mas não atrapalham enquanto você adota o kenbi, ou ativa uma nova
+  verificação, em código que já tem alguns. A correspondência é por arquivo, código e mensagem,
+  não por linha. Em JSON cada achado recebe `baseline: "new" | "known"`; em SARIF,
+  `baselineState`.
 - `--safety=project.json` executa as verificações de baixo nível configuradas descritas em
   [Verificação de baixo nível configurada](#verificação-de-baixo-nível-configurada---safety).
 - Código de saída: `0` limpo · `1` problemas encontrados · `2` erro de uso / análise.
+
+### Em CI
+
+Registre o ponto de partida uma vez e faça o commit; depois, cada execução falha apenas pelo que
+é novo:
+
+```yaml
+- run: kenbi --format=sarif --baseline=kenbi-baseline.json --project > kenbi.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: kenbi.sarif
+```
+
+Execute `kenbi --write-baseline=kenbi-baseline.json --project` novamente sempre que achados forem
+corrigidos, para que o registro diminua com eles.
 
 
 ## Ativação: arquivo, função ou bloco

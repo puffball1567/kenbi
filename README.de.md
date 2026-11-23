@@ -226,7 +226,8 @@ nimble build -d:release -d:kenbiLibclang=libclang.dll
 ## Verwendung
 
 ```
-kenbi [--format=text|json] [--compile-commands=PATH] [--project[=PATH]] [--emit-contracts]
+kenbi [--format=text|json|sarif] [--compile-commands=PATH] [--project[=PATH]]
+      [--baseline=PATH | --write-baseline=PATH] [--emit-contracts]
       <file> [more...] [-- <extra clang args>]
 kenbi [--format=text|json] --safety=project.json
 kenbi --version
@@ -249,9 +250,33 @@ kenbi --version
   Ohne Pfad wird die Datenbank durch Aufwärtssuche von der ersten angegebenen Datei gefunden.
 - `--format=json` gibt maschinenlesbare Befunde mit stabilen Codes aus (für CI,
   Editoren und Agenten); `--format=text` (Standard) ist menschenlesbar.
+- `--format=sarif` schreibt die Befunde als SARIF-2.1.0-Log, das Format, das GitHub Code Scanning
+  und andere Dienste lesen. Jeder Befund trägt einen Fingerabdruck, der nicht von seiner Zeile
+  abhängt, sodass eine Warnung verfolgt wird, wenn sich der Code um sie herum verschiebt.
+- `--write-baseline=PATH` hält die Befunde eines Laufs fest (und endet mit `0`); `--baseline=PATH`
+  meldet danach nur die Befunde, die nicht in dieser Aufzeichnung stehen, und nur sie bestimmen
+  den Exit-Code. Aufgezeichnete Befunde bleiben Befunde — die Ausgabe zählt sie und sagt das —,
+  stehen aber nicht im Weg, während kenbi oder eine neue Prüfung in Code eingeführt wird, der
+  bereits welche hat. Abgeglichen wird nach Datei, Code und Meldung, nicht nach Zeile. In JSON
+  erhält jeder Befund `baseline: "new" | "known"`, in SARIF `baselineState`.
 - `--safety=project.json` führt die konfigurierten Low-Level-Prüfungen aus, die unter
   [Konfigurierte Low-Level-Verifikation](#konfigurierte-low-level-verifikation---safety) beschrieben sind.
 - Exit-Code: `0` sauber · `1` Probleme gefunden · `2` Nutzungs- / Parse-Fehler.
+
+### In der CI
+
+Den Ausgangspunkt einmal aufzeichnen und einchecken; danach scheitert jeder Lauf nur an Neuem:
+
+```yaml
+- run: kenbi --format=sarif --baseline=kenbi-baseline.json --project > kenbi.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: kenbi.sarif
+```
+
+`kenbi --write-baseline=kenbi-baseline.json --project` erneut ausführen, sobald Befunde behoben
+sind, damit die Aufzeichnung mit ihnen schrumpft.
 
 
 ## Opt-in: Datei, Funktion oder Block

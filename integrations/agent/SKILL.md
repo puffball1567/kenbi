@@ -276,6 +276,10 @@ short form.
   decision to the user.
 - **Removing the opt-in marker or the annotation** (`@kenbi`, `@spatial`,
   `@mem`, …) so the check no longer runs.
+- **Writing the baseline again to absorb a finding your change introduced.**
+  `--baseline` exists so that findings which were already there do not block
+  adoption; a finding that appears with your change is yours to fix. Rewrite
+  the baseline only to drop entries that were fixed, or when the user asks.
 - **Declaring something that is not true** to satisfy the check: an
   `@invariant` no caller establishes, a `@counted_by` larger than the buffer,
   a `@borrows` on a function that keeps the pointer, a `@frees` on one that

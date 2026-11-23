@@ -224,7 +224,8 @@ nimble build -d:release -d:kenbiLibclang=libclang.dll
 ## 使い方
 
 ```
-kenbi [--format=text|json] [--compile-commands=PATH] [--project[=PATH]] [--emit-contracts]
+kenbi [--format=text|json|sarif] [--compile-commands=PATH] [--project[=PATH]]
+      [--baseline=PATH | --write-baseline=PATH] [--emit-contracts]
       <file> [more...] [-- <extra clang args>]
 kenbi [--format=text|json] --safety=project.json
 kenbi --version
@@ -245,9 +246,32 @@ kenbi --version
   最初に与えたファイルから上方向に辿ってデータベースを探します。
 - `--format=json` は安定したコードを持つ機械可読な findings を出力します（CI・
   エディタ・エージェント向け）。`--format=text`（デフォルト）は人間可読です。
+- `--format=sarif` は、指摘を SARIF 2.1.0 のログとして出力します。GitHub の code scanning などが
+  読める形式です。各指摘には行番号に依存しない指紋が付くので、周囲のコードが動いても同じ警告として
+  追跡されます。
+- `--write-baseline=PATH` は、その実行の指摘を記録します（終了コードは `0`）。`--baseline=PATH` を
+  付けると、その記録にない指摘だけを報告し、終了コードもそれだけで決まります。記録済みの指摘は
+  指摘のままで、出力には件数が表示されますが、すでに指摘のあるコードへ kenbi や新しい検査を導入する
+  間の妨げにはなりません。照合は行番号ではなく、ファイル・コード・メッセージで行います。JSON では
+  各指摘に `baseline: "new" | "known"`、SARIF では `baselineState` が付きます。
 - `--safety=project.json` は、
   [設定による低レベル検証](#設定による低レベル検証--safety)で説明する設定済みの低レベル検査を実行します。
 - 終了コード: `0` クリーン · `1` 問題あり · `2` 使用法 / パースエラー。
+
+### CI で使う
+
+出発点を一度記録してコミットし、以後の実行は新しく増えた指摘だけで失敗させます。
+
+```yaml
+- run: kenbi --format=sarif --baseline=kenbi-baseline.json --project > kenbi.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: kenbi.sarif
+```
+
+指摘を直したら `kenbi --write-baseline=kenbi-baseline.json --project` を実行し直して、記録も一緒に
+減らしてください。
 
 
 ## opt-in の単位: ファイル、関数、ブロック

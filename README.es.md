@@ -225,7 +225,8 @@ nimble build -d:release -d:kenbiLibclang=libclang.dll
 ## Uso
 
 ```
-kenbi [--format=text|json] [--compile-commands=PATH] [--project[=PATH]] [--emit-contracts]
+kenbi [--format=text|json|sarif] [--compile-commands=PATH] [--project[=PATH]]
+      [--baseline=PATH | --write-baseline=PATH] [--emit-contracts]
       <file> [more...] [-- <extra clang args>]
 kenbi [--format=text|json] --safety=project.json
 kenbi --version
@@ -247,9 +248,34 @@ kenbi --version
   datos se busca subiendo desde el primer archivo indicado.
 - `--format=json` emite hallazgos legibles por máquina con códigos estables (para
   CI, editores y agentes); `--format=text` (por defecto) es legible para humanos.
+- `--format=sarif` escribe los hallazgos como un registro SARIF 2.1.0, el formato que leen GitHub
+  code scanning y otros servicios. Cada hallazgo lleva una huella que no depende de su línea, de
+  modo que una alerta se sigue aunque el código a su alrededor se mueva.
+- `--write-baseline=PATH` registra los hallazgos de una ejecución (y termina con `0`);
+  `--baseline=PATH` informa después solo de los hallazgos que no están en ese registro, y solo
+  ellos deciden el código de salida. Los hallazgos registrados siguen siendo hallazgos — la salida
+  los cuenta y lo dice — pero no estorban mientras se adopta kenbi, o se activa una comprobación
+  nueva, en código que ya tiene algunos. La correspondencia es por archivo, código y mensaje, no
+  por línea. En JSON cada hallazgo recibe `baseline: "new" | "known"`; en SARIF, `baselineState`.
 - `--safety=project.json` ejecuta las comprobaciones de bajo nivel configuradas descritas en
   [Verificación configurada de bajo nivel](#verificación-configurada-de-bajo-nivel---safety).
 - Código de salida: `0` limpio · `1` problemas encontrados · `2` error de uso / análisis.
+
+### En CI
+
+Registre el punto de partida una vez y confírmelo en el repositorio; después, cada ejecución falla
+solo por lo nuevo:
+
+```yaml
+- run: kenbi --format=sarif --baseline=kenbi-baseline.json --project > kenbi.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: kenbi.sarif
+```
+
+Vuelva a ejecutar `kenbi --write-baseline=kenbi-baseline.json --project` cada vez que se corrijan
+hallazgos, para que el registro se reduzca con ellos.
 
 
 ## Activación: archivo, función o bloque

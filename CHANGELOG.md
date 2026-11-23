@@ -32,6 +32,13 @@ and the JSON output may change in any minor version.
   without declaring it is `REF_RETURN_UNDECLARED`; the result of a function that declares
   nothing is taken to point into what any of its pointer arguments may hold.
 
+- `--format=sarif` writes the findings as a SARIF 2.1.0 log for code-scanning services. Each
+  result carries a fingerprint that does not depend on its line.
+- `--write-baseline=PATH` records the findings of a run, and `--baseline=PATH` reports only the
+  findings that are not in that record; only those decide the exit code. Findings are matched
+  by file, code and message, so they are followed as code moves. With a baseline, JSON findings
+  carry `baseline` (`new` / `known`) and SARIF results `baselineState`.
+
 ### Changed
 
 - Bounds (`@spatial`): an index or a length that is not a variable plus or minus a constant — a
