@@ -15,7 +15,9 @@ resources:
 2. **Run the deterministic checker and trust its verdict.**
    `kenbi --format=json --compile-commands=build/compile_commands.json <file>`.
    Fix every `severity: "error"` finding; re-run after each change
-   (propose-then-verify). The tool — not you — decides what is "safe".
+   (propose-then-verify). The tool — not you — decides what is "safe". With the
+   kenbi MCP server connected, use `check_memory_safety` and, for each finding,
+   `explain_finding` instead.
 3. **Add grounded advisory review** for the residue kenbi can't see (cross-TU
    ownership, valid-until-next-call, custom allocators, dual ownership, secret
    scrub, thread-handoff lifetime, over-broad/unnecessary pointers). Output a
@@ -27,5 +29,8 @@ a result without findings with the scope kenbi lists for it. Do not repeat in an
 ordinary comment what an annotation already declares — the annotation is checked,
 the prose copy is not.
 
-See [SKILL.md](./SKILL.md) for the annotation reference, the diagnostic-code
-table, and the full residue catalogue.
+Fix a finding in the code or with a declaration that is true — never by adding
+`@unsafe`, removing a marker, or declaring what does not hold.
+
+See [SKILL.md](./SKILL.md) for the annotation reference, the MCP procedure, the
+per-code fix table, and the full residue catalogue.

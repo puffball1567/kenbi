@@ -51,7 +51,8 @@ type
     parts*: seq[tuple[stmts: seq[CXCursor], caseIdx: int, dual: bool]]
                             ## the code a longjmp returns into: the landing branch of an `if`
                             ## (`caseIdx` -1), or each case group of a `switch` a non-zero value
-                            ## can enter (`dual`: the first return can enter it too)
+                            ## can enter (`dual`: the first return can enter it too), followed
+                            ## by the groups it falls through into
 
 type Ctx* = object  ## module-local state during a single parse (all fields public
                     ## so the responsibility-split modules can populate them)
@@ -72,6 +73,7 @@ type Ctx* = object  ## module-local state during a single parse (all fields publ
   landingSites*: seq[LandingSite]   ## the landing sites of the function being lowered
   landingRecs*: seq[LandingRec]     ## ... and their lowered statements, whose landing branches
                                     ## are lowered again once the whole body has been
+  jmpLocals*: HashSet[string]       ## the non-volatile automatic locals and parameters of that function
   landingCount*: int                ## landing sites numbered so far in this translation unit
   longjmpEmitted*: HashSet[int]     ## offsets of the calls already lowered as ikMayLongjmp
   liveLocals*: seq[tuple[name, typ, disp: string, line: int]] ## C++: the automatic objects of class
@@ -337,6 +339,52 @@ type Ctx* = object  ## module-local state during a single parse (all fields publ
                                     ## resolved to keys in fnVisitor against the DEFINING function's
                                     ## params — so a contract declared on a header prototype binds to
                                     ## the implementation in another TU (cross-file). off = `+ k` size.
+  uniqueSites*: seq[tuple[file: string, line: int, spec: string]] ## `@unique(p, q)` sites
+  uniqueParams*: Table[string, seq[string]] ## function -> the pointer parameters it declares
+                                    ## exclusive: no other argument of a call may reach the
+                                    ## same object, and the body may not keep the pointer
+  uqAddrCount*: Table[string, int]  ## the function being lowered: variable -> how often its
+                                    ## address is taken (`&x`, or an array used as a pointer)
+  uqAssigned*: HashSet[string]      ## ... the variables it assigns or steps
+  uqLocals*: HashSet[string]        ## ... its automatic locals
+  uqParams*: HashSet[string]        ## ... its parameters
+  uqLoops*: seq[tuple[first, last: int]] ## ... the source ranges of its loops
+  curUnique*: HashSet[string]       ## ... and the parameters it declares `@unique` itself
+  uqHasGoto*: bool                  ## ... and whether it has a `goto` (a possible loop)
+  refSites*: seq[tuple[file: string, line: int]] ## `@refcheck` opt-in marker locations
+  invalidatesSites*: seq[tuple[file: string, line: int, spec: string]] ## `@invalidates(p)` sites
+  preservesSites*: seq[tuple[file: string, line: int, spec: string]]   ## `@preserves(p)` sites
+  invalidatesParams*: Table[string, seq[string]] ## function -> what it may reallocate or release
+                                    ## the storage of: parameter names, `$N`, `this`, globals
+  preservesParams*: Table[string, seq[string]]   ## function -> what it declares it leaves in place
+  returnsIntoSites*: seq[tuple[file: string, line: int, spec: string]] ## `@returns_into(p)` sites
+  returnsInto*: Table[string, seq[string]] ## function -> the parameters whose storage its result
+                                    ## points into (parameter names or `$N`); present and
+                                    ## empty when it declares that it points into none
+  refAggFields*: Table[string, seq[tuple[key: string, steps: seq[string]]]]
+                                    ## in the function being lowered: a local struct or array ->
+                                    ## the members of it that hold a reference into managed
+                                    ## storage, each followed under a key of its own
+  refLambdas*: Table[string, CXCursor] ## ... a local bound to a lambda -> the lambda
+  refParamOf*: Table[string, string] ## in the function being lowered: a parameter, or a local
+                                    ## that refers into what one holds -> that parameter's name
+  refReturnsDeclared*: bool         ## ... whether it declares `@returns_into`
+  refReturns*: seq[string]          ## ... and the parameters it names
+  refActive*: bool                  ## the function being lowered emits reference events
+  refTargets*: HashSet[string]      ## ... its locals that can hold a pointer, reference or
+                                    ## iterator into storage something else manages
+  refPromised*: Table[string, string] ## ... the variables through which it reaches what it
+                                    ## declares `@preserves` -> the declared name
+  refPromisedGlobals*: HashSet[string] ## ... and the globals it declares `@preserves`
+  refRangeBodies*: Table[int, tuple[synth, disp, varKey, varDisp, source: string, line: int]]
+                                    ## ... its range-`for` loops, by the start of the body: the
+                                    ## key standing for the loop's own iterators, and the loop
+                                    ## variable when it refers into the range
+  curKept*: Table[string, tuple[param: string, borrow: bool]]
+                                    ## the variables of the function being lowered that hold a
+                                    ## pointer it may not keep — an `@unique` or `@borrows`
+                                    ## parameter (`borrow` unless declared `@unique`) or a local
+                                    ## copy of one — and the parameter each derives from
   invariantSites*: seq[tuple[file: string, line: int, spec: string]] ## `@invariant(lvalue rel
                                     ## expr)` sites: a declared data-structure invariant relating a
                                     ## PROTECTED field/var to a size (the jsmn `toknext <= num_tokens`).

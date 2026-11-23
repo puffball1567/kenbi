@@ -63,6 +63,9 @@ const contractKeys = {
   "must_use":  "@must_use",
   "nothrow":   "@nothrow",
   "longjmps":  "@longjmps",
+  "invalidates": "@invalidates",
+  "preserves": "@preserves",
+  "returns_into": "@returns_into",
 }.toTable
 
 proc parseContractsForComment(ctx: var Ctx, text: string, file: string, line: int) =
@@ -119,7 +122,8 @@ proc parseContractComment(ctx: var Ctx, text: string, line: int) =
     if key notin contractKeys:
       ctx.prog.advisories.add Advisory(line: line, code: "UNKNOWN_CONTRACT_KEY",
         msg: "`@contract " & fn & "` names '" & key & "', which is not a contract kenbi " &
-             "knows. Keys: frees, borrows, moves, adopts, owns, owns_out, must_use, nothrow, longjmps.")
+             "knows. Keys: frees, borrows, moves, adopts, owns, owns_out, must_use, nothrow, longjmps, " &
+             "invalidates, preserves, returns_into.")
       continue
     let kw = contractKeys[key]
     if kv.len == 1 or kv[1].strip().len == 0:
@@ -224,7 +228,8 @@ const engineCoreDirectives* = [
   "@kenbi", "@verify", "@spatial", "@threadsafe", "@initcheck", "@typecheck", "@variant",
   "@counted_by", "@invariant", "@maintains", "@mem", "@move", "@goto_noreturn",
   "@goto_finally", "@goto_backward", "@copy", "@unsafe", "@escapes", "@realloc", "@raii", "@arena",
-  "@allocator", "@lock_order", "@drains", "@list", "@contract", "@contracts_for"]
+  "@allocator", "@lock_order", "@drains", "@list", "@contract", "@contracts_for", "@unique",
+  "@refcheck", "@invalidates", "@preserves", "@returns_into"]
 
 proc allKenbiDirectives*(): HashSet[string] =
   ## The COMPLETE set of directive keywords kenbi recognises as the first token of
@@ -253,6 +258,11 @@ proc scanCommentTokens(ctx: var Ctx, toks: ptr CXToken, n: cuint) =
       let op = body.find('('); let cp = body.find(')')
       if op >= 0 and cp > op: body[op+1 ..< cp].strip else: ""
     let rest = body[words[0].len .. ^1].strip  # freeform text after the keyword token
+    # `// @spatial file`: the marker covers the whole file wherever it is written. Without the
+    # word it binds to the function just below it, when there is one within a few lines, and
+    # to the file only otherwise — so a marker at the top of a short file can mean either.
+    # Recorded far above any line so that nothing is "just below" it.
+    let markLine = (if words.len >= 2 and words[1] == "file": low(int) div 2 else: line)
     # plugin annotations (annotations/*.nim) self-register and handle their keyword;
     # only the engine-core directives below remain inline.
     if runCollector(ctx, kw, AnnArgs(kw: kw, body: body, pa: pa, rest: rest, file: fileOf(loc), line: line)):
@@ -267,27 +277,27 @@ proc scanCommentTokens(ctx: var Ctx, toks: ptr CXToken, n: cuint) =
     of "@kenbi":
       # opt-in marker: this unit is under kenbi discipline. Resolved later to the
       # function below it (function-level) or, if none is near, the whole file.
-      ctx.kenbiSites.add (fileOf(loc), line)
+      ctx.kenbiSites.add (fileOf(loc), markLine)
       ctx.prog.hasKenbiMarker = true
     of "@spatial":
       # opt-in marker for the SEPARATE bounds axis: this unit is bounds-checked
       # (an unvalidated value reaching an index / size sink is UNVALIDATED_INDEX).
       # Independent of @kenbi so temporal-only files are never bounds-checked.
-      ctx.spatialSites.add (fileOf(loc), line)
+      ctx.spatialSites.add (fileOf(loc), markLine)
     of "@threadsafe":
       # opt-in marker for the SEPARATE lock-discipline axis: this unit is lock-checked
       # (a `@guarded_by(field: lock)` access without the lock held is UNGUARDED_ACCESS).
       # Independent of the other axes so non-concurrent files are never lock-checked.
-      ctx.concurrentSites.add (fileOf(loc), line)
+      ctx.concurrentSites.add (fileOf(loc), markLine)
     of "@initcheck":
       # opt-in marker for the SEPARATE definite-assignment axis: a read of a local that is
       # not definitely assigned on every path is USE_OF_UNINITIALIZED. Independent opt-in so
       # existing files are never init-checked.
-      ctx.initSites.add (fileOf(loc), line)
+      ctx.initSites.add (fileOf(loc), markLine)
     of "@typecheck":
       # opt-in marker for the SEPARATE tagged-union type-confusion axis: a `@variant` member
       # accessed without its discriminant proven is TYPE_CONFUSION. Independent opt-in.
-      ctx.typecheckSites.add (fileOf(loc), line)
+      ctx.typecheckSites.add (fileOf(loc), markLine)
     of "@variant":
       # declare a tagged-union variant: `@variant(member : tag == value)` — `member` is the
       # active union member only when the discriminant `tag == value`.
@@ -303,6 +313,27 @@ proc scanCommentTokens(ctx: var Ctx, toks: ptr CXToken, n: cuint) =
       # tracked resource: every write to it must be `@maintains`-annotated (or RED), and
       # the relation may green an access bounded by it.
       ctx.invariantSites.add (fileOf(loc), line, pa)
+    of "@unique":
+      # declare pointer PARAMETERS of the function below exclusive (`@unique(dst)`): at every
+      # call no other argument may reach the same object, and the body may not keep the pointer.
+      ctx.uniqueSites.add (fileOf(loc), line, pa)
+    of "@refcheck":
+      # opt-in marker for the SEPARATE reference-validity axis: a pointer, reference or iterator
+      # into storage another object manages, used after that object may have reallocated or
+      # released it, is REF_INVALIDATED / REF_UNPROVEN. Independent opt-in.
+      ctx.refSites.add (fileOf(loc), markLine)
+    of "@invalidates":
+      # the function below may reallocate or release storage reached through these parameters
+      # (`@invalidates(buf)`): pointers taken into it before a call are invalid after it.
+      ctx.invalidatesSites.add (fileOf(loc), line, pa)
+    of "@returns_into":
+      # the result of the function below points into storage reached through these parameters
+      # (`@returns_into(buf)`); `@returns_into()` declares that it points into none of them.
+      ctx.returnsIntoSites.add (fileOf(loc), line, pa)
+    of "@preserves":
+      # the function below reallocates and releases nothing reached through these parameters
+      # (`@preserves(buf)`); its body is verified against the declaration.
+      ctx.preservesSites.add (fileOf(loc), line, pa)
     of "@maintains":
       # this write (line) preserves a declared invariant — so it is not an unguarded
       # write. The preservation is VERIFIED, not trusted (a lie is CONTRACT_NOT_HONORED).

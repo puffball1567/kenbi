@@ -11,6 +11,7 @@ const AXES: { key: string; label: string }[] = [
   { key: "locks", label: "locks (`@threadsafe`)" },
   { key: "initialisation", label: "initialisation (`@initcheck`)" },
   { key: "taggedUnions", label: "tagged unions (`@typecheck`)" },
+  { key: "references", label: "references into managed storage (`@refcheck`)" },
 ];
 
 /** At most this many unchecked function names are listed per axis; the JSON has them all. */

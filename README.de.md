@@ -6,7 +6,7 @@
 
 **Gebaut, um C/C++ mit KI-Agenten zu schreiben.** Über seinen [MCP-Server](#mit-ki-coding-agenten-mcp) prüft ein Agent das C/C++, das er gerade geschrieben hat, fragt, warum ein Befund auftritt und wie die Korrektur aussieht, und wiederholt das, bis die Prüfungen nichts mehr melden. Speichersicherheit wird so Teil der Schreibschleife des Agenten statt einer nachträglichen Review, und die Annotationen, die er schreibt, bleiben als Regeln im Code, die kenbi weiter prüft.
 
-> Status: **v0.1.3**, frühe Entwicklungsphase. Die Schnittstellen, das Annotationsvokabular und
+> Status: **v0.2.0**, frühe Entwicklungsphase. Die Schnittstellen, das Annotationsvokabular und
 > die JSON-Ausgabe können sich noch ändern.
 
 ## Ein erster Blick
@@ -74,7 +74,7 @@ Die Schleife an [`demo/quickstart.c`](demo/quickstart.c), mit den tatsächlichen
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 0 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -111,7 +111,7 @@ Die Schleife an [`demo/quickstart.c`](demo/quickstart.c), mit den tatsächlichen
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 1 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -131,8 +131,13 @@ Jede Prüfung wird einzeln aktiviert:
 | Grenzen | `@spatial` | ein nicht vertrauenswürdiger Index oder eine Größe, die einen Puffer erreicht, benötigt eine vorhandene, ausreichende, überlaufsichere Grenzprüfung; `@counted_by` und deklarierte Datenstruktur-Invarianten (`@invariant` / `@maintains`) |
 | Initialisierung | `@initcheck` | eine lokale Variable, die gelesen wird, bevor sie auf jedem Pfad zugewiesen wurde |
 | getaggte Unions | `@typecheck` + `@variant` | ein Union-Member, der verwendet wird, wo sein Tag nicht bewiesen ist |
+| Referenzen | `@refcheck` + `@invalidates` / `@preserves` | ein Zeiger, eine Referenz oder ein Iterator in einen Puffer oder Container, verwendet nach einem Aufruf, der ihn neu allokiert oder freigegeben haben kann |
 | Locks | `@threadsafe` | ungeschützter Zugriff, unausgeglichene Locks, deklarierte Lock-Reihenfolge (AB-BA-Deadlock) |
 | Low-Level-Eigenschaften | `--safety=project.json` | verbotene Effekte in einer Aufrufhülle, Zustandsautomaten für Ressourcen, Stack- und Aufruftiefe, Speicherregionen, MMIO und mehr – siehe [Konfigurierte Low-Level-Verifikation](#konfigurierte-low-level-verifikation---safety) |
+
+Ein Marker über einer Funktion gilt für diese Funktion; einer, unter dem innerhalb weniger Zeilen
+keine Funktion folgt, gilt für die ganze Datei. Um die ganze Datei abzudecken, egal wo der Marker
+steht, `file` anhängen: `// @kenbi file`, `// @spatial file`, `// @refcheck file`.
 
 Ein libclang-Frontend überführt echtes C / C++ (liest `compile_commands.json`) in eine
 Typestate-Engine. Schleifen werden bis zu einem beschränkten Fixpunkt analysiert,
@@ -225,7 +230,8 @@ nimble build -d:release -d:kenbiLibclang=libclang.dll
 ## Verwendung
 
 ```
-kenbi [--format=text|json] [--compile-commands=PATH] [--project[=PATH]] [--emit-contracts]
+kenbi [--format=text|json|sarif] [--compile-commands=PATH] [--project[=PATH]]
+      [--baseline=PATH | --write-baseline=PATH] [--emit-contracts]
       <file> [more...] [-- <extra clang args>]
 kenbi [--format=text|json] --safety=project.json
 kenbi --version
@@ -248,9 +254,33 @@ kenbi --version
   Ohne Pfad wird die Datenbank durch Aufwärtssuche von der ersten angegebenen Datei gefunden.
 - `--format=json` gibt maschinenlesbare Befunde mit stabilen Codes aus (für CI,
   Editoren und Agenten); `--format=text` (Standard) ist menschenlesbar.
+- `--format=sarif` schreibt die Befunde als SARIF-2.1.0-Log, das Format, das GitHub Code Scanning
+  und andere Dienste lesen. Jeder Befund trägt einen Fingerabdruck, der nicht von seiner Zeile
+  abhängt, sodass eine Warnung verfolgt wird, wenn sich der Code um sie herum verschiebt.
+- `--write-baseline=PATH` hält die Befunde eines Laufs fest (und endet mit `0`); `--baseline=PATH`
+  meldet danach nur die Befunde, die nicht in dieser Aufzeichnung stehen, und nur sie bestimmen
+  den Exit-Code. Aufgezeichnete Befunde bleiben Befunde — die Ausgabe zählt sie und sagt das —,
+  stehen aber nicht im Weg, während kenbi oder eine neue Prüfung in Code eingeführt wird, der
+  bereits welche hat. Abgeglichen wird nach Datei, Code und Meldung, nicht nach Zeile. In JSON
+  erhält jeder Befund `baseline: "new" | "known"`, in SARIF `baselineState`.
 - `--safety=project.json` führt die konfigurierten Low-Level-Prüfungen aus, die unter
   [Konfigurierte Low-Level-Verifikation](#konfigurierte-low-level-verifikation---safety) beschrieben sind.
 - Exit-Code: `0` sauber · `1` Probleme gefunden · `2` Nutzungs- / Parse-Fehler.
+
+### In der CI
+
+Den Ausgangspunkt einmal aufzeichnen und einchecken; danach scheitert jeder Lauf nur an Neuem:
+
+```yaml
+- run: kenbi --format=sarif --baseline=kenbi-baseline.json --project > kenbi.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: kenbi.sarif
+```
+
+`kenbi --write-baseline=kenbi-baseline.json --project` erneut ausführen, sobald Befunde behoben
+sind, damit die Aufzeichnung mit ihnen schrumpft.
 
 
 ## Opt-in: Datei, Funktion oder Block
@@ -421,6 +451,21 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
   bloße Anweisung, nicht zugewiesen / zurückgegeben / übergeben / getestet) ist
   `UNUSED_MUST_USE` — die `#[must_use]`-Disziplin für ignorierte Fehlercodes und
   geleckte Allokationen.
+- **exklusiver Parameter**: `// @unique(param)` über einer Funktion deklariert, dass während
+  eines Aufrufs kein anderes Argument das Objekt erreicht, in das `param` zeigt (was `restrict`
+  in C verspricht und kein Compiler prüft). An jedem Aufruf wird das Argument mit jedem anderen
+  Zeigerargument verglichen: dasselbe Objekt ist `UNIQUE_ALIASED`, ein Paar, dessen
+  Verschiedenheit nichts zeigt, ist `UNIQUE_UNPROVEN`. Verschiedene Variablen, verschiedene
+  Member einer Struktur, getrennte Allokationen im Aufrufer und ein Parameter, den der Aufrufer
+  selbst als `@unique` deklariert, gelten als verschieden. Im Rumpf ist das Speichern des
+  Zeigers oder einer Kopie an einem Ort, der den Aufruf überdauert, `UNIQUE_ESCAPES`.
+- **nach dem Aufruf zurückgegeben**: `@borrows(param)` und `@unique(param)` versprechen beide, dass
+  nach der Rückkehr des Aufrufs niemand den Zeiger mehr hält, und der Rumpf wird darauf geprüft.
+  Das Speichern des Zeigers oder einer Kopie in einer globalen Variable, einem Feld oder über
+  einen anderen Zeiger ist `BORROW_ESCAPES` / `UNIQUE_ESCAPES`; ebenso die Übergabe an eine
+  Funktion, deren Parameter nicht dasselbe verspricht (`@borrows` oder `@unique`, wiederum im
+  Rumpf jener Funktion geprüft). Die lesenden und schreibenden Funktionen der C-Bibliothek
+  (`memcpy`, `strlen`, `printf`, …) und deklarierte Freigabefunktionen sind bekannt.
 
 ### Goto-Vokabular (optional — die strukturierte Absicht eines goto deklarieren)
 
@@ -459,6 +504,14 @@ Index braucht zusätzlich `i >= 0` (`INDEX_MAYBE_NEGATIVE`), und die Arithmetik 
 nicht überlaufen: `i + 4 <= n` bei einem vorzeichenlosen `i` wird nicht angerechnet;
 `n >= 4 && i <= n - 4` schon. kenbi sucht die Prüfung auf dem Pfad; es entfernt nie eine.
 
+kenbi liest einen Index oder eine Länge als Variable plus oder minus eine Konstante (`buf[i]`,
+`buf[i + 1]`, `buf[i++]`, `*(p + i)`), als Konstante oder als `x % K` / `x & K`. Alles andere – ein
+Produkt, ein Aufruf, zwei Variablen, ein verschachtelter Lesezugriff – lässt sich keiner Prüfung
+zuordnen und wird gemeldet: Legen Sie den Wert in einer Variablen ab und begrenzen Sie diese. Auch
+ein konstanter Index oder eine konstante Länge wird gegen die Puffergröße geprüft: Bei einem
+Puffer variabler Größe (`buf[0]` auf `malloc(n * …)`) muss gezeigt sein, dass die Größe ausreicht,
+durch eine Prüfung auf dem Pfad (`if (n >= 1)`) oder ein deklariertes `@invariant(n >= 1)`.
+
 - `// @counted_by(<buf>: <len>)` über einer Funktion gibt einem Zeigerparameter seine Größe, auch
   als Feld (`b->buf: b->cap`) oder als Ringpuffer-Maske (`b->mask + 1`).
 - `// @invariant(<field> <rel> <size>)` deklariert eine Datenstruktur-Invariante (zum Beispiel
@@ -466,6 +519,46 @@ nicht überlaufen: `i + 4 <= n` bei einem vorzeichenlosen `i` wird nicht angerec
   braucht `// @maintains(...)`, was kenbi verifiziert (`UNGUARDED_INVARIANT_WRITE`,
   `INVARIANT_NOT_MAINTAINED`), und ein durch das Feld begrenzter Index ist über die Relation
   abgedeckt.
+- `// @invariant(<param> >= <K>)` oder `// @invariant(<param> <rel> <param>)` über einer
+  Funktion deklariert, was ihr Rumpf von ihren Parametern voraussetzt (`@invariant(n >= 2)`,
+  `@invariant(next <= num)`). kenbi prüft das an jedem Aufruf in `@spatial`-Code: Für die
+  Argumente muss gezeigt sein, dass sie es erfüllen – durch eine Prüfung auf dem Pfad, durch
+  Konstanten oder durch die deklarierte Invariante des Aufrufers –, sonst ist der Aufruf
+  `INVARIANT_NOT_MAINTAINED`.
+
+### Referenzen in verwalteten Speicher (`@refcheck`)
+
+- `// @refcheck` über einer Funktion oder auf Dateiebene: Eine lokale Variable, die einen Zeiger,
+  eine Referenz, einen Iterator oder eine Sicht in Speicher hält, den ein anderes Objekt verwaltet
+  (`p = buf->data`, `&v[0]`, `v.begin()`, `s.c_str()`), wird auf jedem Pfad verfolgt. Ihre
+  Verwendung nach einem Aufruf, der diesen Speicher neu allokiert oder freigegeben haben kann, ist
+  `REF_INVALIDATED`, wenn der Aufruf dies deklariert oder bekanntermaßen tut (`realloc`, `free`,
+  die Methoden der Standardcontainer), und `REF_UNPROVEN`, wenn der Aufruf einen schreibbaren
+  Zeiger oder eine Referenz auf das Objekt erhält und nichts deklariert. Den Zeiger nach dem
+  Aufruf neu holen.
+- Was verfolgt wird: Zeiger-, Referenz- und Iteratorvariablen; Sichten (`string_view`, `span`),
+  auch wenn sie aus ihren Teilen gebaut werden; ein Zeiger in einem Member einer lokalen Struktur
+  oder in einem lokalen Array (jeder Member und jedes Element für sich; ein Element, das über einen
+  nicht konstanten Index erreicht wird, kann jedes davon sein); und
+  Closures — ein Lambda hält eine Kopie dessen, was es per Wert erfasst, liest das per Referenz
+  Erfasste, wenn sein Rumpf läuft, und sein Rumpf wird überall dort gelesen, wo die Closure
+  verwendet wird.
+- `// @invalidates(param)` / `// @preserves(param)` über einer Funktion deklarieren, was zutrifft
+  (`this` für eine Methode, eine globale Variable mit ihrem Namen; `invalidates:` / `preserves:`
+  in einem `@contract`-Block für eine Bibliothek). Ein `@preserves`-Rumpf wird geprüft: Freigeben
+  oder Neuallokieren dessen, was der Parameter hält, oder die Übergabe an eine Funktion, die nicht
+  dasselbe verspricht, ist `REF_NOT_PRESERVED`. Ein `const`-Parameter braucht keine Deklaration.
+- Speicher, der über eine globale Variable erreichbar ist, kann von jeder Funktion des Programms
+  verändert werden; ein Zeiger dorthin, der über einen Aufruf hinweg gehalten wird, verlangt, dass
+  die aufgerufene Funktion `@preserves(<global>)` deklariert.
+- `// @returns_into(param)` über einer Funktion deklariert, dass ihr Ergebnis in Speicher zeigt, der
+  über `param` erreichbar ist; die Kopie des Aufrufers wird dann wie ein aus dem Objekt gelesener
+  Zeiger verfolgt (`// @returns_into()`: in keines ihrer Argumente; `returns_into:` in einem
+  `@contract`-Block). Eine Funktion, die einen solchen Zeiger zurückgibt, ohne es zu deklarieren,
+  ist `REF_RETURN_UNDECLARED`. Das Ergebnis einer Funktion, die nichts deklariert, kann in das
+  zeigen, was irgendein Zeigerargument hält: seine Verwendung, nachdem dieses Argument ungültig
+  wurde, ist `REF_UNPROVEN`. Von `strchr`, `memcpy` und ähnlichen ist bekannt, dass sie einen
+  Zeiger in den Block ihres Arguments zurückgeben.
 
 ### Initialisierung (`@initcheck`) und getaggte Unions (`@typecheck`)
 
@@ -525,8 +618,9 @@ Aufrufs steht:
 
 Ein Sprung zu einem anderen Puffer verlässt stattdessen die Funktion; ein Sprung ohne deklarierten
 Puffer ist `UNKNOWN_LONGJMP_TARGET`, und ein deklarierter Puffer, zu dem der Rumpf nicht springt,
-ist `LONGJMP_TARGET_MISMATCH`. Eine lokale Variable, die nicht `volatile` ist, nach dem setjmp
-geändert und im Landezweig gelesen wird, ist `SETJMP_CLOBBERED`: Ihr Wert ist dort unbestimmt.
+ist `LONGJMP_TARGET_MISMATCH`. Eine lokale Variable, die nicht `volatile` ist, zwischen dem setjmp
+und dem Sprung geändert und danach auf einem Pfad des Sprungs gelesen wird – im Landezweig oder
+dahinter –, bevor sie neu zugewiesen wurde, ist `SETJMP_CLOBBERED`: Ihr Wert ist dort unbestimmt.
 Ein setjmp in jeder anderen Form (als Ausdrucksanweisung, als Schleifenbedingung, in einer
 Zuweisung oder in einem `try`-Block) ist `UNSUPPORTED_SETJMP`.
 
@@ -592,6 +686,10 @@ C++ ein Objekt mit nicht-trivialem Destruktor, das noch im Gültigkeitsbereich i
 dem deklarierten jmp_buf), `SETJMP_CLOBBERED` (eine nicht-volatile lokale Variable, gelesen wo ein
 longjmp landet), `UNSUPPORTED_SETJMP` (ein `setjmp` in einer Form, die kenbi nicht modelliert),
 `FINALLY_BYPASSED` (ein besitzender Ausgang umgeht einen deklarierten `@goto_finally`-Trichter),
+`BORROW_ESCAPES` (der Rumpf speichert einen `@borrows`-Zeiger oder übergibt ihn an eine Funktion,
+die das könnte),
+`UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (ein `@unique`-Parameter, den ein anderes
+Argument erreicht oder den der Rumpf behält),
 `FREE_NONHEAP` (ein `free` eines Zeigers in Stack- oder anderen Nicht-Heap-Speicher),
 `BORROW_MOVED` / `UNCONTRACTED_MOVE` (ein Move aus einem Borrow heraus oder in einen Callee, der
 keine Übernahme deklariert), `REALLOC_UNVERIFIED` / `REALLOC_SELF_REASSIGN` (ein `realloc`, dessen
@@ -601,7 +699,7 @@ Freigabe in einem Konstrukt, das kenbi nicht modelliert, abgelehnt statt verworf
 Hygieneprüfungen `UNKNOWN_RESOURCE` / `STALE_UNSAFE`. Unter den Opt-in-Achsen:
 `UNVALIDATED_INDEX`, `UNVALIDATED_SIZE`, `INAPPROPRIATE_BOUND`, `INDEX_MAYBE_NEGATIVE`,
 `UNGUARDED_INVARIANT_WRITE`, `INVARIANT_NOT_MAINTAINED` (`@spatial`), `USE_OF_UNINITIALIZED`
-(`@initcheck`), `TYPE_CONFUSION` (`@typecheck`) sowie `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
+(`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_RETURN_UNDECLARED`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION` (`@typecheck`) sowie `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
 `LOCK_LEAKED`, `DOUBLE_LOCK`, `UNLOCK_WITHOUT_LOCK`, `LOCK_NOT_ACQUIRED`,
 `REQUIRED_LOCK_NOT_HELD`, `LOCK_ORDER_VIOLATION`, `SAME_CLASS_NO_ORDER`,
 `UNDECLARED_INDIRECT_CALL`, `UNDECLARED_FN_TARGET` (`@threadsafe`). Schleifen
@@ -853,7 +951,7 @@ IR, sodass das Parsen von C/C++ ein austauschbarer Teil ist.
 ## Tests
 
 `tests/*.mc` treiben die Engine direkt an (17 Fälle). `tests/c/*.c` und `tests/cpp/*.cpp` tragen
-diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (349 Fälle); der
+diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (370 Fälle); der
 Runner überführt jedes über libclang und prüft die erzeugten Diagnosen — **einschließlich ihrer
 Quellzeile** — gegen die `//EXPECT CODE`-Marker in jeder Datei (in der Zeile selbst oder
 `//EXPECT CODE@LINE`). Eine falsche Zeile oder eine fehlende / überzählige

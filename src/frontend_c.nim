@@ -1100,47 +1100,399 @@ proc findLandingSites(ctx: var Ctx, body: CXCursor) =
          (g.off < site.callOff or g.off >= site.regionEnd):
         site.regionEnd = l.off
 
-proc clobberedLocals(ctx: Ctx, fn, body: CXCursor, site: LandingSite,
-                     landing: seq[tuple[first, last: int]]): HashSet[string] =
-  ## The locals and parameters a longjmp back to `site` leaves indeterminate (C11 7.13.2.1):
-  ## automatic, not volatile, declared before the setjmp and changed after it — assigned,
-  ## incremented, or exposed by `&` — outside the code the jump returns into (`landing`).
-  ## "After" includes code before the setjmp in a loop around it: it runs again after the
-  ## setjmp on the next iteration.
-  var cands, written: HashSet[string]
-  let sjOff = site.callOff
+proc collectJmpLocals(ctx: var Ctx, fn, body: CXCursor) =
+  ## The objects a longjmp can leave indeterminate (C11 7.13.2.1): the function's automatic,
+  ## non-volatile locals and parameters. Empty when the function has no landing site.
+  ctx.jmpLocals = initHashSet[string]()
+  if ctx.landingSites.len == 0: return
   proc notVolatile(d: CXCursor): bool =
     clang_isVolatileQualifiedType(clang_getCursorType(d)) == 0
-  proc afterSetjmp(off: int): bool =
-    var later = off > sjOff
-    for l in site.loops:
-      if off >= l.first and off < l.last: later = true
-    for r in landing:
-      if off >= r.first and off < r.last: later = false
-    later
   for p in collectChildren(fn):
-    if clang_getCursorKind(p) == ckParmDecl and notVolatile(p): cands.incl usr(p)
-  proc walk(ctx: Ctx, n: CXCursor, cands, written: var HashSet[string]) =
+    if clang_getCursorKind(p) == ckParmDecl and notVolatile(p): ctx.jmpLocals.incl usr(p)
+  proc walk(n: CXCursor, acc: var HashSet[string]) =
     let k = clang_getCursorKind(n)
-    let off = startOffset(n)
-    let after = afterSetjmp(off)
-    if k == ckVarDecl and off < sjOff and hasAutomaticStorage(n) and notVolatile(n):
-      cands.incl usr(n)
-    elif after and (k == ckBinaryOperator or k == ckCompoundAssign):
-      let kids = collectChildren(n)
+    if k == ckLambdaExpr: return
+    if k == ckVarDecl and hasAutomaticStorage(n) and notVolatile(n): acc.incl usr(n)
+    for ch in collectChildren(n): walk(ch, acc)
+  walk(body, ctx.jmpLocals)
+
+proc jmpLocalEvents(ctx: Ctx, n: CXCursor, top: bool, pre, marks, post: var seq[Stmt]) =
+  ## The uses and changes of the function's jump-sensitive locals in one expression or
+  ## declaration: `pre` the uses of a value, `marks` the possible changes (both placed before
+  ## the statement), `post` the assignments that give a fresh value (placed after it — only
+  ## for the statement's own assignment, `top`, which runs whenever the statement completes).
+  let u = unwrap(n)
+  let k = clang_getCursorKind(u)
+  if k == ckLambdaExpr: return
+  proc local(ctx: Ctx, e: CXCursor): tuple[key, disp: string] =
+    let r = unwrap(e)
+    if clang_getCursorKind(r) != ckDeclRefExpr: return ("", "")
+    let key = referencedUsr(r)
+    if key in ctx.jmpLocals: (key, spelling(r)) else: ("", "")
+  proc base(ctx: Ctx, e: CXCursor): tuple[key, disp: string] =
+    ## the local a `.field` / `[i]` chain is part of (not through a pointer)
+    var r = unwrap(e)
+    while true:
+      let rk = clang_getCursorKind(r)
+      let kids = collectChildren(r)
+      if kids.len == 0: break
+      if rk == ckArraySubscriptExpr and isArrayType(unwrap(kids[0])): r = unwrap(kids[0])
+      elif rk == ckMemberRefExpr and "->" notin ctx.cursorTokens(r): r = unwrap(kids[0])
+      else: break
+    ctx.local(r)
+  case k
+  of ckVarDecl:
+    let kids = collectChildren(u)
+    if kids.len > 0 and clang_isExpression(clang_getCursorKind(kids[^1])) != 0:
+      ctx.jmpLocalEvents(kids[^1], false, pre, marks, post)
+      if usr(u) in ctx.jmpLocals:
+        post.add emit(ikJmpLocalWrite, startLine(u), a = spelling(u), aKey = usr(u), off = 3)
+    return
+  of ckDeclStmt:
+    for d in collectChildren(u): ctx.jmpLocalEvents(d, top, pre, marks, post)
+    return
+  of ckBinaryOperator, ckCompoundAssign:
+    let kids = collectChildren(u)
+    if kids.len == 2 and (k == ckCompoundAssign or ctx.binOperator(u) == "="):
+      let whole = ctx.local(kids[0])
+      let part = (if whole.key.len > 0: whole else: ctx.base(kids[0]))
+      if part.key.len > 0:
+        if k == ckCompoundAssign or whole.key.len == 0:
+          # `x += e` uses the old value; `s.f = e` / `a[i] = e` changes part of the object
+          if k == ckCompoundAssign:
+            pre.add emit(ikJmpLocalRead, startLine(u), a = part.disp, aKey = part.key)
+          marks.add emit(ikJmpLocalWrite, startLine(u), a = part.disp, aKey = part.key, off = 2)
+          if whole.key.len == 0:
+            for ch in collectChildren(unwrap(kids[0]))[1 .. ^1]:    # the subscripts
+              ctx.jmpLocalEvents(ch, false, pre, marks, post)
+        elif top:
+          post.add emit(ikJmpLocalWrite, startLine(u), a = part.disp, aKey = part.key, off = 3)
+        else:
+          marks.add emit(ikJmpLocalWrite, startLine(u), a = part.disp, aKey = part.key, off = 2)
+        ctx.jmpLocalEvents(kids[1], false, pre, marks, post)
+        return
+  of ckUnaryOperator:
+    let toks = ctx.cursorTokens(u)
+    let kids = collectChildren(u)
+    if toks.len > 0 and kids.len == 1:
+      let step = toks[0] in ["++", "--"] or toks[^1] in ["++", "--"]
+      if step or toks[0] == "&":
+        let part = ctx.base(kids[0])
+        if part.key.len > 0:
+          if step: pre.add emit(ikJmpLocalRead, startLine(u), a = part.disp, aKey = part.key)
+          marks.add emit(ikJmpLocalWrite, startLine(u), a = part.disp, aKey = part.key, off = 2)
+          return
+  of ckArraySubscriptExpr:
+    let kids = collectChildren(u)
+    if kids.len == 2 and isArrayType(unwrap(kids[0])):
+      # an element of a local array: a use of the array, not an exposure of it
+      let arr = ctx.local(kids[0])
+      if arr.key.len > 0:
+        pre.add emit(ikJmpLocalRead, startLine(u), a = arr.disp, aKey = arr.key)
+        ctx.jmpLocalEvents(kids[1], false, pre, marks, post)
+        return
+  of ckDeclRefExpr:
+    let v = ctx.local(u)
+    if v.key.len > 0:
+      pre.add emit(ikJmpLocalRead, startLine(u), a = v.disp, aKey = v.key)
+      # an array used as a pointer may be written through it from here on
+      if isArrayType(u):
+        marks.add emit(ikJmpLocalWrite, startLine(u), a = v.disp, aKey = v.key, off = 2)
+    return
+  else: discard
+  for ch in collectChildren(u): ctx.jmpLocalEvents(ch, false, pre, marks, post)
+
+proc jmpLocalStmtEvents(ctx: Ctx, c: CXCursor, outp, post: var seq[Stmt]) =
+  ## The events of the part of statement `c` that runs when control reaches it: the whole of a
+  ## declaration, an expression or a `return`, the condition of an `if` or `switch`, the range
+  ## of a range-`for`. Nested statements, and the header of a loop, are lowered as statements
+  ## of their own and emit theirs there.
+  let k = clang_getCursorKind(c)
+  var pre, marks: seq[Stmt]
+  let kids = collectChildren(c)
+  if k == ckDeclStmt or clang_isExpression(k) != 0:
+    ctx.jmpLocalEvents(c, true, pre, marks, post)
+  elif k == ckReturnStmt:
+    for ch in kids: ctx.jmpLocalEvents(ch, false, pre, marks, post)
+  elif k in [ckIfStmt, ckSwitchStmt]:
+    # the condition, with the declaration before it when there is one (C++)
+    var last = 1
+    if kids.len >= 3 and clang_getCursorKind(kids[0]) in [ckDeclStmt, ckVarDecl]: last = 2
+    var condPost: seq[Stmt]
+    for i in 0 ..< min(last, kids.len): ctx.jmpLocalEvents(kids[i], false, pre, marks, condPost)
+    marks.add condPost
+  elif k == ckCXXForRangeStmt:
+    for i in 0 ..< kids.len - 1: ctx.jmpLocalEvents(kids[i], false, pre, marks, post)
+  outp.add pre
+  outp.add marks
+
+type PtrRoot = object
+  ## What a pointer expression points into, as far as it can be read from the expression.
+  kind: char     ## 'O' a named object (`&x`, an array `x`, `&x.f`), 'P' the value of a pointer
+                 ## variable or one-level field (`p`, `p + 4`, `&p->f`, `s->buf`), 'L' nothing
+                 ## that can be shared (a null constant, a literal, a function), 'U' unreadable
+  key: string    ## 'O': the object's USR; 'P': the variable's tracking key
+  path: string   ## the part of that object pointed to, one `/`-led step per level: `/.name` a
+                 ## struct member, `/[` an element or offset (indices are not compared), `/*` a
+                 ## union member (which overlaps the others)
+  disp: string
+
+proc canonicalPointer(c: CXCursor): bool =
+  clang_getCanonicalType(clang_getCursorType(c)).kind == tyPointer
+
+proc ptrRoot(ctx: Ctx, e: CXCursor): PtrRoot
+proc lvalueRoot(ctx: Ctx, e: CXCursor): PtrRoot =
+  ## The object an lvalue expression names — what `&e` points into.
+  let u = unwrap(e)
+  let k = clang_getCursorKind(u)
+  let disp = ctx.cursorTokens(u).join("")
+  let kids = collectChildren(u)
+  case k
+  of ckDeclRefExpr:
+    let d = clang_getCursorReferenced(u)
+    if clang_getCursorKind(d) in [ckVarDecl, ckParmDecl]:
+      return PtrRoot(kind: 'O', key: referencedUsr(u), disp: disp)
+  of ckMemberRefExpr:
+    if kids.len == 1:
+      let toks = ctx.cursorTokens(u)
+      let arrow = toks.len >= 2 and toks[^2] == "->"
+      var r = (if arrow: ctx.ptrRoot(kids[0]) else: ctx.lvalueRoot(kids[0]))
+      r.disp = disp
+      if r.kind in {'O', 'P'}:
+        let inUnion = clang_getCursorKind(clang_getCursorSemanticParent(
+          clang_getCursorReferenced(u))) == ckUnionDecl
+        r.path.add (if inUnion: "/*" else: "/." & spelling(u))
+      return r
+  of ckArraySubscriptExpr:
+    if kids.len == 2:
+      var r = (if isArrayType(unwrap(kids[0])): ctx.lvalueRoot(kids[0]) else: ctx.ptrRoot(kids[0]))
+      r.disp = disp
+      if r.kind in {'O', 'P'}: r.path.add "/["
+      return r
+  of ckUnaryOperator:
+    let toks = ctx.cursorTokens(u)
+    if toks.len > 0 and toks[0] == "*" and kids.len == 1:
+      var r = ctx.ptrRoot(kids[0])
+      r.disp = disp
+      return r
+  else: discard
+  PtrRoot(kind: 'U', disp: disp)
+
+proc ptrRoot(ctx: Ctx, e: CXCursor): PtrRoot =
+  ## What the pointer value `e` points into.
+  let u = unwrap(e)
+  let k = clang_getCursorKind(u)
+  let toks = ctx.cursorTokens(u)
+  let disp = toks.join("")
+  let kids = collectChildren(u)
+  if k in [ckIntegerLiteral, ckStringLiteral] or disp in ["NULL", "nullptr", "0"]:
+    return PtrRoot(kind: 'L', disp: disp)
+  case k
+  of ckDeclRefExpr:
+    let d = clang_getCursorReferenced(u)
+    let dk = clang_getCursorKind(d)
+    if dk == ckFunctionDecl: return PtrRoot(kind: 'L', disp: disp)
+    if dk in [ckVarDecl, ckParmDecl]:
+      if isArrayType(u): return PtrRoot(kind: 'O', key: referencedUsr(u), disp: disp)
+      if canonicalPointer(u): return PtrRoot(kind: 'P', key: referencedUsr(u), disp: disp)
+  of ckMemberRefExpr:
+    if isArrayType(u): return ctx.lvalueRoot(u)          # an array member used as a pointer
+    let fp = fieldPath(u)
+    if fp.key.len > 0 and canonicalPointer(u):
+      return PtrRoot(kind: 'P', key: fp.key, disp: disp)
+  of ckArraySubscriptExpr:
+    if isArrayType(u): return ctx.lvalueRoot(u)          # a row of a 2-d array
+  of ckUnaryOperator:
+    if toks.len > 0 and toks[0] == "&" and kids.len == 1: return ctx.lvalueRoot(kids[0])
+  of ckBinaryOperator:
+    # pointer arithmetic stays inside the object the pointer operand points into
+    if kids.len == 2 and ctx.binOperator(u) in ["+", "-"]:
+      for side in kids:
+        if canonicalPointer(side) or isArrayType(unwrap(side)):
+          var r = ctx.ptrRoot(side)
+          r.disp = disp
+          if r.kind in {'O', 'P'}: r.path.add "/["
+          return r
+  of ckCStyleCastExpr:
+    if kids.len > 0:
+      var r = ctx.ptrRoot(kids[^1])
+      r.disp = disp
+      return r
+  else: discard
+  PtrRoot(kind: 'U', disp: disp)
+
+proc collectUniqueFacts(ctx: var Ctx, fn, body: CXCursor) =
+  ## What the exclusivity checks need to know about the function being lowered: which
+  ## variables have their address taken and how often, which are assigned, where its loops are.
+  ctx.uqAddrCount = initTable[string, int]()
+  ctx.uqAssigned = initHashSet[string]()
+  ctx.uqLocals = initHashSet[string]()
+  ctx.uqParams = initHashSet[string]()
+  ctx.uqLoops = @[]
+  ctx.uqHasGoto = false
+  for p in collectChildren(fn):
+    if clang_getCursorKind(p) == ckParmDecl:
+      ctx.uqParams.incl usr(p)
+      ctx.uqLocals.incl usr(p)
+  proc walk(ctx: var Ctx, n: CXCursor, subscripted: bool) =
+    let k = clang_getCursorKind(n)
+    let kids = collectChildren(n)
+    case k
+    of ckVarDecl:
+      if hasAutomaticStorage(n): ctx.uqLocals.incl usr(n)
+    of ckGotoStmt: ctx.uqHasGoto = true
+    of ckForStmt, ckWhileStmt, ckDoStmt, ckCXXForRangeStmt:
+      ctx.uqLoops.add (startOffset(n), endOffset(n))
+    of ckBinaryOperator, ckCompoundAssign:
       if kids.len == 2 and (k == ckCompoundAssign or ctx.binOperator(n) == "="):
         let lhs = unwrap(kids[0])
-        if clang_getCursorKind(lhs) == ckDeclRefExpr: written.incl referencedUsr(lhs)
-    elif after and k == ckUnaryOperator:
+        if clang_getCursorKind(lhs) == ckDeclRefExpr: ctx.uqAssigned.incl referencedUsr(lhs)
+    of ckUnaryOperator:
       let toks = ctx.cursorTokens(n)
-      if toks.len > 0 and (toks[0] in ["&", "++", "--"] or toks[^1] in ["++", "--"]):
-        let kids = collectChildren(n)
-        if kids.len == 1 and clang_getCursorKind(unwrap(kids[0])) == ckDeclRefExpr:
-          written.incl referencedUsr(unwrap(kids[0]))
-    for ch in collectChildren(n): ctx.walk(ch, cands, written)
-  ctx.walk(body, cands, written)
-  for k in cands:
-    if k in written: result.incl k
+      if toks.len > 0 and kids.len == 1:
+        if toks[0] in ["++", "--"] or toks[^1] in ["++", "--"]:
+          let o = unwrap(kids[0])
+          if clang_getCursorKind(o) == ckDeclRefExpr: ctx.uqAssigned.incl referencedUsr(o)
+        elif toks[0] == "&":
+          let r = ctx.lvalueRoot(kids[0])
+          if r.kind == 'O': ctx.uqAddrCount.mgetOrPut(r.key, 0).inc
+    of ckDeclRefExpr:
+      # an array named outside a subscript is a pointer to it
+      if isArrayType(n) and not subscripted: ctx.uqAddrCount.mgetOrPut(referencedUsr(n), 0).inc
+    else: discard
+    for i, ch in kids:
+      ctx.walk(ch, k == ckArraySubscriptExpr and i == 0 or
+                   (subscripted and k notin [ckArraySubscriptExpr, ckCallExpr, ckUnaryOperator,
+                                             ckBinaryOperator, ckCompoundAssign, ckMemberRefExpr] and
+                    clang_isExpression(k) != 0))
+  ctx.walk(body, false)
+
+proc entryValue(ctx: Ctx, key: string): bool =
+  ## A parameter that still holds the pointer the function was called with: never assigned,
+  ## its own address never taken.
+  key in ctx.uqParams and key notin ctx.uqAssigned and ctx.uqAddrCount.getOrDefault(key) == 0
+
+proc soleAddressHere(ctx: Ctx, key: string, at: int): bool =
+  ## Is this the only pointer to the automatic local `key` that can exist — its address is
+  ## taken once in the function, at a place that runs at most once per call? (In C++ a
+  ## reference can be bound to it without an `&`, so the count is not the whole story there.)
+  if ctx.isCpp or key notin ctx.uqLocals or ctx.uqHasGoto: return false
+  if ctx.uqAddrCount.getOrDefault(key) != 1: return false
+  for l in ctx.uqLoops:
+    if at >= l.first and at < l.last: return false
+  true
+
+proc uniqueVerdict(ctx: Ctx, u, o: PtrRoot, at: int): int =
+  ## Can the exclusive argument `u` and the other argument `o` reach the same object?
+  ## -1 no; 1 yes, as written; 2 nothing shows they cannot; 0 it depends on what the two
+  ## pointer variables are bound to on the path; 3 one is a local object and it depends on what
+  ## the other, a pointer variable, is bound to.
+  if u.kind == 'L' or o.kind == 'L': return -1
+  if u.kind == 'U' or o.kind == 'U': return 2
+  if u.kind == o.kind and u.key == o.key:
+    # one object: distinct members are distinct, a part and its container are not, and two
+    # elements or two union members cannot be told apart
+    let (a, b) = (u.path.split('/'), o.path.split('/'))
+    for i in 1 ..< min(a.len, b.len):
+      if a[i] in ["[", "*"] or b[i] in ["[", "*"]: return 2
+      if a[i] != b[i]: return -1
+    return 1
+  if u.kind == 'O' and o.kind == 'O': return -1
+  if u.kind == 'P' and o.kind == 'P':
+    # two parameters as passed in, one of them declared exclusive by this function
+    if ctx.entryValue(u.key) and ctx.entryValue(o.key) and
+       (u.key in ctx.curUnique or o.key in ctx.curUnique): return -1
+    return 0
+  let (obj, ptrv) = (if u.kind == 'O': (u, o) else: (o, u))
+  if obj.key in ctx.uqLocals:
+    # a pointer the function was called with cannot point into its own frame; nor can any
+    # other pointer when this is the only place the local's address is taken
+    if ctx.entryValue(ptrv.key) or ctx.soleAddressHere(obj.key, at): return -1
+    return 3            # ... nor one bound to a block this function allocated: decided on the path
+  2
+
+proc emitUniqueChecks(ctx: Ctx, call: CXCursor, callee: string, line: int, outp: var seq[Stmt]) =
+  ## EXCLUSIVITY at a call: for each parameter the callee declares `@unique`, the argument
+  ## passed for it against every other pointer argument of the call.
+  let names = ctx.uniqueParams.getOrDefault(callee, @[])
+  if names.len == 0: return
+  let decl = clang_getCursorReferenced(call)
+  let np = int(clang_Cursor_getNumArguments(decl))
+  let na = int(clang_Cursor_getNumArguments(call))
+  var roots: seq[PtrRoot]
+  var isPtr: seq[bool]
+  for ai in 0 ..< na:
+    let arg = clang_Cursor_getArgument(call, cuint(ai))
+    isPtr.add canonicalPointer(arg) or isArrayType(unwrap(arg))
+    roots.add (if isPtr[^1]: ctx.ptrRoot(arg) else: PtrRoot(kind: 'L'))
+  for pi in 0 ..< min(np, na):
+    let pname = spelling(clang_Cursor_getArgument(decl, cuint(pi)))
+    if pname notin names or not isPtr[pi]: continue
+    for oi in 0 ..< na:
+      if oi == pi or not isPtr[oi]: continue
+      if oi < pi and oi < np and
+         spelling(clang_Cursor_getArgument(decl, cuint(oi))) in names: continue   # pair seen
+      let v = ctx.uniqueVerdict(roots[pi], roots[oi], startOffset(call))
+      if v < 0: continue
+      outp.add emit(ikUniqueCheck, line, a = roots[pi].disp, aKey = roots[pi].key,
+                    b = roots[oi].disp, bKey = roots[oi].key, cKey = callee & "|" & pname,
+                    off = v, off2 = (if ctx.entryValue(roots[pi].key): 1 else: 0) or
+                                    (if ctx.entryValue(roots[oi].key): 2 else: 0) or
+                                    (if roots[pi].kind == 'O': 4 else: 0))
+
+proc keptEscapes(ctx: var Ctx, fn, body: CXCursor, unique, borrowed: seq[string],
+                 outp: var seq[Stmt]) =
+  ## The body side of `@unique` and `@borrows`: the pointer, or anything derived from it, must
+  ## not be stored where it outlives the call — a global, a field, or through another pointer.
+  ## Leaves in `ctx.curKept` the variables that hold such a pointer, for the check of what the
+  ## body passes on to other functions.
+  ctx.curKept = initTable[string, tuple[param: string, borrow: bool]]()
+  for p in collectChildren(fn):
+    if clang_getCursorKind(p) != ckParmDecl: continue
+    if spelling(p) in unique:
+      ctx.curKept[usr(p)] = (spelling(p), false)
+      ctx.curUnique.incl usr(p)
+    elif spelling(p) in borrowed and canonicalPointer(p):
+      ctx.curKept[usr(p)] = (spelling(p), true)
+  if ctx.curKept.len == 0: return
+  var stores: seq[tuple[target: CXCursor, hasTarget: bool, targetKey: string, value: CXCursor]]
+  proc collect(ctx: Ctx, n: CXCursor,
+               stores: var seq[tuple[target: CXCursor, hasTarget: bool, targetKey: string,
+                                     value: CXCursor]]) =
+    let k = clang_getCursorKind(n)
+    if k == ckLambdaExpr: return
+    let kids = collectChildren(n)
+    if k == ckBinaryOperator and kids.len == 2 and ctx.binOperator(n) == "=":
+      stores.add (kids[0], true, "", kids[1])
+    elif k == ckVarDecl and kids.len > 0 and clang_isExpression(clang_getCursorKind(kids[^1])) != 0:
+      stores.add (n, false, (if hasAutomaticStorage(n): usr(n) else: ""), kids[^1])
+    for ch in kids: ctx.collect(ch, stores)
+  ctx.collect(body, stores)
+  proc localTarget(ctx: Ctx, st: tuple[target: CXCursor, hasTarget: bool, targetKey: string,
+                                         value: CXCursor]): string =
+    ## the automatic local a store writes, or "" when it writes anything else
+    if not st.hasTarget: return st.targetKey
+    let t = unwrap(st.target)
+    if clang_getCursorKind(t) != ckDeclRefExpr: return ""
+    let key = referencedUsr(t)
+    if key in ctx.uqLocals: key else: ""
+  var grown = true
+  while grown:                                    # copies of copies
+    grown = false
+    for st in stores:
+      let r = ctx.ptrRoot(st.value)
+      if r.kind != 'P' or r.key notin ctx.curKept: continue
+      let lt = ctx.localTarget(st)
+      if lt.len > 0 and lt notin ctx.curKept:
+        ctx.curKept[lt] = ctx.curKept[r.key]
+        grown = true
+  for st in stores:
+    let r = ctx.ptrRoot(st.value)
+    if r.kind != 'P' or r.key notin ctx.curKept: continue
+    if ctx.localTarget(st).len == 0:
+      let kept = ctx.curKept[r.key]
+      outp.add emit(ikUniqueEscape, startLine(st.value), a = r.disp, b = kept.param,
+                    off2 = (if kept.borrow: 1 else: 0))
 
 proc landingSiteAt(ctx: Ctx, stmtOff: int): int =
   ## The landing site whose `if` / `switch` starts at `stmtOff`, or -1.
@@ -1673,6 +2025,921 @@ proc calleeParamName(ctx: Ctx, callee: string, pos: int): string =
     if (fn.name == callee or fn.qual == callee) and pos < fn.params.len: return fn.params[pos].name
   ""
 
+proc keptPassedOn(ctx: Ctx, body: CXCursor, outp: var seq[Stmt]) =
+  ## The other way a pointer outlives a call: the body hands it to a function that keeps it.
+  ## A pointer the function may not keep (`ctx.curKept`) may be passed only where the receiving
+  ## parameter is declared not to keep it either — `@borrows` or `@unique`, each verified in
+  ## that function's own body, so the promise holds however many calls deep the pointer goes —
+  ## or to a function known to release or only read it. Anything else is reported at the call.
+  if ctx.curKept.len == 0: return
+  proc walk(ctx: Ctx, n: CXCursor, outp: var seq[Stmt]) =
+    let k = clang_getCursorKind(n)
+    if k == ckLambdaExpr: return
+    if k == ckCallExpr:
+      let decl = clang_getCursorReferenced(n)
+      let ind = indirectFnptr(n)
+      var callee = ctx.effectiveCallee(n)
+      if clang_getCursorKind(decl) == ckCXXMethod:
+        let q = spelling(clang_getCursorSemanticParent(decl)) & "::" & spelling(n)
+        if ctx.argContracts.hasKey(q) or ctx.uniqueParams.hasKey(q): callee = q
+      for ai in 0 ..< int(clang_Cursor_getNumArguments(n)):
+        let arg = clang_Cursor_getArgument(n, cuint(ai))
+        if not (canonicalPointer(arg) or isArrayType(unwrap(arg))): continue
+        let r = ctx.ptrRoot(arg)
+        if r.kind != 'P' or r.key notin ctx.curKept: continue
+        let kept = ctx.curKept[r.key]
+        let ci = (if ind.isIndirect: ctx.indirectArgContract(ind.usr, ai)
+                  else: ctx.argContract(callee, ai))
+        var how = 1                               # 1: nothing declared; 2: declared to take it
+        if ci.has and ci.instr in {ikMove, ikAdopt}:
+          if kept.borrow: continue                # reported as BORROW_MOVED
+          how = 2
+        elif ci.has: continue                     # borrows it, or releases it
+        elif not ind.isIndirect:
+          if callee in knownBorrowFns or callee in ctx.deallocators: continue
+          if ai < int(clang_Cursor_getNumArguments(decl)) and
+             spelling(clang_Cursor_getArgument(decl, cuint(ai))) in
+               ctx.uniqueParams.getOrDefault(callee, @[]): continue
+        outp.add emit(ikUniqueEscape, startLine(arg), a = r.disp, b = kept.param,
+                      cKey = (if ind.isIndirect: ind.disp else: callee),
+                      bKey = (if ind.isIndirect: "" else: ctx.calleeParamName(callee, ai)),
+                      off = how, off2 = (if kept.borrow: 1 else: 0))
+    for ch in collectChildren(n): ctx.walk(ch, outp)
+  ctx.walk(body, outp)
+
+# --- references into storage another object manages (`@refcheck`) ---------------------------
+
+type RefPath = object
+  ## A storage location, or the region a pointer points into, written as a root variable and
+  ## the steps that lead from it: `*` through a pointer, `.name` a member, `.#` the storage a
+  ## class object manages (what its methods hand out pointers, references and iterators into).
+  ok: bool
+  root, disp: string
+  global: bool     ## the root is not an automatic local or a parameter of this function
+  steps: seq[string]
+
+const
+  refSep = "\x1f"
+  cxxCastKinds = [124.cint, 125, 126, 127, 128]   # static / dynamic / reinterpret / const / functional
+  refMethodKinds = [ckCXXMethod, 26.cint]         # a member function, a conversion function
+  refOwners = ["vector", "deque", "basic_string", "list", "forward_list", "map", "multimap", "set",
+               "multiset", "unordered_map", "unordered_multimap", "unordered_set",
+               "unordered_multiset", "unique_ptr", "shared_ptr", "optional", "any", "variant",
+               "function", "queue", "stack", "priority_queue"]
+    ## the standard classes that manage storage their methods hand out pointers into
+  refNodeBased = ["list", "forward_list", "map", "multimap", "set", "multiset"]
+    ## ... those whose elements stay where they are when another is inserted
+  refKeeps = ["begin", "end", "rbegin", "rend", "cbegin", "cend", "crbegin", "crend", "data",
+              "front", "back", "at", "find", "lower_bound", "upper_bound", "equal_range", "get",
+              "operator*", "operator->", "c_str", "top", "value", "operator bool"]
+    ## non-const methods that move nothing
+  refInserts = ["push_back", "emplace_back", "push_front", "emplace_front", "insert", "emplace",
+                "emplace_hint", "insert_or_assign", "try_emplace", "append", "operator+=", "push"]
+    ## methods that add elements: they may reallocate, except in a node-based container
+  refChanges = ["erase", "clear", "resize", "reserve", "shrink_to_fit", "assign", "swap",
+                "operator=", "pop_back", "pop_front", "pop", "replace", "rehash", "merge", "splice",
+                "remove", "remove_if", "unique", "extract", "reset", "release", "sort", "reverse"]
+    ## methods that remove, move or replace elements
+  refStdKeeps = ["begin", "end", "cbegin", "cend", "rbegin", "rend", "data", "size", "empty", "get",
+                 "addressof", "ref", "cref", "forward", "as_const", "next", "prev", "distance",
+                 "to_address"]
+    ## free functions of the standard library that leave their reference arguments in place
+  refStdChanges = ["move", "swap", "exchange"]
+    ## ... and those that leave them moved from or exchanged
+  refGroupSep = "\x1e"
+  refIntoArg = {"strchr": 0, "strrchr": 0, "strstr": 0, "strcasestr": 0, "strpbrk": 0,
+                "memchr": 0, "memrchr": 0, "strtok": 0, "index": 0, "rindex": 0, "strcpy": 0,
+                "strncpy": 0, "stpcpy": 0, "strcat": 0, "strncat": 0, "memcpy": 0, "memmove": 0,
+                "memset": 0, "fgets": 0, "basename": 0, "dirname": 0, "bsearch": 1, "wcschr": 0,
+                "wcsrchr": 0, "wcsstr": 0, "wmemchr": 0}.toTable
+    ## C library functions whose result points into the block this argument points into
+
+proc refStrip(c: CXCursor): CXCursor =
+  ## `c` without parentheses, casts and the copy a by-value class argument is wrapped in.
+  result = unwrap(c)
+  while true:
+    let k = clang_getCursorKind(result)
+    let kids = collectChildren(result)
+    if (k == ckCStyleCastExpr or k in cxxCastKinds) and kids.len > 0: result = unwrap(kids[^1])
+    elif k == ckCallExpr and kids.len == 1 and
+         clang_getCursorKind(clang_getCursorReferenced(result)) == ckConstructor:
+      result = unwrap(kids[0])
+    else: break
+
+proc canonKind(c: CXCursor): auto = clang_getCanonicalType(clang_getCursorType(c)).kind
+
+proc inStd(d: CXCursor): bool =
+  var p = clang_getCursorSemanticParent(d)
+  for _ in 0 ..< 12:
+    if isNull(p): return false
+    if clang_getCursorKind(p) == ckNamespace and spelling(p) == "std": return true
+    p = clang_getCursorSemanticParent(p)
+
+proc refObject(ctx: Ctx, call: CXCursor): tuple[has, arrow, implicitThis, operatorForm: bool,
+                                                obj: CXCursor] =
+  ## The object a method or operator call acts on.
+  let kids = collectChildren(call)
+  if kids.len == 0: return
+  let first = unwrap(kids[0])
+  if clang_getCursorKind(first) == ckMemberRefExpr and
+     clang_getCursorKind(clang_getCursorReferenced(first)) in refMethodKinds:
+    let mk = collectChildren(first)
+    if mk.len == 0 or clang_getCursorKind(unwrap(mk[0])) == ckCXXThisExpr:
+      return (true, false, true, false, first)
+    let toks = ctx.cursorTokens(first)
+    return (true, toks.len >= 2 and toks[^2] == "->", false, false, mk[0])
+  if spelling(call).startsWith("operator") and clang_Cursor_getNumArguments(call) >= 1:
+    return (true, false, false, true, clang_Cursor_getArgument(call, 0))
+
+proc refLvalue(ctx: Ctx, e: CXCursor): RefPath
+proc refPointee(ctx: Ctx, e: CXCursor): RefPath
+
+proc refObjectPath(ctx: Ctx, call: CXCursor): RefPath =
+  ## Where the object of a method or operator call is.
+  let o = ctx.refObject(call)
+  if not o.has: return
+  if o.implicitThis: RefPath(ok: true, root: "this", disp: "this", steps: @["*"])
+  elif o.arrow: ctx.refPointee(o.obj)
+  else: ctx.refLvalue(o.obj)
+
+proc refCallRegion(ctx: Ctx, call: CXCursor): RefPath =
+  ## What the result of a method or operator call on a class object points into: the storage
+  ## that object manages. `std::begin(v)` and the like are the method form written as a call.
+  let decl = clang_getCursorReferenced(call)
+  let dk = clang_getCursorKind(decl)
+  if dk in refMethodKinds or (dk == ckFunctionDecl and spelling(decl).startsWith("operator")):
+    result = ctx.refObjectPath(call)
+  elif dk == ckFunctionDecl and inStd(decl) and spelling(decl) in refStdKeeps and
+       clang_Cursor_getNumArguments(call) >= 1:
+    result = ctx.refLvalue(clang_Cursor_getArgument(call, 0))
+  if result.ok: result.steps.add [".#", "*"]
+
+proc refLvalue(ctx: Ctx, e: CXCursor): RefPath =
+  ## The location an lvalue expression names.
+  let u = refStrip(e)
+  let kids = collectChildren(u)
+  case clang_getCursorKind(u)
+  of ckDeclRefExpr:
+    if clang_getCursorKind(clang_getCursorReferenced(u)) in [ckVarDecl, ckParmDecl]:
+      let key = referencedUsr(u)
+      return RefPath(ok: true, root: key, disp: spelling(u), global: key notin ctx.uqLocals)
+  of ckMemberRefExpr:
+    if clang_getCursorKind(clang_getCursorReferenced(u)) != ckFieldDecl: return
+    if kids.len == 0 or clang_getCursorKind(unwrap(kids[0])) == ckCXXThisExpr:
+      return RefPath(ok: true, root: "this", disp: "this", steps: @["*", "." & spelling(u)])
+    let toks = ctx.cursorTokens(u)
+    result = (if toks.len >= 2 and toks[^2] == "->": ctx.refPointee(kids[0])
+              else: ctx.refLvalue(kids[0]))
+    if result.ok: result.steps.add "." & spelling(u)
+  of ckArraySubscriptExpr:
+    if kids.len == 2:
+      return (if isArrayType(unwrap(kids[0])): ctx.refLvalue(kids[0]) else: ctx.refPointee(kids[0]))
+  of ckUnaryOperator:
+    let toks = ctx.cursorTokens(u)
+    if toks.len > 0 and toks[0] == "*" and kids.len == 1: return ctx.refPointee(kids[0])
+  of ckCallExpr: return ctx.refCallRegion(u)
+  else: discard
+
+proc refPointee(ctx: Ctx, e: CXCursor): RefPath =
+  ## The region the pointer, reference or iterator value `e` points into.
+  let u = refStrip(e)
+  let kids = collectChildren(u)
+  if isArrayType(u): return ctx.refLvalue(u)
+  case clang_getCursorKind(u)
+  of ckCXXThisExpr: return RefPath(ok: true, root: "this", disp: "this", steps: @["*"])
+  of ckUnaryOperator:
+    let toks = ctx.cursorTokens(u)
+    if kids.len != 1 or toks.len == 0: return
+    if toks[0] == "&": return ctx.refLvalue(kids[0])
+    if toks[0] in ["++", "--"] or toks[^1] in ["++", "--"]: return ctx.refPointee(kids[0])
+    if toks[0] != "*": return
+  of ckBinaryOperator:
+    if kids.len == 2 and ctx.binOperator(u) in ["+", "-"]:
+      for side in kids:
+        if canonicalPointer(side) or isArrayType(unwrap(side)): return ctx.refPointee(side)
+    return
+  of ckCallExpr: return ctx.refCallRegion(u)
+  of ckDeclRefExpr, ckMemberRefExpr, ckArraySubscriptExpr: discard
+  else: return
+  result = ctx.refLvalue(u)                       # a pointer read out of a location
+  if result.ok: result.steps.add "*"
+
+proc refSource(p: RefPath): string =
+  ## The pointer a region is reached through — what has to stay as it is for a pointer into
+  ## the region to remain valid — or "" when the region is a variable's own storage.
+  if not p.ok: return ""
+  var last = -1
+  for i, s in p.steps:
+    if s == "*": last = i
+  if last < 0: return ""
+  p.root & refSep & p.steps[0 ..< last].join("/") & refSep & p.disp & refSep &
+    (if p.global: "g" else: "l")
+
+proc refHandle(decl: CXCursor): int =
+  ## What kind of thing a variable can hold a reference into storage with: 1 a pointer, 2 a
+  ## reference, 3 a class object that is one (an iterator, a view); 0 none of these.
+  let t = clang_getCanonicalType(clang_getCursorType(decl))
+  if t.kind == tyPointer: return 1
+  if t.kind in [tyLValueReference, tyRValueReference]: return 2
+  if t.kind == tyRecord:
+    let name = ($clang_getTypeSpelling(t)).toLowerAscii
+    if "iter" in name or "string_view" in name or "span<" in name: return 3
+  0
+
+proc refPlainCall(e: CXCursor): tuple[has: bool, call: CXCursor] =
+  ## The call to an ordinary function — not a method, an operator or a constructor — whose
+  ## result the pointer expression `e` is, or is an offset or a member of.
+  var u = refStrip(e)
+  for _ in 0 ..< 16:
+    let k = clang_getCursorKind(u)
+    let kids = collectChildren(u)
+    if k == ckCallExpr:
+      let dk = clang_getCursorKind(clang_getCursorReferenced(u))
+      if dk in refMethodKinds or dk == ckConstructor or spelling(u).startsWith("operator"): return
+      return (true, u)
+    if kids.len == 0: return
+    if k in [ckMemberRefExpr, ckArraySubscriptExpr, ckUnaryOperator]: u = refStrip(kids[0])
+    elif k == ckBinaryOperator and kids.len == 2:
+      u = refStrip(if canonKind(kids[0]) == tyPointer: kids[0] else: kids[1])
+    else: return
+
+proc refCallSources(ctx: Ctx, call: CXCursor): tuple[sources, inherits: seq[string]] =
+  ## What the result of a call to an ordinary function points into. A function that declares
+  ## `@returns_into` says so; the C library's searches and copies return a pointer into their
+  ## argument's block; a fresh allocation and any other library function point into nothing the
+  ## caller holds. The result of any other function may point into what any of its pointer or
+  ## reference arguments holds — a source recorded with the callee's name, so that a use after
+  ## that argument is invalidated is reported as unproven.
+  let decl = clang_getCursorReferenced(call)
+  let dk = clang_getCursorKind(decl)
+  let ind = (if dk == ckFunctionDecl: (isIndirect: false, usr: "", disp: "")
+             else: indirectFnptr(call))
+  let callee = (if ind.isIndirect: ind.disp else: ctx.effectiveCallee(call))
+  if dk != ckFunctionDecl and not ind.isIndirect: return
+  let na = int(clang_Cursor_getNumArguments(call))
+  proc same(ctx: Ctx, arg: CXCursor, res: var tuple[sources, inherits: seq[string]]) =
+    ## the result points where the argument does
+    let region = ctx.refPointee(arg)
+    let s = refSource(region)
+    if s.len > 0: res.sources.add s
+    if region.ok and region.root in ctx.refTargets: res.inherits.add region.root
+  if not ind.isIndirect:
+    var names = @[callee]
+    if qualName(decl).len > 0: names.add qualName(decl)
+    var declared = false
+    var into: seq[string]
+    for n in names:
+      if n in ctx.returnsInto:
+        declared = true
+        into.add ctx.returnsInto[n]
+    if not declared:
+      if callee in ctx.returnContracts: return             # a fresh object
+      if callee in refIntoArg:
+        if refIntoArg[callee] < na:
+          ctx.same(clang_Cursor_getArgument(call, cuint(refIntoArg[callee])), result)
+        return
+      if inStd(decl):
+        # an algorithm returns one of the iterators it was given, or one between them
+        for ai in 0 ..< na: ctx.same(clang_Cursor_getArgument(call, cuint(ai)), result)
+        return
+      if clang_Location_isInSystemHeader(clang_getCursorLocation(decl)) != 0: return
+    let np = int(clang_Cursor_getNumArguments(decl))
+    for ai in 0 ..< na:
+      let arg = clang_Cursor_getArgument(call, cuint(ai))
+      var pname = ""
+      var kind = canonKind(arg)
+      if ai < np:
+        let pd = clang_Cursor_getArgument(decl, cuint(ai))
+        pname = spelling(pd)
+        kind = canonKind(pd)
+      if declared and pname notin into and ("$" & $(ai + 1)) notin into: continue
+      var region: RefPath
+      if kind == tyPointer: region = ctx.refPointee(arg)
+      elif kind == tyLValueReference: region = ctx.refLvalue(arg)
+      else: continue
+      if not region.ok: continue
+      region.steps.add [".#", "*"]
+      result.sources.add refSource(region) & (if declared: "" else: refSep & callee)
+    return
+  for ai in 0 ..< na:                                      # through a function pointer
+    let arg = clang_Cursor_getArgument(call, cuint(ai))
+    if canonKind(arg) != tyPointer: continue
+    var region = ctx.refPointee(arg)
+    if not region.ok: continue
+    region.steps.add [".#", "*"]
+    result.sources.add refSource(region) & refSep & callee
+
+proc refDerivation(ctx: Ctx, decl, rhs: CXCursor): tuple[sources, inherits: seq[string]] =
+  ## What assigning `rhs` to the variable `decl` makes it refer into: the pointers it is
+  ## reached through, and the locals it copies or offsets.
+  let h = refHandle(decl)
+  if h == 0: return
+  let pc = refPlainCall(rhs)
+  if pc.has: return ctx.refCallSources(pc.call)
+  var u = refStrip(rhs)
+  var region: RefPath
+  if h == 3:
+    # built from one argument of another type (`span<int> sp(v)`): a view of it, not a copy
+    let raw = unwrap(rhs)
+    if clang_getCursorKind(raw) == ckCallExpr and
+       clang_getCursorKind(clang_getCursorReferenced(raw)) == ckConstructor and
+       clang_Cursor_getNumArguments(raw) == 1 and
+       $clang_getTypeSpelling(clang_getCanonicalType(clang_getCursorType(
+         clang_Cursor_getArgument(raw, 0)))) !=
+       $clang_getTypeSpelling(clang_getCanonicalType(clang_getCursorType(decl))): u = raw
+    if clang_getCursorKind(u) == ckDeclRefExpr:
+      if referencedUsr(u) in ctx.refTargets: result.inherits.add referencedUsr(u)
+      return
+    if clang_getCursorKind(u) != ckCallExpr: return
+    let ctor = clang_getCursorReferenced(u)
+    if clang_getCursorKind(ctor) == ckConstructor:
+      # a view built from its parts (`string_view(s.data(), n)`, `span(v)`): it refers into
+      # what each pointer or iterator it is given points into, and into each object it is
+      # given by reference
+      for ai in 0 ..< int(clang_Cursor_getNumArguments(u)):
+        let arg = clang_Cursor_getArgument(u, cuint(ai))
+        var part: RefPath
+        let pk = (if ai < int(clang_Cursor_getNumArguments(ctor)):
+                    canonKind(clang_Cursor_getArgument(ctor, cuint(ai)))
+                  else: canonKind(arg))
+        if pk == tyPointer or (pk == tyRecord and refHandle(arg) == 3):
+          part = ctx.refPointee(arg)
+        elif pk in [tyLValueReference, tyRValueReference] and canonKind(arg) == tyRecord and
+             clang_getCursorKind(refStrip(arg)) in [ckDeclRefExpr, ckMemberRefExpr]:
+          part = ctx.refLvalue(arg)
+          if part.ok: part.steps.add [".#", "*"]
+        else: continue
+        if refSource(part).len > 0: result.sources.add refSource(part)
+        if part.ok and part.root in ctx.refTargets: result.inherits.add part.root
+      return
+    region = ctx.refCallRegion(u)
+  elif h == 2: region = ctx.refLvalue(rhs)
+  else: region = ctx.refPointee(rhs)
+  if refSource(region).len > 0: result.sources.add refSource(region)
+  if region.ok and region.root in ctx.refTargets: result.inherits.add region.root
+
+proc refAggSlot(ctx: Ctx, e: CXCursor): tuple[key, root: string, steps: seq[string],
+                                               element: bool]
+
+proc refInitLeaves(n: CXCursor, res: var seq[CXCursor]) =
+  ## The expressions of a brace initialiser, nested ones included.
+  for ch in collectChildren(n):
+    if clang_getCursorKind(unwrap(ch)) == 119: refInitLeaves(unwrap(ch), res)   # InitListExpr
+    elif clang_isExpression(clang_getCursorKind(ch)) != 0: res.add ch
+
+proc refInitDerivation(ctx: Ctx, init: CXCursor): tuple[sources, inherits: seq[string]] =
+  ## What a struct or array initialised with braces holds references into: whatever any of its
+  ## initialisers does.
+  var leaves: seq[CXCursor]
+  refInitLeaves(init, leaves)
+  for e in leaves:
+    let d = ctx.refDerivation(e, e)
+    result.sources.add d.sources
+    result.inherits.add d.inherits
+
+proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
+  ## What the reference-validity events of the function being lowered need: which locals can
+  ## hold a reference into managed storage, what the function declares it preserves and the
+  ## local copies of that, and its range-`for` loops.
+  ctx.refTargets = initHashSet[string]()
+  ctx.refPromised = initTable[string, string]()
+  ctx.refPromisedGlobals = initHashSet[string]()
+  ctx.refRangeBodies = initTable[int, tuple[synth, disp, varKey, varDisp, source: string,
+                                            line: int]]()
+  var promised = ctx.preservesParams.getOrDefault(fnKey, @[])
+  if promised.len == 0: promised = ctx.preservesParams.getOrDefault(spelling(fn), @[])
+  ctx.refParamOf = initTable[string, string]()
+  ctx.refReturnsDeclared = fnKey in ctx.returnsInto or spelling(fn) in ctx.returnsInto
+  ctx.refReturns = ctx.returnsInto.getOrDefault(fnKey, @[]) &
+                   ctx.returnsInto.getOrDefault(spelling(fn), @[])
+  ctx.refActive = ctx.refSites.len > 0 or promised.len > 0 or ctx.refReturnsDeclared
+  if not ctx.refActive: return
+  var pnames: seq[string]
+  var pi = 0
+  for p in collectChildren(fn):
+    if clang_getCursorKind(p) != ckParmDecl: continue
+    inc pi
+    pnames.add spelling(p)
+    if spelling(p) in promised or ("$" & $pi) in promised: ctx.refPromised[usr(p)] = spelling(p)
+    ctx.refParamOf[usr(p)] = spelling(p)
+    if ("$" & $pi) in ctx.refReturns: ctx.refReturns.add spelling(p)
+  for n in promised:
+    if n == "this": ctx.refPromised["this"] = "this"
+    elif n notin pnames and not n.startsWith("$"): ctx.refPromisedGlobals.incl n
+  ctx.refAggFields = initTable[string, seq[tuple[key: string, steps: seq[string]]]]()
+  ctx.refLambdas = initTable[string, CXCursor]()
+  var stores: seq[tuple[decl, value: CXCursor]]
+  var memberStores: seq[tuple[target, value: CXCursor]]
+  var braceInits: seq[tuple[decl, init: CXCursor]]
+  proc collect(ctx: var Ctx, n: CXCursor, stores: var seq[tuple[decl, value: CXCursor]],
+               memberStores: var seq[tuple[target, value: CXCursor]],
+               braceInits: var seq[tuple[decl, init: CXCursor]]) =
+    let k = clang_getCursorKind(n)
+    let kids = collectChildren(n)
+    if k == ckVarDecl and kids.len > 0 and clang_isExpression(clang_getCursorKind(kids[^1])) != 0:
+      if hasAutomaticStorage(n):
+        if clang_getCursorKind(refStrip(kids[^1])) == ckLambdaExpr:
+          # a closure: it holds what it captured, and runs its body wherever it is used
+          ctx.refLambdas[usr(n)] = refStrip(kids[^1])
+          ctx.refTargets.incl usr(n)
+        elif clang_getCursorKind(unwrap(kids[^1])) == 119: braceInits.add (n, unwrap(kids[^1]))
+        else: stores.add (n, kids[^1])
+    elif k == ckBinaryOperator and kids.len == 2 and ctx.binOperator(n) == "=":
+      let l = unwrap(kids[0])
+      if clang_getCursorKind(l) == ckDeclRefExpr and referencedUsr(l) in ctx.uqLocals:
+        stores.add (clang_getCursorReferenced(l), kids[1])
+      elif clang_getCursorKind(l) in [ckMemberRefExpr, ckArraySubscriptExpr]:
+        memberStores.add (l, kids[1])
+    elif k == ckCallExpr and spelling(n) == "operator=" and clang_Cursor_getNumArguments(n) == 2:
+      let l = unwrap(clang_Cursor_getArgument(n, 0))
+      if clang_getCursorKind(l) == ckDeclRefExpr and referencedUsr(l) in ctx.uqLocals:
+        stores.add (clang_getCursorReferenced(l), clang_Cursor_getArgument(n, 1))
+    elif k == ckCXXForRangeStmt and kids.len >= 3 and not isArrayType(unwrap(kids[^2])):
+      # the loop holds iterators into the range for as long as it runs
+      var region = ctx.refLvalue(kids[^2])
+      if region.ok:
+        region.steps.add [".#", "*"]
+        let synth = "range@" & $startOffset(n)
+        let v = kids[0]
+        let refers = clang_getCursorKind(v) == ckVarDecl and refHandle(v) != 0
+        ctx.refTargets.incl synth
+        if refers: ctx.refTargets.incl usr(v)
+        ctx.refRangeBodies[startOffset(kids[^1])] =
+          (synth, ctx.cursorTokens(kids[^2]).join(""), (if refers: usr(v) else: ""),
+           spelling(v), refSource(region), startLine(n))
+    for ch in kids: ctx.collect(ch, stores, memberStores, braceInits)
+  ctx.collect(body, stores, memberStores, braceInits)
+  var grown = true
+  while grown:
+    grown = false
+    for b in braceInits:
+      # a local struct or array initialised with braces: followed as a whole
+      let key = usr(b.decl) & "\x1d"
+      if key in ctx.refTargets: continue
+      let d = ctx.refInitDerivation(b.init)
+      if d.sources.len > 0 or d.inherits.len > 0:
+        ctx.refTargets.incl key
+        ctx.refAggFields.mgetOrPut(usr(b.decl), @[]).add (key, newSeq[string]())
+        grown = true
+    for st in memberStores:
+      # a member of a local struct, or an element of a local array, that is given a reference
+      let slot = ctx.refAggSlot(st.target)
+      if slot.key.len == 0 or slot.key in ctx.refTargets: continue
+      let d = ctx.refDerivation(st.target, st.value)
+      if d.sources.len > 0 or d.inherits.len > 0:
+        ctx.refTargets.incl slot.key
+        ctx.refAggFields.mgetOrPut(slot.root, @[]).add (slot.key, slot.steps)
+        grown = true
+    for st in stores:
+      let key = usr(st.decl)
+      if key notin ctx.refTargets:
+        let d = ctx.refDerivation(st.decl, st.value)
+        if d.sources.len > 0 or d.inherits.len > 0:
+          ctx.refTargets.incl key
+          grown = true
+      if key notin ctx.refParamOf:
+        # a local that refers into what a parameter holds
+        let d = ctx.refDerivation(st.decl, st.value)
+        var roots = d.inherits
+        for s in d.sources: roots.add s.split(refSep)[0]
+        for r in roots:
+          if r in ctx.refParamOf:
+            ctx.refParamOf[key] = ctx.refParamOf[r]
+            grown = true
+            break
+      if key notin ctx.refPromised and refHandle(st.decl) in [1, 2]:
+        # a local copy of a pointer into what the function declares it preserves
+        let r = (if refHandle(st.decl) == 2: ctx.refLvalue(st.value) else: ctx.refPointee(st.value))
+        if not r.ok: continue
+        var name = ctx.refPromised.getOrDefault(r.root)
+        if name.len == 0 and r.global and r.disp in ctx.refPromisedGlobals: name = r.disp
+        if name.len > 0:
+          ctx.refPromised[key] = name
+          grown = true
+
+proc refInvalidate(ctx: Ctx, region: RefPath, text, callee: string, kind, line: int,
+                   outp: var seq[Stmt]) =
+  ## One call may have reallocated or released what `region` holds; and, when the function
+  ## being lowered declares that storage preserved, that it does not keep its word.
+  outp.add emit(ikRefInvalidate, line, a = text, b = callee, aKey = region.root,
+                bKey = region.steps.join("/"), off = kind)
+  var name = ctx.refPromised.getOrDefault(region.root)
+  if name.len == 0 and region.global and region.disp in ctx.refPromisedGlobals: name = region.disp
+  if name.len > 0:
+    outp.add emit(ikRefNotPreserved, line, a = text, b = name, cKey = callee, off = kind)
+
+proc refMethodEffect(ctx: Ctx, decl: CXCursor): int =
+  ## What a method does to the storage its object manages: -1 leaves it in place, 0 may
+  ## reallocate or release it, 1 nothing says.
+  if clang_CXXMethod_isConst(decl) != 0: return -1
+  let cls = spelling(clang_getCursorSemanticParent(decl))
+  let m = spelling(decl)
+  for name in [cls & "::" & m, m]:
+    if "this" in ctx.invalidatesParams.getOrDefault(name, @[]): return 0
+    if "this" in ctx.preservesParams.getOrDefault(name, @[]): return -1
+  let handle = cls.toLowerAscii
+  if "iter" in handle or "string_view" in handle: return -1   # a reference itself: it manages nothing
+  if inStd(decl):
+    if m in refKeeps: return -1
+    if cls notin refOwners: return -1             # a pair, a stream: nothing handed out of it
+    if m == "operator[]": return (if cls.startsWith("unordered_"): 0 else: -1)
+    if m in refInserts: return (if cls in refNodeBased: -1 else: 0)
+    if m in refChanges: return 0
+  1
+
+proc refCallEffects(ctx: Ctx, call: CXCursor, outp: var seq[Stmt]) =
+  ## What one call may reallocate or release: the storage of the object a method is called on,
+  ## whatever it is handed a writable pointer or reference to, the block it is asked to
+  ## release, and — when it is a function of the program itself — anything reached from a
+  ## global.
+  let decl = clang_getCursorReferenced(call)
+  let dk = clang_getCursorKind(decl)
+  let line = startLine(call)
+  # an operator call has its object, a variable, where a callee is looked for
+  let ind = (if dk in refMethodKinds or dk in [ckFunctionDecl, ckConstructor]:
+               (isIndirect: false, usr: "", disp: "")
+             else: indirectFnptr(call))
+  let callee = (if ind.isIndirect: ind.disp
+                elif dk in refMethodKinds: spelling(decl)
+                else: ctx.effectiveCallee(call))
+  var names = @[callee]
+  if (dk in refMethodKinds or dk == ckFunctionDecl) and qualName(decl).len > 0:
+    names.add qualName(decl)
+  proc declares(ctx: Ctx, table: Table[string, seq[string]], names: seq[string],
+                pname: string, pos: int): bool =
+    for n in names:
+      let l = table.getOrDefault(n, @[])
+      if (pname.len > 0 and pname in l) or ("$" & $(pos + 1)) in l: return true
+  let std = (dk in refMethodKinds or dk in [ckFunctionDecl, ckConstructor, ckDestructor]) and
+            inStd(decl)
+  var firstArg = 0
+  if dk in refMethodKinds:
+    let o = ctx.refObject(call)
+    if o.has:
+      if o.operatorForm: firstArg = 1
+      let p = ctx.refObjectPath(call)
+      let eff = ctx.refMethodEffect(decl)
+      if p.ok and eff >= 0:
+        ctx.refInvalidate(p, (if o.implicitThis: "this" else: ctx.cursorTokens(o.obj).join("")),
+                          callee, eff, line, outp)
+  let na = int(clang_Cursor_getNumArguments(call))
+  let np = (if ind.isIndirect: -1 else: int(clang_Cursor_getNumArguments(decl)))
+  for ai in firstArg ..< na:
+    let arg = clang_Cursor_getArgument(call, cuint(ai))
+    let pos = ai - firstArg
+    var region: RefPath
+    var pname = ""
+    if pos < np:
+      let pd = clang_Cursor_getArgument(decl, cuint(pos))
+      pname = spelling(pd)
+      let pt = clang_getCanonicalType(clang_getCursorType(pd))
+      if pt.kind notin [tyPointer, tyLValueReference]: continue
+      if clang_isConstQualifiedType(clang_getPointeeType(pt)) != 0: continue
+      region = (if pt.kind == tyPointer: ctx.refPointee(arg) else: ctx.refLvalue(arg))
+    else:
+      let at = clang_getCanonicalType(clang_getCursorType(arg))
+      if at.kind != tyPointer or clang_isConstQualifiedType(clang_getPointeeType(at)) != 0: continue
+      region = ctx.refPointee(arg)
+    if not region.ok: continue
+    let text = ctx.cursorTokens(arg).join("")
+    let ci = (if ind.isIndirect: ctx.indirectArgContract(ind.usr, pos)
+              else: ctx.argContract(callee, pos))
+    if (ci.has and ci.instr == ikFree and ci.accessor.len == 0) or
+       (not ind.isIndirect and (callee in ctx.deallocators or callee in ctx.customRealloc or
+                                callee in ["realloc", "reallocarray"])):
+      # the block itself is released or moved: exactly what this pointer holds
+      if region.steps.len > 0 and region.steps[^1] == "*":
+        var held = region
+        held.steps.setLen(held.steps.len - 1)
+        ctx.refInvalidate(held, text, callee, 2, line, outp)
+      continue
+    var kind = 1
+    if not ind.isIndirect:
+      if ctx.declares(ctx.invalidatesParams, names, pname, pos): kind = 0
+      elif ctx.declares(ctx.preservesParams, names, pname, pos) or callee in knownBorrowFns:
+        continue
+      elif std and callee in refStdKeeps: continue
+      elif std and callee in refStdChanges: kind = 0
+    ctx.refInvalidate(region, text, callee, kind, line, outp)
+  # a function of the program can reach its globals without being handed anything
+  if ind.isIndirect or ((dk in refMethodKinds or dk in [ckFunctionDecl, ckConstructor]) and not std and
+     clang_Location_isInSystemHeader(clang_getCursorLocation(decl)) == 0 and
+     callee notin knownBorrowFns and callee notin ctx.deallocators and
+     not (dk in refMethodKinds and spelling(clang_getCursorSemanticParent(decl)).len == 0)):
+    # (a closure's call operator is not one of them: its body is read where it runs)
+    var keeps, changes: seq[string]
+    for n in names:
+      keeps.add ctx.preservesParams.getOrDefault(n, @[])
+      changes.add ctx.invalidatesParams.getOrDefault(n, @[])
+    outp.add emit(ikRefInvalidate, line, b = callee, bKey = keeps.join(";"),
+                  cKey = changes.join(";"), off = 3)
+    for g in ctx.refPromisedGlobals:
+      if g notin keeps:
+        outp.add emit(ikRefNotPreserved, line, a = g, b = g, cKey = callee,
+                      off = (if g in changes: 0 else: 1))
+
+proc refAggSlot(ctx: Ctx, e: CXCursor): tuple[key, root: string, steps: seq[string],
+                                               element: bool] =
+  ## The member of a local struct, or the element of a local array, that the lvalue `e` names
+  ## — storage inside the local itself, not something reached through a pointer. Steps are
+  ## `.name` for a member and `[k]` for an element, `[?]` when the index is not a constant;
+  ## `element`: an index is not known, so the slot may be any element.
+  var u = unwrap(e)
+  var steps: seq[string]
+  for _ in 0 ..< 16:
+    let k = clang_getCursorKind(u)
+    let kids = collectChildren(u)
+    if k == ckMemberRefExpr:
+      if clang_getCursorKind(clang_getCursorReferenced(u)) != ckFieldDecl or kids.len == 0: return
+      let toks = ctx.cursorTokens(u)
+      if toks.len >= 2 and toks[^2] == "->": return
+      steps.insert("." & spelling(u), 0)
+      u = unwrap(kids[0])
+    elif k == ckArraySubscriptExpr:
+      if kids.len != 2 or not isArrayType(unwrap(kids[0])): return
+      let idx = constIntValue(kids[1])
+      steps.insert((if idx.known: "[" & $idx.value & "]" else: "[?]"), 0)
+      u = unwrap(kids[0])
+    elif k == ckDeclRefExpr:
+      let key = referencedUsr(u)
+      if steps.len == 0 or clang_getCursorKind(clang_getCursorReferenced(u)) != ckVarDecl or
+         key notin ctx.uqLocals or key in ctx.uqParams: return
+      return (key & "\x1d" & steps.join("/"), key, steps, "[?]" in steps)
+    else: return
+
+proc refSlotsMeet(a, b: seq[string]): bool =
+  ## Can two slots of one local be the same storage, or one contain the other?
+  for i in 0 ..< min(a.len, b.len):
+    if a[i] == b[i]: continue
+    if a[i].startsWith("[") and b[i].startsWith("[") and (a[i] == "[?]" or b[i] == "[?]"): continue
+    return false
+  true
+
+proc refEvents(ctx: Ctx, n: CXCursor, outp: var seq[Stmt])
+proc refBodyStmts(ctx: Ctx, c: CXCursor, outp: var seq[Stmt])
+
+var refLambdaDepth {.threadvar.}: int
+
+proc refLambdaBody(ctx: Ctx, lambda: CXCursor, outp: var seq[Stmt]) =
+  ## The events of a lambda's body, at a place where it may run: where it is called, or handed
+  ## to something that may call it.
+  if refLambdaDepth >= 2: return                  # a closure that refers to itself
+  let kids = collectChildren(lambda)
+  if kids.len == 0 or clang_getCursorKind(kids[^1]) != ckCompoundStmt: return
+  inc refLambdaDepth
+  ctx.refBodyStmts(kids[^1], outp)
+  dec refLambdaDepth
+
+proc refLambdaCaptures(ctx: Ctx, lambda: CXCursor): seq[string] =
+  ## The locals holding references that the lambda captures BY VALUE — a copy that stays what
+  ## it was when the closure was made. (One captured by reference is read when the body runs.)
+  let toks = ctx.cursorTokens(lambda)
+  var byRefDefault = false
+  var byRef, byValue: seq[string]
+  var i = 1
+  while i < toks.len and toks[i] != "]":
+    if toks[i] == "&":
+      if i + 1 < toks.len and toks[i + 1] notin [",", "]"]:
+        byRef.add toks[i + 1]
+        inc i
+      else: byRefDefault = true
+    elif toks[i] notin [",", "="]: byValue.add toks[i]
+    inc i
+  let first = startOffset(lambda)
+  let last = endOffset(lambda)
+  var seen = initHashSet[string]()
+  proc walk(ctx: Ctx, n: CXCursor, res: var seq[string], seen: var HashSet[string]) =
+    if clang_getCursorKind(n) == ckDeclRefExpr:
+      let key = referencedUsr(n)
+      let at = startOffset(clang_getCursorReferenced(n))
+      if key in ctx.refTargets and key notin seen and not (at >= first and at < last):
+        seen.incl key
+        let name = spelling(n)
+        if name in byValue or (name notin byRef and not byRefDefault): res.add key
+    for ch in collectChildren(n): ctx.walk(ch, res, seen)
+  ctx.walk(lambda, result, seen)
+
+proc refEvents(ctx: Ctx, n: CXCursor, outp: var seq[Stmt]) =
+  ## The reference-validity events of one expression or declaration, in evaluation order: the
+  ## uses of the locals that hold references, what each call may invalidate, and what an
+  ## assignment makes its target refer into.
+  let k = clang_getCursorKind(n)
+  if k == ckLambdaExpr:
+    ctx.refLambdaBody(n, outp)                    # written where it is handed over: it may run
+    return
+  let kids = collectChildren(n)
+  let line = startLine(n)
+  proc derive(ctx: Ctx, decl: CXCursor, disp: string, rhs: CXCursor, line: int,
+              outp: var seq[Stmt]) =
+    if usr(decl) notin ctx.refTargets: return
+    let d = ctx.refDerivation(decl, rhs)
+    outp.add emit(ikRefDerive, line, a = disp, aKey = usr(decl),
+                  bKey = d.sources.join(refGroupSep), cKey = d.inherits.join(refGroupSep))
+  proc rebindable(l: CXCursor): bool =
+    ## a variable an assignment gives a new value (a reference is written through instead)
+    clang_getCursorKind(l) == ckDeclRefExpr and
+      clang_getCursorKind(clang_getCursorReferenced(l)) in [ckVarDecl, ckParmDecl] and
+      refHandle(clang_getCursorReferenced(l)) != 2
+  case k
+  of ckDeclRefExpr:
+    let key = referencedUsr(n)
+    if key in ctx.refLambdas: ctx.refLambdaBody(ctx.refLambdas[key], outp)   # it may run here
+    if key in ctx.refTargets: outp.add emit(ikRefUse, line, a = spelling(n), aKey = key)
+    # a struct or an array used as a whole: every reference kept in it
+    for f in ctx.refAggFields.getOrDefault(key, @[]):
+      outp.add emit(ikRefUse, line, a = spelling(n), aKey = f.key)
+    return
+  of ckMemberRefExpr, ckArraySubscriptExpr:
+    # a member of a local struct that keeps references: the ones in that member only
+    let slot = ctx.refAggSlot(n)
+    if slot.key.len > 0 and slot.root in ctx.refAggFields:
+      let disp = ctx.cursorTokens(n).join("")
+      for f in ctx.refAggFields[slot.root]:
+        if refSlotsMeet(f.steps, slot.steps):
+          outp.add emit(ikRefUse, line, a = disp, aKey = f.key)
+      if k == ckArraySubscriptExpr and kids.len == 2: ctx.refEvents(kids[1], outp)
+      return
+  of ckVarDecl:
+    if usr(n) in ctx.refLambdas:
+      # the closure holds a copy of each reference it captures by value
+      var held: seq[string]
+      for key in ctx.refLambdaCaptures(ctx.refLambdas[usr(n)]): held.add key
+      outp.add emit(ikRefDerive, line, a = spelling(n), aKey = usr(n),
+                    cKey = held.join(refGroupSep))
+      return
+    for ch in kids: ctx.refEvents(ch, outp)
+    if (usr(n) & "\x1d") in ctx.refTargets and kids.len > 0 and
+       clang_getCursorKind(unwrap(kids[^1])) == 119:
+      let d = ctx.refInitDerivation(unwrap(kids[^1]))
+      outp.add emit(ikRefDerive, line, a = spelling(n), aKey = usr(n) & "\x1d",
+                    bKey = d.sources.join(refGroupSep), cKey = d.inherits.join(refGroupSep))
+    elif kids.len > 0 and clang_isExpression(clang_getCursorKind(kids[^1])) != 0:
+      ctx.derive(n, spelling(n), kids[^1], line, outp)
+    return
+  of ckBinaryOperator:
+    if kids.len == 2 and ctx.binOperator(n) == "=":
+      ctx.refEvents(kids[1], outp)
+      let l = unwrap(kids[0])
+      let slot = (if clang_getCursorKind(l) in [ckMemberRefExpr, ckArraySubscriptExpr]:
+                    ctx.refAggSlot(l) else: (key: "", root: "", steps: newSeq[string](), element: false))
+      if rebindable(l): ctx.derive(clang_getCursorReferenced(l), spelling(l), kids[1], line, outp)
+      elif slot.key.len > 0 and slot.key in ctx.refTargets:
+        # the member is given a new value: what it held before is no longer used through it
+        let d = ctx.refDerivation(l, kids[1])
+        outp.add emit(ikRefDerive, line, a = ctx.cursorTokens(l).join(""), aKey = slot.key,
+                      bKey = d.sources.join(refGroupSep), cKey = d.inherits.join(refGroupSep),
+                      off = (if slot.element: 1 else: 0))
+      else: ctx.refEvents(kids[0], outp)
+      return
+  of ckCallExpr:
+    if spelling(n) == "operator=" and clang_Cursor_getNumArguments(n) == 2:
+      let l = unwrap(clang_Cursor_getArgument(n, 0))
+      if rebindable(l) and referencedUsr(l) in ctx.refTargets:
+        let rhs = clang_Cursor_getArgument(n, 1)
+        ctx.refEvents(rhs, outp)
+        ctx.derive(clang_getCursorReferenced(l), spelling(l), rhs, line, outp)
+        return
+    for ch in kids: ctx.refEvents(ch, outp)
+    ctx.refCallEffects(n, outp)
+    return
+  else: discard
+  for ch in kids: ctx.refEvents(ch, outp)
+
+proc refRangeBody(ctx: Ctx, body: CXCursor, lowered: seq[Stmt]): seq[Stmt] =
+  ## The lowered body of a range-`for`, between the uses of the iterators the loop itself
+  ## holds: one as each iteration starts, one as it steps to the next. The loop variable, when
+  ## it refers into the range, is bound at the start.
+  let rb = ctx.refRangeBodies.getOrDefault(startOffset(body))
+  if not ctx.refActive or rb.synth.len == 0: return lowered
+  result.add emit(ikRefUse, rb.line, a = rb.disp, aKey = rb.synth, off = 1)
+  if rb.varKey.len > 0:
+    result.add emit(ikRefDerive, rb.line, a = rb.varDisp, aKey = rb.varKey, bKey = rb.source)
+  result.add lowered
+  result.add emit(ikRefUse, rb.line, a = rb.disp, aKey = rb.synth, off = 1)
+
+proc refBodyStmts(ctx: Ctx, c: CXCursor, outp: var seq[Stmt]) =
+  ## The reference-validity events of statement `c` and everything nested in it, with its
+  ## `if`s and loops kept as branches and loops — for a lambda's body, which is read from the
+  ## source at each place the closure is used. A `return` ends the lambda, not the function
+  ## around it, so it transfers nothing here; what follows it is read as reachable. A `switch`
+  ## or a `try` is read as one sequence.
+  let k = clang_getCursorKind(c)
+  let kids = collectChildren(c)
+  case k
+  of ckCompoundStmt:
+    for ch in kids: ctx.refBodyStmts(ch, outp)
+  of ckIfStmt:
+    var i = 0
+    if kids.len >= 3 and clang_getCursorKind(kids[0]) in [ckDeclStmt, ckVarDecl]:
+      ctx.refEvents(kids[0], outp)
+      i = 1
+    if i < kids.len: ctx.refEvents(kids[i], outp)
+    var s = Stmt(line: startLine(c), kind: stIf)
+    if i + 1 < kids.len: ctx.refBodyStmts(kids[i + 1], s.thenBody)
+    if i + 2 < kids.len: ctx.refBodyStmts(kids[i + 2], s.elseBody)
+    outp.add s
+  of ckForStmt, ckWhileStmt, ckDoStmt:
+    # the header runs on every iteration (its initialiser too: reading it again changes nothing)
+    var s = Stmt(line: startLine(c), kind: stLoop)
+    for i in 0 ..< kids.len - 1: ctx.refEvents(kids[i], s.loopBody)
+    if kids.len > 0: ctx.refBodyStmts(kids[^1], s.loopBody)
+    s.headerAt = s.loopBody.len
+    outp.add s
+  of ckCXXForRangeStmt:
+    if kids.len >= 3:
+      ctx.refEvents(kids[^2], outp)
+      let rb = ctx.refRangeBodies.getOrDefault(startOffset(kids[^1]))
+      if rb.synth.len > 0:
+        outp.add emit(ikRefDerive, startLine(c), a = rb.disp, aKey = rb.synth, bKey = rb.source)
+      var inner: seq[Stmt]
+      ctx.refBodyStmts(kids[^1], inner)
+      var s = Stmt(line: startLine(c), kind: stLoop)
+      s.loopBody = ctx.refRangeBody(kids[^1], inner)
+      s.headerAt = s.loopBody.len
+      outp.add s
+  of ckReturnStmt:
+    for ch in kids: ctx.refEvents(ch, outp)
+  else: ctx.refEvents(c, outp)
+
+proc withoutRefEvents(stmts: seq[Stmt]): seq[Stmt] =
+  ## A lowered body without its reference-validity events. A lambda's body is spliced in where
+  ## the lambda is called; its reference events are read from the source at each place the
+  ## closure is used instead (`refLambdaBody`), a call among them, so they are not kept twice.
+  for s in stmts:
+    case s.kind
+    of stInstr:
+      if s.ik notin {ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved, ikRefReturn}:
+        result.add s
+    of stIf:
+      var c = Stmt(line: s.line, kind: stIf)
+      c[] = s[]
+      c.thenBody = withoutRefEvents(s.thenBody)
+      c.elseBody = withoutRefEvents(s.elseBody)
+      result.add c
+    of stLoop:
+      var c = Stmt(line: s.line, kind: stLoop)
+      c[] = s[]
+      c.loopBody = withoutRefEvents(s.loopBody)
+      # the loop's own header statements start where they did, less what was removed before them
+      var before = 0
+      for i in 0 ..< min(s.headerAt, s.loopBody.len):
+        let h = s.loopBody[i]
+        if h.kind == stInstr and
+           h.ik in {ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved, ikRefReturn}: inc before
+      c.headerAt = s.headerAt - before
+      result.add c
+    of stSwitch:
+      var c = Stmt(line: s.line, kind: stSwitch)
+      c[] = s[]
+      c.cases = @[]
+      for body in s.cases: c.cases.add withoutRefEvents(body)
+      result.add c
+    of stTry:
+      var c = Stmt(line: s.line, kind: stTry)
+      c[] = s[]
+      c.tryBody = withoutRefEvents(s.tryBody)
+      c.handlers = @[]
+      for h in s.handlers: c.handlers.add withoutRefEvents(h)
+      result.add c
+    of stLabel: result.add s
+
+proc refStmtEvents(ctx: Ctx, c: CXCursor, outp, post: var seq[Stmt]) =
+  ## The events of the part of statement `c` that runs when control reaches it (as for
+  ## `jmpLocalStmtEvents`).
+  let k = clang_getCursorKind(c)
+  let kids = collectChildren(c)
+  if k == ckDeclStmt or clang_isExpression(k) != 0: ctx.refEvents(c, outp)
+  elif k == ckReturnStmt:
+    for ch in kids: ctx.refEvents(ch, outp)
+    # what the function hands back: a pointer into what a parameter holds is something the
+    # caller must know about, so the function declares it
+    if kids.len == 1 and canonKind(kids[0]) in [tyPointer, tyLValueReference, tyRecord]:
+      var roots: seq[string]
+      let pc = refPlainCall(kids[0])
+      if pc.has:
+        let d = ctx.refCallSources(pc.call)
+        roots = d.inherits
+        for s in d.sources: roots.add s.split(refSep)[0]
+      else:
+        let region = ctx.refPointee(kids[0])
+        if refSource(region).len > 0 or (region.ok and region.root in ctx.refTargets):
+          roots.add region.root
+      for r in roots:
+        let name = ctx.refParamOf.getOrDefault(r)
+        if name.len > 0 and name notin ctx.refReturns:
+          outp.add emit(ikRefReturn, startLine(c), a = ctx.cursorTokens(kids[0]).join(""),
+                        b = name, off = (if ctx.refReturnsDeclared: 1 else: 0))
+          break
+  elif k in [ckIfStmt, ckSwitchStmt]:
+    var last = 1
+    if kids.len >= 3 and clang_getCursorKind(kids[0]) in [ckDeclStmt, ckVarDecl]: last = 2
+    for i in 0 ..< min(last, kids.len): ctx.refEvents(kids[i], outp)
+  elif k == ckCXXForRangeStmt and kids.len >= 3:
+    ctx.refEvents(kids[^2], outp)
+    let body = ctx.refRangeBodies.getOrDefault(startOffset(kids[^1]))
+    if body.synth.len > 0:
+      outp.add emit(ikRefDerive, startLine(c), a = body.disp, aKey = body.synth, bKey = body.source)
+
 # SPATIAL: functions whose argument at this 0-based position is a length / count
 # written into a fixed buffer — an untrusted size here is the classic overflow
 # (CWE-120 / CWE-787). Emitted as an ikIndex size sink (must be validated).
@@ -1822,12 +3089,13 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
       if ok.len >= 1:
         let obj = unwrap(ok[0])
         if clang_getCursorKind(obj) == ckDeclRefExpr and referencedUsr(obj) in ctx.lambdaBodies:
-          for st in ctx.lambdaBodies[referencedUsr(obj)]: outp.add relined(st, line)
+          for st in withoutRefEvents(ctx.lambdaBodies[referencedUsr(obj)]):
+            outp.add relined(st, line)
           return
         if clang_getCursorKind(obj) == ckLambdaExpr:
           let lb = collectChildren(obj)
           if lb.len >= 1:
-            for st in ctx.lowerBody(@[lb[^1]]): outp.add st
+            for st in withoutRefEvents(ctx.lowerBody(@[lb[^1]])): outp.add st
           return
   if callee == "operator=":
     let ok = collectChildren(call)
@@ -1928,14 +3196,76 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
     var (disp, key) = requiredLockSink(call, rel)
     if key.len == 0 and rel in ctx.lockClasses: (disp, key) = (rel, rel)
     if key.len > 0: outp.add emit(ikLockRelease, line, a = disp, aKey = key)
+  ctx.emitUniqueChecks(call, callee, line, outp)
+  # INVARIANT at the call: a callee's `@invariant(param >= K)` is what its body assumes of that
+  # parameter, so each call must establish it for the argument it passes.
+  for lo in ctx.lowInvariants.getOrDefault(callee, @[]):
+    let decl = clang_getCursorReferenced(call)
+    let np = int(clang_Cursor_getNumArguments(decl))
+    let na = int(clang_Cursor_getNumArguments(call))
+    for pi in 0 ..< min(np, na):
+      if spelling(clang_Cursor_getArgument(decl, cuint(pi))) != lo.fieldExpr: continue
+      let arg = clang_Cursor_getArgument(call, cuint(pi))
+      let uns = isUnsignedInteger(unwrap(arg))
+      if uns and lo.lowConst <= 0: continue          # `>= 0` by type
+      let lin = ctx.parseLinear(arg)
+      if lin.ok and lin.key.len == 0:
+        if lin.off < lo.lowConst:
+          outp.add emit(ikArgLowCheck, line, a = $lin.off, b = callee, bKey = lo.fieldExpr,
+                        off = lo.lowConst, cKey = "@const")
+      elif lin.ok:
+        outp.add emit(ikArgLowCheck, line, a = lin.disp, aKey = lin.key, b = callee,
+                      bKey = lo.fieldExpr, off = lo.lowConst, off2 = lin.off,
+                      cKey = (if isUnsignedInteger(unwrap(arg)) and lin.off >= 0: "u" else: ""))
+      else:
+        outp.add emit(ikArgLowCheck, line, a = ctx.cursorTokens(unwrap(arg)).join(""), b = callee,
+                      bKey = lo.fieldExpr, off = lo.lowConst, cKey = "@opaque")
+  for inv in ctx.invariants.getOrDefault(callee, @[]):
+    # `@invariant(p REL q)` between two parameters: the call must establish it for the
+    # arguments. (An invariant naming a field is a property of the object, kept by its writers.)
+    let decl = clang_getCursorReferenced(call)
+    let np = min(int(clang_Cursor_getNumArguments(decl)), int(clang_Cursor_getNumArguments(call)))
+    var li = -1
+    var ri = -1
+    for pi in 0 ..< np:
+      let pn = spelling(clang_Cursor_getArgument(decl, cuint(pi)))
+      if pn == inv.lhsExpr: li = pi
+      if pn == inv.rhsExpr: ri = pi
+    if li < 0 or ri < 0: continue
+    let la = clang_Cursor_getArgument(call, cuint(li))
+    let ra = clang_Cursor_getArgument(call, cuint(ri))
+    let ll = ctx.parseLinear(la)
+    let rl = ctx.parseLinear(ra)
+    let tag = callee & "|" & inv.lhsExpr & " " & inv.rel & " " & inv.rhsExpr
+    let relBits = (if inv.rel == "<=": 1 else: 0) or (if isUnsignedInteger(unwrap(ra)): 2 else: 0)
+    if ll.ok and rl.ok:
+      outp.add emit(ikArgRelCheck, line, a = ll.disp, aKey = ll.key, off = ll.off,
+                    b = rl.disp, bKey = rl.key, off2 = rl.off, cKey = tag, off3 = relBits)
+    else:
+      outp.add emit(ikArgRelCheck, line, a = "@opaque", cKey = tag, off3 = relBits)
   # SPATIAL size sink: if this callee takes a length argument and it is an untrusted
   # scalar parameter with no bound on the path, that is a buffer-overflow risk.
   if callee in sizeArgPos:
     let kids = collectChildren(call)
     let pos = sizeArgPos[callee] + 1            # +1: kids[0] is the callee reference
     if pos < kids.len:
-      let lin = ctx.parseLinear(kids[pos])           # the length, possibly `len ± k`
-      if lin.ok and lin.key.len > 0:
+      var lin = ctx.parseLinear(kids[pos])           # the length, possibly `len ± k`
+      var lenConst = false
+      if lin.ok and lin.key.len == 0:
+        # a CONSTANT length: carried by a value of its own, bounded to exactly that constant,
+        # so it is checked against a fixed-size destination / source like any other length
+        lenConst = true
+        lin.key = "@size:" & $line & ":" & $outp.len
+        lin.disp = ctx.cursorTokens(unwrap(kids[pos])).join("")
+        if lin.off != high(int):
+          outp.add emit(ikValidate, line, a = lin.disp, aKey = lin.key, off = lin.off + 1)
+        outp.add emit(ikLowBound, line, a = lin.disp, aKey = lin.key, off = lin.off)
+        lin.off = 0
+      elif not lin.ok:
+        # a length kenbi cannot read as `variable ± constant`: no bound check can be matched
+        # to it, so the sink carries no key and is reported
+        lin = (true, "", ctx.cursorTokens(unwrap(kids[pos])).join(""), 0)
+      block:
         var sz = -1                         # the destination buffer's size, if a fixed array
         var bsym = ""                       # or its symbolic allocation count, if malloc'd
         let bp = bufArgPos.getOrDefault(callee, -1) + 1   # +1: kids[0] is the callee ref
@@ -1947,9 +3277,10 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
           elif clang_getCursorKind(bufc) == ckMemberRefExpr:
             sz = fixedArraySize(bufc)    # a fixed-size array member `memcpy(s->buf, …)`
         let uns = isUnsignedInteger(unwrap(kids[pos]))   # unsigned length: >= 0 by type
-        outp.add emit(ikIndex, line, a = lin.disp, b = "size",
-                      aKey = lin.key, off = sz, off2 = lin.off, bKey = bsym,
-                      cKey = (if uns: "u" else: ""))
+        if not lenConst or sz >= 0 or bsym.len > 0:   # a constant needs a known size to check
+          outp.add emit(ikIndex, line, a = lin.disp, b = "size",
+                        aKey = lin.key, off = sz, off2 = lin.off, bKey = bsym,
+                        cKey = (if uns: "u" else: ""))
         # SPATIAL source-read sink: the copy also READS `len` bytes from the source buffer. When
         # the source's size is DECLARED, check the read stays within it (the memcpy SOURCE
         # over-read — Heartbleed). Only for a known source size; an unsized source is not flagged.
@@ -1963,7 +3294,7 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
             if ssz < 0: ssym = ctx.bufSizeSym.getOrDefault(referencedUsr(srcc)).symKey
           elif clang_getCursorKind(srcc) == ckMemberRefExpr:
             ssz = fixedArraySize(srcc)
-          if ssz >= 0 or ssym.len > 0:            # only when the source size is known
+          if (ssz >= 0 or ssym.len > 0) and lin.key.len > 0:
             outp.add emit(ikIndex, line, a = lin.disp, b = "rsize",   # rsize = a READ length
                           aKey = lin.key, off = ssz, off2 = lin.off, bKey = ssym,
                           cKey = (if uns: "u" else: ""))
@@ -2514,10 +3845,92 @@ proc lowerExprCalls(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
   for ch in collectChildren(cu):
     ctx.lowerExprCalls(ch, outp)
 
+proc incDecDelta(ctx: Ctx, c: CXCursor): int
+
+proc emitIndexSink(ctx: Ctx, baseCur, idxCur: CXCursor, line: int, outp: var seq[Stmt]) =
+  ## SPATIAL sink for an access `base[idx]` (or `*(base + idx)`): emit the ikIndex the spatial
+  ## pass checks. The index is read as one of:
+  ##   * `var ± k`                 — the sink names `var`, carrying the offset, so a neighbour
+  ##                                 access `buf[i + 1]` needs `i` bounded to cover `i + 1`;
+  ##   * `var++` / `var--`         — reads `var`; `++var` / `--var` reads `var ± 1` (the sink
+  ##                                 comes before the step, so it is stated on the old value);
+  ##   * a constant, `x % K`, `x & K`, `x & unsignedMask` — bounded by its own form. The bound
+  ##     is still checked against the buffer, through a value of its own that carries it. A
+  ##     constant index is checked when the buffer's size is known (fixed or symbolic).
+  ## Anything else (a product, a call, two variables, a nested read) is a sink with no key:
+  ## no bound check can be matched to it, so it is reported.
+  let base = unwrap(baseCur)
+  var sz = -1                    # a fixed array's element count
+  var bsym = ""                  # the buffer's symbolic allocation count, if known
+  var bsymOff = 0                # the buffer holds `bsym + bsymOff` elements
+  if clang_getCursorKind(base) == ckDeclRefExpr:
+    sz = fixedArraySize(base)
+    if sz < 0:
+      let bs = ctx.bufSizeSym.getOrDefault(referencedUsr(base))
+      bsym = bs.symKey; bsymOff = bs.off
+  elif clang_getCursorKind(base) == ckMemberRefExpr:
+    sz = fixedArraySize(base)    # a fixed-size array member `s->buf[N]` (field buffer)
+    if sz < 0:                   # a pointer field sized by a declared `@counted_by`
+      let (fk, _) = fieldPath(base)
+      if fk.len > 0:
+        let bs = ctx.bufSizeSym.getOrDefault(fk)
+        bsym = bs.symKey; bsymOff = bs.off
+  let ix = unwrap(idxCur)
+  proc sink(disp, key: string, off2: int, uns: bool): Stmt =
+    emit(ikIndex, line, a = disp, aKey = key, off = sz, off2 = off2, bKey = bsym,
+         cKey = (if uns: "u" else: ""), off3 = bsymOff)
+  let text = ctx.cursorTokens(ix).join("")
+  let own = "@index:" & $line & ":" & $outp.len      # the value an expression-form index carries
+  let cv = constIntValue(ix)
+  if cv.known:
+    if sz >= 0 or bsym.len > 0:
+      let c = int(cv.value)
+      if c != high(int): outp.add emit(ikValidate, line, a = text, aKey = own, off = c + 1)
+      outp.add emit(ikLowBound, line, a = text, aKey = own, off = c)
+      outp.add sink(text, own, 0, false)
+    return
+  let lin = ctx.parseLinear(ix)
+  if lin.ok and lin.key.len > 0:
+    outp.add sink(lin.disp, lin.key, lin.off, isUnsignedInteger(ix))
+    return
+  let d = ctx.incDecDelta(ix)
+  if d != 0:
+    let kids = collectChildren(ix)
+    if kids.len >= 1:
+      let t = ctx.scalarTerm(unwrap(kids[0]))
+      if t.ok:
+        let prefix = ctx.firstTokenSpelling(ix) in ["++", "--"]
+        outp.add sink(t.disp, t.key, (if prefix: d else: 0), isUnsignedInteger(unwrap(kids[0])))
+        return
+  if clang_getCursorKind(ix) == ckBinaryOperator and ctx.binOperator(ix) in ["%", "&"]:
+    let kids = collectChildren(ix)
+    if kids.len == 2:
+      let isMod = ctx.binOperator(ix) == "%"
+      let uns = isUnsignedInteger(ix)
+      let m = constIntValue(unwrap(kids[1]))
+      if m.known and m.value > 0 and m.value < int64(high(int)):
+        # x % K < K (and >= 0 only when unsigned);  0 <= x & K <= K
+        outp.add emit(ikValidate, line, a = text, aKey = own,
+                      off = (if isMod: int(m.value) else: int(m.value) + 1))
+        if not isMod: outp.add emit(ikLowBound, line, a = text, aKey = own, off = 0)
+        outp.add sink(text, own, 0, uns)
+        return
+      if not isMod:
+        for mi in [1, 0]:        # `x & mask`, mask an unsigned variable / field: 0 <= result <= mask
+          let mt = ctx.scalarTerm(unwrap(kids[mi]))
+          if mt.ok and isUnsignedInteger(unwrap(kids[mi])):
+            outp.add emit(ikValidate, line, a = text, aKey = own, b = mt.disp, bKey = mt.key, off = 1)
+            outp.add emit(ikLowBound, line, a = text, aKey = own, off = 0)
+            outp.add sink(text, own, 0, uns)
+            return
+  outp.add sink(text, "", 0, false)
+
 proc scanDerefs(ctx: Ctx, c: CXCursor, outp: var seq[Stmt]) =
   ## Walk an expression subtree and emit `ikDeref` for `*p` / `p->x` / `p[i]`
   ## of a named variable. Harmless on non-nullable vars (the engine only warns
-  ## when null-state says maybe). Does not descend into nested statements.
+  ## when null-state says maybe). Does not descend into nested statements. Also emits the
+  ## SPATIAL effects found in an expression: the index sinks, and every in-place change of a
+  ## scalar (`i++`, `--i`, `i += k`), in evaluation order.
   let k = clang_getCursorKind(c)
   let kids = collectChildren(c)
   case k
@@ -2541,38 +3954,63 @@ proc scanDerefs(ctx: Ctx, c: CXCursor, outp: var seq[Stmt]) =
       return
     for ch in kids: ctx.scanDerefs(ch, outp)
     return
+  of ckCompoundAssign:
+    # `v OP= rhs` on a scalar: the right side is evaluated first, then `v` changes. `+=` /
+    # `-=` by a constant is a step; `%= K` / `&= K` bound it; anything else leaves it with no
+    # bound. A protected field written under `@maintains` is verified (and re-bounded) by the
+    # invariant check instead.
+    for ch in kids: ctx.scanDerefs(ch, outp)
+    if kids.len == 2:
+      let lhs = unwrap(kids[0])
+      let t = ctx.scalarTerm(lhs)
+      if t.ok and not (t.key in ctx.curProtected and startLine(c) in ctx.maintainsLines):
+        let op = ctx.binOperator(c)
+        let rc = constIntValue(unwrap(kids[1]))
+        let line = startLine(c)
+        if op in ["+=", "-="] and rc.known and abs(rc.value) < int64(high(int32)):
+          outp.add emit(ikScalarStep, line, a = t.disp, aKey = t.key,
+                        off = (if op == "+=": int(rc.value) else: -int(rc.value)),
+                        cKey = (if isUnsignedInteger(lhs): "u" else: ""))
+        elif op == "%=" and rc.known and rc.value > 0:
+          outp.add emit(ikTaint, line, a = t.disp, aKey = t.key)   # the old lower bound is gone
+          outp.add emit(ikValidate, line, a = t.disp, aKey = t.key, off = int(rc.value))
+        elif op == "&=" and rc.known and rc.value >= 0 and rc.value < int64(high(int)):
+          outp.add emit(ikTaint, line, a = t.disp, aKey = t.key)
+          outp.add emit(ikValidate, line, a = t.disp, aKey = t.key, off = int(rc.value) + 1)
+          outp.add emit(ikLowBound, line, a = t.disp, aKey = t.key, off = 0)
+        else:
+          outp.add emit(ikTaint, line, a = t.disp, aKey = t.key)
+    return
   of ckUnaryOperator:
     if ctx.firstTokenSpelling(c) == "*" and kids.len >= 1:
       ctx.derefVar(kids[0], startLine(c), outp)
+      # `*(p + i)` / `*(i + p)` is `p[i]`; `*(p - i)` reads below `p`
+      let inner = unwrap(kids[0])
+      if clang_getCursorKind(inner) == ckBinaryOperator and ctx.binOperator(inner) in ["+", "-"]:
+        let ik = collectChildren(inner)
+        if ik.len == 2:
+          let l = unwrap(ik[0]); let r = unwrap(ik[1])
+          if isIntegerType(r) and not isIntegerType(l):
+            if ctx.binOperator(inner) == "+": ctx.emitIndexSink(ik[0], ik[1], startLine(c), outp)
+            elif not constIntValue(r).known or fixedArraySize(l) >= 0:
+              outp.add emit(ikIndex, startLine(c), a = "-(" & ctx.cursorTokens(r).join("") & ")",
+                            off = fixedArraySize(l))
+          elif isIntegerType(l) and not isIntegerType(r) and ctx.binOperator(inner) == "+":
+            ctx.emitIndexSink(ik[1], ik[0], startLine(c), outp)
+    else:
+      let d = ctx.incDecDelta(c)
+      if d != 0 and kids.len >= 1:
+        let o = unwrap(kids[0])
+        let t = ctx.scalarTerm(o)
+        if t.ok:
+          for ch in kids: ctx.scanDerefs(ch, outp)
+          if not (t.key in ctx.curProtected and startLine(c) in ctx.maintainsLines):
+            outp.add emit(ikScalarStep, startLine(c), a = t.disp, aKey = t.key, off = d,
+                          cKey = (if isUnsignedInteger(o): "u" else: ""))
+          return
   of ckArraySubscriptExpr:
     if kids.len >= 1: ctx.derefVar(kids[0], startLine(c), outp)
-    # SPATIAL sink: the index expression. A value (possibly `var ± k`) used as a subscript
-    # must be VALIDATED; emit ikIndex so the spatial pass can check it, carrying the `± k`
-    # offset so a neighbour access `buf[i + 1]` requires `i` bounded to cover `i + 1`. A
-    # pure-constant / modulo / mask index is bounded by construction (no variable -> no sink).
-    if kids.len >= 2:
-      let lin = ctx.parseLinear(kids[1])
-      if lin.ok and lin.key.len > 0:
-        let base = unwrap(kids[0])     # the buffer: its size (if a fixed array) lets the
-        var sz = -1
-        var bsym = ""                  # the buffer's symbolic allocation count, if known
-        var bsymOff = 0                # the buffer holds `bsym + bsymOff` elements
-        if clang_getCursorKind(base) == ckDeclRefExpr:
-          sz = fixedArraySize(base)
-          if sz < 0:
-            let s = ctx.bufSizeSym.getOrDefault(referencedUsr(base))
-            bsym = s.symKey; bsymOff = s.off
-        elif clang_getCursorKind(base) == ckMemberRefExpr:
-          sz = fixedArraySize(base)    # a fixed-size array member `s->buf[N]` (field buffer)
-          if sz < 0:                   # a pointer field sized by a declared `@counted_by`
-            let (fk, _) = fieldPath(base)
-            if fk.len > 0:
-              let s = ctx.bufSizeSym.getOrDefault(fk)
-              bsym = s.symKey; bsymOff = s.off
-        let uns = isUnsignedInteger(unwrap(kids[1]))   # unsigned index: >= 0 by type
-        outp.add emit(ikIndex, startLine(c), a = lin.disp, aKey = lin.key,
-                      off = sz, off2 = lin.off, bKey = bsym, cKey = (if uns: "u" else: ""),
-                      off3 = bsymOff)
+    if kids.len >= 2: ctx.emitIndexSink(kids[0], kids[1], startLine(c), outp)
   of ckMemberRefExpr:
     if kids.len >= 1 and ctx.hasArrow(c): ctx.derefVar(kids[0], startLine(c), outp)
   else: discard
@@ -3050,6 +4488,10 @@ proc neqBound(ctx: Ctx, lhs, rhs: CXCursor): tuple[has: bool, eff: BoundEffect] 
   # `value + vOff != cConst`  ->  `value != cConst - vOff`
   let (ok, lim) = subPlus(cLin.off, vLin.off, false)
   if not ok: return (false, BoundEffect())
+  # an UNSIGNED value `!= 0` is `>= 1` outright: its type already gives `>= 0`
+  let vCur = (if vLin.key == ll.key and ll.key.len > 0: lhs else: rhs)
+  if lim == 0 and vLin.off == 0 and isUnsignedInteger(unwrap(vCur)):
+    return (true, BoundEffect(key: vLin.key, isLower: true, isConst: true, constLimit: 1))
   (true, BoundEffect(key: vLin.key, isNeq: true, constLimit: lim))
 
 proc subHeadroomBound(ctx: Ctx, op: string, lhs, rhs: CXCursor): tuple[has: bool, eff: BoundEffect] =
@@ -3160,6 +4602,11 @@ proc addElseBound(ctx: Ctx, c: CXCursor, s: Stmt) =
     for k in kids: ctx.addElseBound(k, s)
     return
   if kids.len != 2: return
+  if op == "==":                          # false on the else: `value != c`
+    let (has, eff) = ctx.neqBound(kids[0], kids[1])
+    if has:
+      var e = eff; e.onThen = false; s.condBounds.add e
+    return
   let nop = negateRel(op)
   if nop.len == 0: return
   let (has, eff) = ctx.boundWhenTrue(nop, kids[0], kids[1])
@@ -3190,6 +4637,11 @@ proc fillBounds(ctx: Ctx, cond: CXCursor, s: Stmt) =
     let (has, eff) = ctx.neqBound(kids[0], kids[1])
     if has:
       var e = eff; e.onThen = true; s.condBounds.add e
+    return
+  if op == "==":                          # `if (x == c) return;`: `x != c` on the fall-through
+    let (has, eff) = ctx.neqBound(kids[0], kids[1])
+    if has:
+      var e = eff; e.onThen = false; s.condBounds.add e
     return
   let (hasT, effT) = ctx.boundWhenTrue(op, kids[0], kids[1])
   if hasT:
@@ -3280,6 +4732,11 @@ proc lowerScalarAssign(ctx: Ctx, name, key: string, rhs: CXCursor, line: int,
   # the same deferred concern as every signed index). An UNSIGNED target could wrap to a
   # huge value, so it is NOT derived here (left tainted — no false green). This is the
   # reverse-loop idiom `i = toknext - 1` and the `toksuper = toknext - 1` cursor step.
+  block:                                         # `v = v ± k`: a step, like `v += k`
+    let lin = ctx.parseLinear(v)
+    if lin.ok and lin.key.len > 0 and lin.key == key and abs(lin.off) < int(high(int32)):
+      outp.add emit(ikScalarStep, line, a = name, aKey = key, off = lin.off,
+                    cKey = (if lhsSigned: "" else: "u")); return
   if lhsSigned:
     let lin = ctx.parseLinear(v)
     if lin.ok and lin.key.len > 0 and lin.off <= -1:
@@ -3393,7 +4850,14 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
   # scope of whatever was declared inside it.
   ctx.flushPendingLocals()
   let scopeMark = ctx.liveLocals.len
+  # LONGJMP: what this statement uses and changes of the locals a jump can leave indeterminate
+  var jmpPost: seq[Stmt]
+  if ctx.jmpLocals.len > 0: ctx.jmpLocalStmtEvents(c, outp, jmpPost)
+  # REFERENCES: what this statement uses, invalidates and binds of the locals that refer into
+  # storage another object manages
+  if ctx.refActive: ctx.refStmtEvents(c, outp, jmpPost)
   defer:
+    outp.add jmpPost
     if k == ckDeclStmt: ctx.flushPendingLocals()
     elif k notin [ckLabelStmt, ckCaseStmt, ckDefaultStmt] and ctx.liveLocals.len > scopeMark:
       ctx.pendingLocal.setLen(0)
@@ -3532,9 +4996,11 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
             # to the caller — the obligation leaves through the parameter, not a leak here.
             ctx.prog.escapesLines.incl startLine(c)
             outp.add emit(ikEscape, startLine(c), a = spelling(lhs), aKey = referencedUsr(lhs))
-          if isIntegerType(lhs):   # SPATIAL: follow scalar-integer dataflow
-            ctx.lowerScalarAssign(spelling(lhs), referencedUsr(lhs), kids[1], startLine(c), outp,
-                                  lhsSigned = not isUnsignedInteger(lhs))
+          if isIntegerType(lhs):   # SPATIAL: follow scalar-integer dataflow — AFTER the
+            # statement's own sinks, which read the value from before the assignment
+            # (`i = tab[i] % 8` indexes with the old `i`)
+            deferFk = referencedUsr(lhs); deferFd = spelling(lhs); deferRhs = kids[1]
+            deferSigned = not isUnsignedInteger(lhs)
         elif ctx.containerStoreTarget(lhs).has:
           # `m[k] = p` on a STANDARD associative container: the container takes the owned
           # pointer into its element slot, exactly like `v.push_back(p)` (Juliet 74).
@@ -3641,8 +5107,7 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
             if (fk in ctx.curProtected or fk in ctx.curProtectedLow) and not selfMod:
               deferFk = fk; deferFd = fd; deferRhs = kids[1]; deferSigned = not isUnsignedInteger(lhs)
             elif fk notin ctx.curProtected and fk notin ctx.curProtectedLow:
-              ctx.lowerScalarAssign(fd, fk, kids[1], startLine(c), outp,
-                                    lhsSigned = not isUnsignedInteger(lhs))
+              deferFk = fk; deferFd = fd; deferRhs = kids[1]; deferSigned = not isUnsignedInteger(lhs)
     else:
       # `p += n` / `p -= n` on a tracked pointer advances it -> interior pointer.
       let adv = ctx.advancesTrackedPointer(c)
@@ -3650,18 +5115,6 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
         outp.add emit(ikInterior, startLine(c), a = adv.name, b = adv.name,
                       aKey = adv.key, bKey = adv.key, off = ctx.advanceStep(c))
       else:
-        # SPATIAL: a compound mutation (`i += k`, `i <<= …`) on a scalar integer makes
-        # it unvalidated again (it may now exceed any earlier bound — off-by-one). In a
-        # loop the cond re-validates at the body top, so this only de-validates straight
-        # line / post-loop uses. `i &= mask` / `i %= n` keep it bounded.
-        let kids = collectChildren(c)
-        if kids.len >= 1:
-          let lhs = unwrap(kids[0])
-          if clang_getCursorKind(lhs) == ckDeclRefExpr and isIntegerType(lhs):
-            if op in ["&=", "%="]:
-              outp.add emit(ikValidate, startLine(c), a = spelling(lhs), aKey = referencedUsr(lhs))
-            else:
-              outp.add emit(ikTaint, startLine(c), a = spelling(lhs), aKey = referencedUsr(lhs))
         # ...and a CALL on the right of a compound assignment still passes its arguments across
         # the boundary: `status &= AppendValueToLinkedList(cache, log_info);` hands the object to
         # the container exactly as the plain-statement form does. Without this the escape went
@@ -3682,7 +5135,7 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
           outp.add emit(ikUnsupportedConstruct, startLine(c), a = "expression")
     ctx.scanDerefs(c, outp)
     ctx.scanInvariantWrites(c, outp)
-    if deferFk.len > 0:                          # protected-field re-taint, AFTER the maintains check
+    if deferFk.len > 0:                          # the scalar assignment's effect, AFTER its sinks / maintains check
       ctx.lowerScalarAssign(deferFd, deferFk, deferRhs, startLine(c), outp, lhsSigned = deferSigned)
     ctx.scanGuarded(c, outp)
     ctx.scanInit(c, outp)
@@ -3877,7 +5330,8 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
   of ckSwitchStmt:
     # SwitchStmt children: [cond, body(CompoundStmt)]. Group the body's statements
     # into per-case bodies (a CaseStmt's child begins a group; following siblings
-    # append until the next label). Each group becomes an independent branch.
+    # append until the next label). Each case — a group and the groups it falls through
+    # into — becomes an independent branch.
     let kids = collectChildren(c)
     let site = ctx.landingSiteAt(startOffset(c))
     if site >= 0: ctx.longjmpEmitted.incl ctx.landingSites[site].callOff
@@ -3969,12 +5423,20 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
           s.hasDefault = true                  # no no-match path: the constant selects this group
           outp.add s
           return
-      for g in groups: s.cases.add ctx.lowerBody(g)
+      # FALL-THROUGH: a group that may reach its end runs the next one, so the case entered at a
+      # label is its group followed by every group it falls into, up to one that ends in a jump.
+      var own: seq[seq[Stmt]]
+      for g in groups: own.add ctx.lowerBody(g)
+      var fallsInto = newSeq[bool](groups.len)  # group i may run on into group i + 1
+      for i in 0 ..< groups.high: fallsInto[i] = mayFallOff(own[i])
+      s.cases = newSeq[seq[Stmt]](groups.len)
+      for i in countdown(groups.high, 0):
+        s.cases[i] = (if fallsInto[i]: own[i] & s.cases[i + 1] else: own[i])
       s.caseValues = groupVals
       if site >= 0:
         # LANDING SITE: 0 enters the group labelled 0, else `default:`, else none; a longjmp's
         # non-zero value any other labelled group or `default:`, else none. The groups it can
-        # enter are lowered again once the whole body has been.
+        # enter, with those they fall into, are lowered again once the whole body has been.
         var anyZero = false
         for z in groupZero: anyZero = anyZero or z
         s.switchLandingId = ctx.landingSites[site].id
@@ -3986,7 +5448,13 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
           let lands = groupOther[i] or groupIsDefault[i]
           s.caseFirst.add first
           s.caseLanding.add false
-          if lands: rec.parts.add (groups[i], i, first)
+          if lands:
+            var run = groups[i]
+            var j = i
+            while fallsInto[j]:
+              inc j
+              run.add groups[j]
+            rec.parts.add (run, i, first)
         ctx.landingRecs.add rec
       outp.add s
   of ckForStmt, ckWhileStmt, ckDoStmt:
@@ -4021,6 +5489,7 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
       ctx.lowerStmt(initCur, outp)          # assignment-form init: hoist it before the loop
     var lb: seq[Stmt]
     if hasBody: lb = ctx.lowerBody(@[bodyCur])
+    var headerAt = lb.len                   # where the header's own statements start
     for ch in kids:                         # cond / increment header expressions
       if clang_getCursorKind(ch) == ckDeclStmt: continue      # init: already lowered
       if hasInit and clang_equalCursors(ch, initCur) != 0: continue  # hoisted init
@@ -4054,16 +5523,20 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
         # wrap-prone loop *condition* with an offset is near-nonexistent in real code — the
         # headroom check is an inner `if`, which the sink DOES wrap-gate.)
         if be.wrapVar or be.wrapLimNeed > 0: continue
-        if be.isLower:                         # `for (; i >= 0; …)` -> i >= 0 in the body
-          lb.insert(emit(ikLowBound, startLine(c), aKey = be.key, off = be.constLimit), 0)
-        elif be.isConst:
-          lb.insert(emit(ikValidate, startLine(c), aKey = be.key, off = be.constLimit), 0)
-        else:
-          lb.insert(emit(ikValidate, startLine(c), aKey = be.key,
-                         b = be.symDisp, bKey = be.symKey, off = be.symOff), 0)
+        let bs = (if be.isLower:               # `for (; i >= 0; …)` -> i >= 0 in the body
+                    emit(ikLowBound, startLine(c), aKey = be.key, off = be.constLimit)
+                  elif be.isConst:
+                    emit(ikValidate, startLine(c), aKey = be.key, off = be.constLimit)
+                  else:
+                    emit(ikValidate, startLine(c), aKey = be.key,
+                         b = be.symDisp, bKey = be.symKey, off = be.symOff))
+        if k == ckDoStmt:
+          lb.add bs                            # a do-while tests AFTER the body: the first
+        else:                                  # iteration runs without the bound
+          lb.insert(bs, 0); inc headerAt
     let trips = ctx.loopTripFacts(c, k, kids, bodyCur, hasBody)
     outp.add Stmt(line: startLine(c), kind: stLoop, loopBody: lb, doWhile: trips.atLeastOnce,
-                  contExits: trips.contExits, noBackEdge: trips.atMostOnce)
+                  contExits: trips.contExits, noBackEdge: trips.atMostOnce, headerAt: headerAt)
     # `@drains(head)` on the loop's line (or the line above it): this loop releases every
     # element of the collection rooted at `head`. Emitted AFTER the loop — the collection is
     # discharged at the loop's exit, and every cursor on it dangles from there.
@@ -4141,7 +5614,8 @@ proc lowerStmt(ctx: var Ctx, c: CXCursor, outp: var seq[Stmt]) =
                       aKey = usr(kids[0]), bKey = slot.key)
         s.doWhile = true
         s.contExits = true    # `continue` on the LAST element leaves the loop
-    if kids.len >= 1: s.loopBody = head & ctx.lowerBody(@[kids[^1]])
+    if kids.len >= 1: s.loopBody = head & ctx.refRangeBody(kids[^1], ctx.lowerBody(@[kids[^1]]))
+    s.headerAt = s.loopBody.len             # no header statements of its own
     outp.add s
   of ckCXXThrowExpr:
     # `throw e;` — control leaves by unwinding: a call in the operand lowers its effects first,
@@ -4464,6 +5938,7 @@ proc resolveNamedContracts(ctx: var Ctx) =
     if nc.kw == "@nothrow" and nc.param.len == 0:
       ctx.nothrowFuncs.incl nc.fn          # vouch by name; no signature needed
       continue
+    if nc.kw in ["@invalidates", "@preserves", "@returns_into"]: continue   # bound in resolveRefs
     if nc.kw == "@longjmps":
       ctx.longjmpFuncs.incl nc.fn          # a library function, declared by name
       if nc.param.len > 0: ctx.longjmpTargets[nc.fn] = nc.param   # `longjmps: <jmp_buf>`
@@ -4965,6 +6440,53 @@ proc resolveInvariants(ctx: var Ctx) =
       if parts.rel == ">": inc c                        # `field > c` == `field >= c+1`
       ctx.lowInvariants.mgetOrPut(fn, @[]).add (parts.lhs, c)
 
+proc resolveUnique(ctx: var Ctx) =
+  ## Bind each `@unique(p, q)` to the function below it.
+  ctx.uniqueParams = initTable[string, seq[string]]()
+  for site in ctx.uniqueSites:
+    let fn = ctx.siteFuncName(site.file, site.line)
+    if fn.len == 0: continue
+    for name in site.spec.split(','):
+      if name.strip.len > 0: ctx.uniqueParams.mgetOrPut(fn, @[]).add name.strip
+
+proc resolveRefs(ctx: var Ctx) =
+  ## Bind each `@invalidates(p, q)` / `@preserves(p)` to the function below it, take the same
+  ## declarations made by name in a `@contract` block, and bind each `@refcheck` opt-in marker
+  ## to the function it covers.
+  ctx.invalidatesParams = initTable[string, seq[string]]()
+  ctx.preservesParams = initTable[string, seq[string]]()
+  for (sites, invalidates) in [(ctx.invalidatesSites, true), (ctx.preservesSites, false)]:
+    for site in sites:
+      let fn = ctx.siteFuncName(site.file, site.line)
+      if fn.len == 0: continue
+      for name in site.spec.split(','):
+        if name.strip.len == 0: continue
+        if invalidates: ctx.invalidatesParams.mgetOrPut(fn, @[]).add name.strip
+        else: ctx.preservesParams.mgetOrPut(fn, @[]).add name.strip
+  ctx.returnsInto = initTable[string, seq[string]]()
+  for site in ctx.returnsIntoSites:
+    let fn = ctx.siteFuncName(site.file, site.line)
+    if fn.len == 0: continue
+    discard ctx.returnsInto.mgetOrPut(fn, @[])          # `@returns_into()`: into none
+    for name in site.spec.split(','):
+      if name.strip.len > 0: ctx.returnsInto[fn].add name.strip
+  for nc in ctx.namedContracts:
+    if nc.kw == "@invalidates": ctx.invalidatesParams.mgetOrPut(nc.fn, @[]).add nc.param
+    elif nc.kw == "@preserves": ctx.preservesParams.mgetOrPut(nc.fn, @[]).add nc.param
+    elif nc.kw == "@returns_into":
+      discard ctx.returnsInto.mgetOrPut(nc.fn, @[])
+      if nc.param.len > 0: ctx.returnsInto[nc.fn].add nc.param
+  ctx.prog.refFuncs = initHashSet[string]()
+  for site in ctx.refSites:
+    var bestLine = high(int)
+    var best = -1
+    for i, fn in ctx.funcSigs:
+      if fn.file == site.file and fn.line >= site.line and
+         fn.line <= site.line + annBindWindow and fn.line < bestLine and fn.hasBody:
+        bestLine = fn.line; best = i
+    if best >= 0: ctx.prog.refFuncs.incl ctx.funcSigs[best].name
+    else: ctx.prog.refAll = true   # file-level marker
+
 proc countMarkedBack(stmts: seq[Stmt]): int =
   ## How many `@goto_backward`-tagged gotos (b == "@backward") the subtree holds.
   for s in stmts:
@@ -5060,7 +6582,8 @@ proc rewriteBackwardLoop(body: seq[Stmt]): seq[Stmt] =
   for i in 0 ..< hi: result.add body[i]
   # a goto-loop runs its body at least once (the back-edge test follows the body), so the
   # synthetic loop is a do-while — its post-state must not include a 0-trip exit.
-  result.add Stmt(line: body[hi].line, kind: stLoop, loopBody: loopBody, doWhile: true)
+  result.add Stmt(line: body[hi].line, kind: stLoop, loopBody: loopBody, doWhile: true,
+                  headerAt: loopBody.len)
   for i in gi+1 ..< body.len: result.add body[i]
 
 
@@ -5413,6 +6936,10 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
     ctx.curFnLongjmps = spelling(c) in ctx.longjmpFuncs or qualName(c) in ctx.longjmpFuncs
     ctx.landingRecs = @[]
     ctx[].findLandingSites(body)
+    ctx[].collectJmpLocals(c, body)
+    ctx.curUnique = initHashSet[string]()
+    ctx[].collectUniqueFacts(c, body)
+    ctx[].collectRefFacts(c, body, fnKey)
     # the declared jump target, with `$N` written as this definition's own parameter names, so
     # the longjmps in the body can be checked against it
     ctx.curFnTarget = ""
@@ -5599,6 +7126,15 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
           ctx.tracked[fk] = true
           ctx.raiiVars[fk] = f.cls
           fn.body.add emit(ikRaiiAlloc, startLine(c), a = "this->" & f.name, b = f.cls, aKey = fk)
+    block:
+      var names = ctx.uniqueParams.getOrDefault(fnKey, @[])
+      if names.len == 0: names = ctx.uniqueParams.getOrDefault(spelling(c), @[])
+      var borrowed: seq[string]
+      for (idx, instr, accessor) in ctx.bodyContracts.getOrDefault(fnKey, @[]):
+        if instr == ikBorrow and accessor.len == 0 and idx < params.len:
+          borrowed.add params[idx].name
+      ctx[].keptEscapes(c, body, names, borrowed, fn.body)
+      ctx[].keptPassedOn(body, fn.body)
     for child in collectChildren(body):
       ctx[].lowerStmt(child, fn.body)
     # LANDING PARTS, lowered again now that the whole body has been: the code a longjmp returns
@@ -5611,15 +7147,6 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
       let rec = ctx.landingRecs[ri]
       inc ri
       let site = ctx.landingSites[rec.siteIdx]
-      var ranges: seq[tuple[first, last: int]]
-      var landingOnly: seq[tuple[first, last: int]]
-      for part in rec.parts:
-        if part.stmts.len == 0: continue
-        let r = (startOffset(part.stmts[0]), endOffset(part.stmts[^1]))
-        ranges.add r
-        if not part.dual: landingOnly.add r
-      # a non-volatile local changed after the setjmp is indeterminate where the jump lands
-      let clobbered = ctx[].clobberedLocals(c, body, site, landingOnly)
       for part in rec.parts:
         var landBody: seq[Stmt]
         if part.stmts.len > 0:
@@ -5635,18 +7162,6 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
           landBody = ctx[].lowerBody(part.stmts)
           for o in savedEmitted: ctx.longjmpEmitted.incl o
           ctx.liveLocals = savedLive
-          var reads: seq[Stmt]
-          var seen = initHashSet[string]()
-          proc findReads(n: CXCursor, clobbered: HashSet[string], seen: var HashSet[string],
-                         reads: var seq[Stmt], sjLine: int) =
-            if clang_getCursorKind(n) == ckDeclRefExpr:
-              let k = referencedUsr(n)
-              if k in clobbered and k notin seen:
-                seen.incl k
-                reads.add emit(ikSetjmpClobbered, startLine(n), a = spelling(n), off = sjLine)
-            for ch in collectChildren(n): findReads(ch, clobbered, seen, reads, sjLine)
-          for st in part.stmts: findReads(st, clobbered, seen, reads, site.line)
-          landBody = reads & landBody
         if rec.site.kind == stIf:
           if rec.site.landingThen: rec.site.thenBody = landBody
           else: rec.site.elseBody = landBody
@@ -6015,6 +7530,8 @@ proc parseCFile*(path: string, extraArgs: seq[string] = @[], collectEffects = fa
   ctx.resolveTypecheckCoverage()                                # bind `@typecheck` opt-in markers
   ctx.resolveVariants()                                         # bind `@variant(member: tag==v)`
   ctx.resolveCountedBy()                                        # bind `@counted_by` (ptr,len) pairs
+  ctx.resolveUnique()
+  ctx.resolveRefs()                                             # bind `@refcheck`, `@invalidates`, `@preserves`
   ctx.resolveInvariants()                                       # bind `@invariant` protected fields
   ctx.resolveGuardedBy()                                        # bind `@guarded_by(field: lock)`
   ctx.resolveGuardedMembers()                                   # bind single-arg `@guarded_by(lock)`

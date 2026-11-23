@@ -61,7 +61,20 @@ the declared intent and reports where they disagree.
 - \`// @borrows(<param>)\` — the callee only reads / writes through the pointer and
   never frees or keeps it. Callsites: passing an owned pointer is a plain use (not an
   escape). Body: freeing the parameter is \`BORROW_FREED\`, moving it away is
-  \`BORROW_MOVED\`.
+  \`BORROW_MOVED\`, and letting it outlive the call is \`BORROW_ESCAPES\` — storing the pointer
+  or a copy in a global, a field or through another pointer, or passing it to a function whose
+  parameter is not itself \`@borrows\` / \`@unique\` (the C library's readers and writers and
+  declared deallocators are known). The promise is checked in each function's own body, so it
+  holds however many calls deep the pointer goes.
+- \`// @unique(<param>)\` — during a call, no other argument reaches the object the pointer
+  points into (C's \`restrict\`, checked). Callsites: the argument is compared with every other
+  pointer argument; the same object is \`UNIQUE_ALIASED\`, a pair nothing shows to be distinct is
+  \`UNIQUE_UNPROVEN\` (RED until shown). Shown distinct: different variables, different members of
+  one struct, separate allocations made in the caller, a local whose address exists nowhere else,
+  a caller parameter that is itself \`@unique\`. Body: storing the pointer or a copy of it in a
+  global, a field or through another pointer is \`UNIQUE_ESCAPES\`, and so is passing it to a
+  function whose parameter is not \`@borrows\` / \`@unique\`. Combine with \`@borrows\` when
+  the caller owns the object.
 - \`// @moves(<param>)\` — the callee takes the value out (a channel / thread handoff).
   Callsites: the argument is moved; using it afterwards is \`USE_AFTER_MOVE\`, moving it
   again is \`DOUBLE_MOVE\`.
@@ -170,8 +183,9 @@ the declared intent and reports where they disagree.
   (\`@contract png_error { longjmps: png_jmpbuf($1) }\`); \`longjmp\`'s own first argument needs no
   declaration. Another buffer = the jump leaves the function; undeclared = \`UNKNOWN_LONGJMP_TARGET\`
   (RED until declared); a body jumping elsewhere than declared = \`LONGJMP_TARGET_MISMATCH\`. A
-  non-volatile local changed after the setjmp and read in the landing branch is
-  \`SETJMP_CLOBBERED\` (declare it \`volatile\`). Any other setjmp form (expression statement, loop condition, assignment, inside \`try\`):
+  non-volatile local changed between the setjmp and the jump, then read on a path the jump takes
+  (in the landing branch or after it) before being assigned again, is \`SETJMP_CLOBBERED\`
+  (declare it \`volatile\`). Any other setjmp form (expression statement, loop condition, assignment, inside \`try\`):
   \`UNSUPPORTED_SETJMP\`.
 - A LAMBDA body runs where it is CALLED: \`auto v = [..]{..};\` defines it, each \`v()\`
   runs it (so calling a cleanup lambda twice is a \`DOUBLE_FREE\`, and never calling it leaves
@@ -190,6 +204,11 @@ the declared intent and reports where they disagree.
 - \`// @kenbi\` above a function, or at file level — the unit is under kenbi discipline:
   an undeclared heap resource there is an error, not just a note, and the unit counts in
   the coverage report. A file with no marker is checked as a whole (single-file mode).
+- Where a marker reaches: \`@kenbi\` and every axis marker (\`@spatial\`, \`@threadsafe\`,
+  \`@initcheck\`, \`@typecheck\`, \`@refcheck\`) covers the function just below it when there is
+  one within a few lines, and the whole file only when there is none. To cover the whole file
+  wherever the marker is written, add \`file\`: \`// @refcheck file\`. Prefer that form for a
+  file-wide opt-in; the scope reported with each result says what was actually checked.
 
 ## Your project's own allocator family (declare once, in the header everyone includes)
 - \`// @allocator <scope::name> { alloc: f g h, realloc: r, free: z }\` — nearly every C
@@ -329,6 +348,41 @@ the declared intent and reports where they disagree.
   without an initializer must be assigned on EVERY path before it is read, else
   \`USE_OF_UNINITIALIZED\` (\`if (c) v = 1; return v;\` is refused; assign on both branches or
   at the declaration).
+
+## Reference-validity axis (pointers into buffers and containers, opt-in)
+- \`// @refcheck\` above a function or at file level. A local that holds a pointer, a
+  reference, an iterator or a view into storage another object manages (\`p = buf->data\`,
+  \`&v[0]\`, \`v.begin()\`, \`s.c_str()\`, \`up.get()\`) is followed along each path. Using it
+  after a call that may have reallocated or released that storage is \`REF_INVALIDATED\` when
+  the call is declared or known to (\`realloc\`, \`free\`, the standard containers' own
+  methods), and \`REF_UNPROVEN\` (RED until shown) when the call is handed a writable pointer
+  or reference to the object and declares nothing. A range-\`for\` counts as holding iterators
+  into what it goes over. Fix: take the pointer again after the call.
+- What is followed: pointer, reference and iterator variables; views (\`string_view\`,
+  \`span\`), also when built from their parts (\`string_view(s.data(), n)\`); a pointer kept in a
+  member of a local struct (\`slice.ptr = buf->data\`) or in a local array — each member and
+  each element on its own, an element reached with a non-constant index being any of them;
+  and closures: a lambda holds a copy of what it
+  captures by value, reads what it captures by reference when its body runs, and its body is
+  read wherever the closure is used (called, or handed to something that may call it).
+- \`// @invalidates(<param>)\` / \`// @preserves(<param>)\` above a function declare which it
+  is — \`this\` for a method, a global by name; \`invalidates:\` / \`preserves:\` in a
+  \`@contract\` block for a library. A \`@preserves\` body is verified: releasing or
+  reallocating what the parameter holds, or passing it to a function that does not make the
+  same promise, is \`REF_NOT_PRESERVED\`. A \`const\` parameter needs no declaration, and the C
+  library's readers and writers are known. When unsure, declare \`@preserves\` and run the
+  check: a finding in the body names the line that reallocates.
+- \`// @returns_into(<param>)\` above a function declares that its result points into storage
+  reached through that parameter — an accessor such as \`char *buf_data(struct Buf *b)\`. The
+  caller's copy is then followed like a pointer read out of the object. \`// @returns_into()\`
+  declares that the result points into none of the arguments; \`returns_into:\` is the
+  \`@contract\` key. A function that returns a pointer into what a parameter holds without
+  declaring it is \`REF_RETURN_UNDECLARED\`. The result of a function that declares nothing may
+  point into what any pointer argument holds: using it after that argument is invalidated is
+  \`REF_UNPROVEN\`. \`strchr\`, \`memcpy\` and the like are known to return a pointer into
+  their argument's block; a fresh allocation (\`@owns\`) points into nothing the caller holds.
+- Storage reached from a global can be changed by any function of the program: a pointer into
+  it held across a call needs that function to declare \`@preserves(<global>)\`.
 
 ## Type-confusion axis (tagged unions, opt-in)
 - \`// @typecheck\` above a function or at file level, plus

@@ -6,7 +6,7 @@
 
 **为与 AI agent 一起编写 C/C++ 而设计。** 通过它的 [MCP 服务器](#与-ai-编程-agent-一起使用-mcp)，agent 检查自己刚写的 C/C++，询问某个结果为何出现、修复应是什么样子，并反复进行，直到检查不再报告任何问题。内存安全由此成为 agent 编写循环的一部分，而不是事后的审查；agent 写下的注解留在代码中，作为 kenbi 持续检查的规则。
 
-> 状态：**v0.1.3**，早期开发阶段。接口、注解词汇以及 JSON 输出仍可能变化。
+> 状态：**v0.2.0**，早期开发阶段。接口、注解词汇以及 JSON 输出仍可能变化。
 
 ## 初次一览
 
@@ -73,7 +73,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 0 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -110,7 +110,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 1 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -130,8 +130,12 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 | 边界 | `@spatial` | 到达缓冲区的不可信索引或大小，需要一个存在的、充分的、不会溢出的边界检查；`@counted_by` 以及声明的数据结构不变式（`@invariant` / `@maintains`） |
 | 初始化 | `@initcheck` | 局部变量在尚未于每条路径上都被赋值之前就被读取 |
 | 带标签联合体 | `@typecheck` + `@variant` | 在其标签未被证明的位置使用联合体成员 |
+| 引用有效性 | `@refcheck` + `@invalidates` / `@preserves` | 指向缓冲区或容器内部的指针、引用或迭代器，在可能重新分配或释放它的调用之后被使用 |
 | 锁 | `@threadsafe` | 未受保护的访问、不平衡的加锁、声明的加锁顺序（AB-BA 死锁） |
 | 底层性质 | `--safety=project.json` | 调用闭包中被禁止的效应、资源状态机、栈与调用深度、内存区域、MMIO 等——见[配置驱动的底层验证](#配置驱动的底层验证--safety) |
+
+写在函数上方的标记作用于该函数；其下数行内没有函数的标记作用于整个文件。若要无论写在何处都覆盖整个
+文件，请加上 `file`：`// @kenbi file`、`// @spatial file`、`// @refcheck file`。
 
 libclang 前端将真实的 C / C++（读取 `compile_commands.json`）下降（lowering）到 typestate
 引擎。循环被分析到有界不动点；前向 `goto` 清理阶梯、`break` / `continue` 以及 `try` / `catch`
@@ -220,7 +224,8 @@ nimble build -d:release -d:kenbiLibclang=libclang.dll
 ## 用法
 
 ```
-kenbi [--format=text|json] [--compile-commands=PATH] [--project[=PATH]] [--emit-contracts]
+kenbi [--format=text|json|sarif] [--compile-commands=PATH] [--project[=PATH]]
+      [--baseline=PATH | --write-baseline=PATH] [--emit-contracts]
       <file> [more...] [-- <extra clang args>]
 kenbi [--format=text|json] --safety=project.json
 kenbi --version
@@ -239,9 +244,29 @@ kenbi --version
   从给出的第一个文件向上逐级目录查找数据库。
 - `--format=json` 输出带稳定代码的机器可读结果（用于 CI、编辑器和 agent）；
   `--format=text`（默认）则是人类可读的。
+- `--format=sarif` 把发现写成 SARIF 2.1.0 日志，即 GitHub code scanning 等服务读取的格式。每条发现
+  带有不依赖行号的指纹，因此周围代码移动时，警报仍会被持续跟踪。
+- `--write-baseline=PATH` 记录一次运行的发现（并以 `0` 退出）；此后 `--baseline=PATH` 只报告不在该
+  记录中的发现，也只有它们决定退出码。已记录的发现仍然是发现——输出会统计并说明——但在已有发现的
+  代码中引入 kenbi 或开启新检查时，它们不会碍事。匹配依据是文件、代码和消息，而非行号。JSON 中
+  每条发现带 `baseline: "new" | "known"`；SARIF 中为 `baselineState`。
 - `--safety=project.json` 运行[配置驱动的底层验证](#配置驱动的底层验证--safety)中所述的
   配置驱动的底层检查。
 - 退出码：`0` 干净 · `1` 发现问题 · `2` 用法 / 解析错误。
+
+### 在 CI 中使用
+
+先记录一次起点并提交，此后每次运行只因新增的发现而失败：
+
+```yaml
+- run: kenbi --format=sarif --baseline=kenbi-baseline.json --project > kenbi.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: kenbi.sarif
+```
+
+每当修复了发现，就重新运行 `kenbi --write-baseline=kenbi-baseline.json --project`，让记录随之缩小。
 
 
 ## 选择加入：文件、函数或代码块
@@ -391,6 +416,17 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 - **must-use 返回值**：函数上方的 `// @must_use` 声明其结果必须被消费；其值被丢弃
   的调用（裸语句，未被赋值 / 返回 / 传递 / 测试）即为 `UNUSED_MUST_USE` —— 即针对
   被忽略的错误码和泄漏的分配的 `#[must_use]` 纪律。
+- **独占参数**：函数上方的 `// @unique(param)` 声明：在一次调用期间，没有其他实参能到达 `param`
+  所指向的对象（即 C 的 `restrict` 所承诺、而编译器并不检查的内容）。在每一处调用，该实参都会与
+  其他每个指针实参比较：指向同一对象为 `UNIQUE_ALIASED`，无法表明互不相同的一对为
+  `UNIQUE_UNPROVEN`。不同的变量、同一结构体的不同成员、在调用方中分别进行的分配，以及调用方自己
+  声明为 `@unique` 的参数，都视为互不相同。在函数体内，把该指针或其副本保存到比调用存活更久的
+  位置为 `UNIQUE_ESCAPES`。
+- **调用结束后归还**：`@borrows(param)` 与 `@unique(param)` 都承诺调用返回后不再有任何地方持有该
+  指针，函数体会据此受到检查。把该指针或其副本保存到全局变量、字段或通过另一指针保存为
+  `BORROW_ESCAPES` / `UNIQUE_ESCAPES`；把它传给形参未作同样承诺（`@borrows` 或 `@unique`，并在
+  该函数体内同样受检）的函数也是如此。C 库的读写函数（`memcpy`、`strlen`、`printf` 等）和已声明的
+  释放函数视为已知。
 
 ### Goto 词汇（可选 —— 声明一个 goto 的结构化意图）
 
@@ -419,12 +455,44 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 `i + 4 <= n` 不被认可；`n >= 4 && i <= n - 4` 则被认可。kenbi 在路径上寻找该检查；它从不
 移除检查。
 
+kenbi 能读懂的索引或长度是：变量加减一个常量（`buf[i]`、`buf[i + 1]`、`buf[i++]`、`*(p + i)`）、
+常量，或 `x % K` / `x & K`。其他形式——乘积、函数调用、两个变量的运算、嵌套读取——无法与任何检查
+对应，会被报告：请把该值存入一个变量，再对这个变量做边界检查。常量索引或长度同样要与缓冲区大小
+比对：对于大小可变的缓冲区（`malloc(n * …)` 上的 `buf[0]`），必须通过路径上的检查
+（`if (n >= 1)`）或声明的 `@invariant(n >= 1)` 表明大小足够。
+
 - 函数上方的 `// @counted_by(<buf>: <len>)` 为指针参数给出其大小，也可以是字段形式
   （`b->buf: b->cap`）或环形缓冲区掩码（`b->mask + 1`）。
 - `// @invariant(<field> <rel> <size>)` 声明一个数据结构不变式（例如
   `parser->toknext <= num_tokens`）。该字段随后受到保护：对它的每次写入都需要
   `// @maintains(...)`，kenbi 会对其进行验证（`UNGUARDED_INVARIANT_WRITE`、
   `INVARIANT_NOT_MAINTAINED`），并且以该字段为界的索引通过该关系得到覆盖。
+- 函数上方的 `// @invariant(<param> >= <K>)` 或 `// @invariant(<param> <rel> <param>)` 声明函数体
+  对其参数的假设（`@invariant(n >= 2)`、`@invariant(next <= num)`）。kenbi 会在 `@spatial` 代码中的
+  每一处调用验证它：必须通过路径上的检查、常量，或调用方自己声明的不变式表明实参满足该条件，否则
+  该调用为 `INVARIANT_NOT_MAINTAINED`。
+
+### 指向受管存储的引用（`@refcheck`）
+
+- 函数上方或文件级的 `// @refcheck`：持有指向另一对象所管理存储内部的指针、引用、迭代器或视图
+  （`p = buf->data`、`&v[0]`、`v.begin()`、`s.c_str()`）的局部变量会沿每条路径被跟踪。在可能重新
+  分配或释放该存储的调用之后使用它：若该调用已声明或已知会这样做（`realloc`、`free`、标准容器
+  自身的方法）为 `REF_INVALIDATED`；若该调用得到指向该对象的可写指针或引用却未作任何声明，为
+  `REF_UNPROVEN`。请在调用之后重新获取指针。
+- 被跟踪的对象：指针、引用和迭代器变量；视图（`string_view`、`span`，包括由各部分构造而成的）；
+  保存在局部结构体成员或局部数组中的指针（各成员和各元素分别跟踪；用非常量下标访问的元素可能是其中任何一个）；以及闭包——lambda
+  持有按值捕获内容的副本，按引用捕获的内容在其函数体运行时读取，其函数体在闭包被使用的每一处被读取。
+- 函数上方的 `// @invalidates(param)` / `// @preserves(param)` 声明属于哪一种（方法用 `this`，
+  全局变量用其名称；库函数用 `@contract` 块中的 `invalidates:` / `preserves:`）。`@preserves` 的
+  函数体会被验证：释放或重新分配该参数所持有的存储，或把它传给未作同样承诺的函数，为
+  `REF_NOT_PRESERVED`。`const` 参数无需声明。
+- 从全局变量可达的存储可被程序中的任何函数修改；要跨调用持有指向它的指针，被调用的函数必须声明
+  `@preserves(<全局变量>)`。
+- 函数上方的 `// @returns_into(param)` 声明其返回值指向经由 `param` 可达的存储内部；调用方得到的
+  指针随后会像从对象中直接读出的指针一样被跟踪（`// @returns_into()`：不指向任何实参内部；
+  `@contract` 块中为 `returns_into:`）。返回此类指针却未声明的函数为 `REF_RETURN_UNDECLARED`。
+  未作任何声明的函数，其返回值可能指向任一指针实参所持有的存储内部：在该实参失效之后使用它为
+  `REF_UNPROVEN`。`strchr`、`memcpy` 等已知会返回指向其实参所在内存块内部的指针。
 
 ### 初始化（`@initcheck`）与带标签联合体（`@typecheck`）
 
@@ -474,8 +542,9 @@ case 是跳转的落点）。它可以位于函数的任意深度。每个可能
 ```
 
 跳转到其他缓冲区则视为离开函数；未声明缓冲区的跳转是 `UNKNOWN_LONGJMP_TARGET`，函数体并未跳转到
-所声明缓冲区的是 `LONGJMP_TARGET_MISMATCH`。非 `volatile`、在 setjmp 之后被修改且在落点分支中被
-读取的局部变量是 `SETJMP_CLOBBERED`：它在那里的值是不确定的。其他形式的 setjmp（表达式语句、循环
+所声明缓冲区的是 `LONGJMP_TARGET_MISMATCH`。非 `volatile`、在 setjmp 与跳转之间被修改，
+并在重新赋值之前于跳转所经路径上（落点分支之内或之后）被读取的局部变量是 `SETJMP_CLOBBERED`：
+它在那里的值是不确定的。其他形式的 setjmp（表达式语句、循环
 条件、赋值，或位于 `try` 块中）是 `UNSUPPORTED_SETJMP`。
 
 ### 并发注解（在 `@threadsafe` 下验证，在其外为建议性）
@@ -532,6 +601,9 @@ use <var> | free <var> | move <var> | if / else / endif
 `SETJMP_CLOBBERED`（在 longjmp 落点读取的非 volatile 局部变量）、`UNSUPPORTED_SETJMP`（kenbi
 不建模的形式的 `setjmp`）、
 `FINALLY_BYPASSED`（一个持有资源的出口绕过了声明的 `@goto_finally` 漏斗）、
+`BORROW_ESCAPES`（函数体保存了 `@borrows` 指针，或把它传给可能保存它的函数）、
+`UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES`（被其他实参到达、或被函数体保留的
+`@unique` 参数）、
 `FREE_NONHEAP`（对指向栈或其他非堆存储的指针执行 `free`）、`BORROW_MOVED` /
 `UNCONTRACTED_MOVE`（从借用中移出，或移入一个未声明接收的被调用者）、
 `REALLOC_UNVERIFIED` / `REALLOC_SELF_REASSIGN`（一个在使用前结果未被确定的 `realloc`，或其
@@ -540,7 +612,7 @@ use <var> | free <var> | move <var> | if / else / endif
 外加 `UNKNOWN_RESOURCE` / `STALE_UNSAFE` 卫生检查。在选择加入的轴下：`UNVALIDATED_INDEX`、
 `UNVALIDATED_SIZE`、`INAPPROPRIATE_BOUND`、`INDEX_MAYBE_NEGATIVE`、
 `UNGUARDED_INVARIANT_WRITE`、`INVARIANT_NOT_MAINTAINED`（`@spatial`）、`USE_OF_UNINITIALIZED`
-（`@initcheck`）、`TYPE_CONFUSION`（`@typecheck`），以及 `UNGUARDED_ACCESS`、`GUARDED_ESCAPE`、
+（`@initcheck`）、`REF_INVALIDATED`、`REF_UNPROVEN`、`REF_RETURN_UNDECLARED`、`REF_NOT_PRESERVED`（`@refcheck`）、`TYPE_CONFUSION`（`@typecheck`），以及 `UNGUARDED_ACCESS`、`GUARDED_ESCAPE`、
 `LOCK_LEAKED`、`DOUBLE_LOCK`、`UNLOCK_WITHOUT_LOCK`、`LOCK_NOT_ACQUIRED`、
 `REQUIRED_LOCK_NOT_HELD`、`LOCK_ORDER_VIOLATION`、`SAME_CLASS_NO_ORDER`、
 `UNDECLARED_INDIRECT_CALL`、`UNDECLARED_FN_TARGET`（`@threadsafe`）。循环
@@ -764,7 +836,7 @@ kenbi 无法建模的内容会被拒绝而不是被跳过：`UNSTRUCTURED_GOTO`�
 ## 测试
 
 `tests/*.mc` 直接驱动引擎（17 个用例）。`tests/c/*.c` 与 `tests/cpp/*.cpp` 以真实
-C 和 C++ 承载这些场景外加注解专属的检查（349 个用例）；运行器通过 libclang 下降每个
+C 和 C++ 承载这些场景外加注解专属的检查（370 个用例）；运行器通过 libclang 下降每个
 文件，并将产生的诊断 —— **连同其源代码行号** —— 与各文件中的 `//EXPECT CODE` 标记进行
 核对（标记位于该行本身，或写作 `//EXPECT CODE@LINE`）。行号错误，或诊断缺失 / 多余，都会
 使测试集失败。`tests/run_tests_project.nim` 检查项目范围的覆盖率结果，`tests/run_tests_*.py`

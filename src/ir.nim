@@ -146,8 +146,45 @@ type
                  ## certain to have run before it.
     ikSetjmp     ## a call to `setjmp` / `sigsetjmp` in a form kenbi does not model (anything
                  ## but the whole condition of an `if` or `switch`, or inside a `try`): refused.
-    ikSetjmpClobbered ## the landing branch reads `a`, a non-volatile local changed after the
-                 ## `setjmp` on line `off`: after a longjmp its value is indeterminate.
+    ikUniqueCheck ## EXCLUSIVITY at a call: the callee declares parameter `cKey` (`callee|param`)
+                 ## `@unique`, this call passes `a` (key `aKey`) for it and `b` (key `bKey`) as
+                 ## another pointer argument. `off`: 1 the two are the same object as written
+                 ## (UNIQUE_ALIASED); 2 nothing shows them distinct (UNIQUE_UNPROVEN); 0 decided
+                 ## from what the two pointer variables are bound to on this path — bound to
+                 ## one allocation is aliased, to two distinct ones is distinct, anything else
+                 ## unproven; 3 one of the two is a local object, and the other, a pointer
+                 ## variable, is distinct from it when bound to a block this function allocated.
+                 ## `off2` bit 0 / bit 1: `a` / `b` is a parameter of the caller that still holds
+                 ## the value it was called with; bit 2: `a` is the local object of an `off` 3.
+    ikUniqueEscape ## the body of a function lets `a`, which is or derives from its `@unique`
+                 ## or `@borrows` (off2 = 1) parameter `b`, outlive the call: off 0 it stores it,
+                 ## 1 it passes it to `cKey` (parameter `bKey`), which declares nothing about
+                 ## keeping it, 2 to one declared to take it (UNIQUE_ESCAPES / BORROW_ESCAPES).
+    ikRefDerive  ## the local `a` (key `aKey`) is assigned: it now holds a pointer, reference or
+                 ## iterator reached through the pointers `bKey` names (each root, steps, display,
+                 ## storage and — when a callee that declares nothing returned it — that callee,
+                 ## separated by U+001F; several separated by U+001E), together with whatever
+                 ## the locals `cKey` hold when it is a copy or an offset of them.
+    ikRefReturn  ## the function returns `a`, which points into what its parameter `b` holds,
+                 ## without declaring `@returns_into(b)` (off 1: it declares other parameters).
+                 ## off 1: one element of an array is assigned, so what the others hold stays.
+    ikRefUse     ## a use of the local `a` (key `aKey`); off 1: by the range-`for` it stands for.
+    ikRefInvalidate ## a call to `b` may have reallocated or released storage: everything at or
+                 ## below the steps `bKey` of root `aKey` (off 0 declared or known to, 1 nothing
+                 ## shows it does not), exactly the block that pointer holds (off 2, a release),
+                 ## or anything reached from a global (off 3; `bKey` lists the globals the
+                 ## callee declares it preserves, `cKey` those it declares it invalidates).
+                 ## `a` is the argument or object as written.
+    ikRefNotPreserved ## the body of a function that declares `b` `@preserves` passes `a` to
+                 ## `cKey`, which may reallocate or release it (off as for ikRefInvalidate).
+    ikJmpLocalRead ## a use of the value of `a` (key `aKey`), a non-volatile automatic local or
+                 ## parameter of a function with a landing site. On a path a longjmp took back
+                 ## into the function, a local changed between the setjmp and the jump is
+                 ## indeterminate (C11 7.13.2.1) until it is assigned again: SETJMP_CLOBBERED.
+    ikJmpLocalWrite ## ... and a change of it. `off` bit 1: the local may have been changed here
+                 ## (assigned, stepped, or exposed by `&` / array decay), which is what makes it
+                 ## indeterminate after a later jump; bit 0: it certainly holds a fresh value
+                 ## from here (a plain assignment or an initialised declaration).
     ikLongjmpUnmodeled ## a call that may longjmp, in an expression position the front-end does
                  ## not lower (e.g. inside a lambda passed to a callee): refused in covered scope
                  ## rather than dropped. `a` = the callee.
@@ -259,6 +296,27 @@ type
                  ## deref / field read, or non-bounding arithmetic). Must be re-validated
                  ## before a sink. Clears any prior validation (avoids a false negative
                  ## when a once-validated var is reassigned to untrusted data).
+    ikScalarStep ## SPATIAL: scalar value <a> is changed in place by the constant `off` (`i++`,
+                 ## `--i`, `i += 2`, `i = i - 1`). `cKey` = "u" when <a> is unsigned. Its bounds
+                 ## move with it where that is certain: stepping up keeps an upper bound
+                 ## (shifted by `off`) and, with it, the lower bound — a value with no upper
+                 ## bound may wrap past the top of its type, so it then keeps neither. Stepping
+                 ## down keeps both only when a lower bound shows it cannot wrap below the
+                 ## bottom of its type (for an unsigned value, `>= |off|`).
+    ikArgRelCheck ## INVARIANT at a call: the callee declares `@invariant(p REL q)` between two of
+                 ## its parameters (`cKey` = the declaration as written, after the callee's
+                 ## name and a `|`), and this call passes <a> + `off` for `p` and <b> + `off2`
+                 ## for `q` (an empty key = a constant, its value in the offset). `off3` = 1
+                 ## for `<=`, 0 for `<`; +2 when the `q` argument is unsigned. Every call must
+                 ## establish the relation: the same variable on both sides, a bound on the
+                 ## path (followed through the caller's own invariants), or constants.
+                 ## `a` = "@opaque": an argument kenbi cannot read.
+    ikArgLowCheck ## INVARIANT at a call: the callee <b> declares `@invariant(<bKey> >= off)` on
+                 ## its parameter <bKey>, and this call passes <a> (+ `off2`) for it. The
+                 ## declaration is the callee's assumption, so every call must establish it:
+                 ## the argument is shown `>= off` by a check on the path, its own declared
+                 ## invariant, or its unsigned type (`cKey` = "u"). `cKey` = "@const": a constant
+                 ## below the limit; "@opaque": an argument kenbi cannot read.
     ikLowBound   ## SPATIAL (lower bound): scalar value <a> is known `>= off` on the path —
                  ## from a constant initializer (`i = 0`) or, inserted by the loop lowering,
                  ## a `>= 0` loop condition. Index sinks require a SIGNED index to have a
@@ -484,14 +542,21 @@ type
                            ## constant (`while (1)`), where `continue` always re-enters the body.
                            ## Only consulted when `doWhile` is set — otherwise the loop exits at
                            ## the head, which already joins every continue.
+      headerAt*: int       ## index in `loopBody` where the loop header's own statements (the
+                           ## condition's and the increment's effects) start. A `continue`
+                           ## jumps there, not to the end of the loop.
       noBackEdge*: bool    ## the body runs AT MOST ONCE: `do … while (0)`, the standard C
                            ## multi-statement macro wrapper. There is no second iteration, so no
                            ## fixpoint over the back edge — without this the release in a
                            ## `do { … free(p); } while (0)` read as a double free of itself.
     of stSwitch:
-      cases*: seq[seq[Stmt]] ## one body per case group; analyzed as independent
-                             ## branches from the switch entry (may-set merged,
-                             ## plus the entry state for the no-match path).
+      cases*: seq[seq[Stmt]] ## one body per case group: what runs when control enters at
+                             ## its label — the group's own statements, followed by those of
+                             ## every group it falls through into (a group that may reach its
+                             ## end runs the next; see `mayFallOff`). Analyzed as independent
+                             ## branches from the switch entry (may-set merged, plus the entry
+                             ## state for the no-match path). A group run through from another
+                             ## shares its statements with that case.
       hasDefault*: bool      ## a `default:` label exists — then there is no
                              ## no-match fall-through path.
       switchKey*: string     ## TYPE-CONFUSION: the discriminant the switch is on, if it is a
@@ -840,6 +905,27 @@ type
     # proven `== value` on the path is TYPE_CONFUSION. Opt-in so other files are unaffected.
     typecheckFuncs*: HashSet[string]  ## functions with a `@typecheck` marker
     typecheckAll*: bool               ## a file-level `@typecheck` marker covers every function
+    # --- reference-validity coverage — a SEPARATE opt-in axis (`@refcheck`). A pointer,
+    # reference or iterator into storage another object manages, used after a call that may
+    # have reallocated or released that storage, is REF_INVALIDATED / REF_UNPROVEN.
+    refFuncs*: HashSet[string]        ## functions with a `@refcheck` marker
+    refAll*: bool                     ## a file-level `@refcheck` marker covers every function
+
+proc mayFallOff*(body: seq[Stmt]): bool =
+  ## Can control reach the end of `body`, and so run what follows it? Only a body that ends in a
+  ## jump on every path cannot: a `break`, `continue`, `return`, forward `goto`, `throw` or
+  ## `longjmp`, or an `if` both of whose branches end so. Anything else may fall off — an extra
+  ## path, never a missing one.
+  if body.len == 0: return true
+  let s = body[^1]
+  case s.kind
+  of stInstr:
+    case s.ik
+    of ikBreak, ikContinue, ikReturn, ikGoto, ikThrow: false
+    of ikMayLongjmp: (s.off and 1) == 0
+    else: true
+  of stIf: mayFallOff(s.thenBody) or mayFallOff(s.elseBody)
+  else: true
 
 proc relined*(s: Stmt, ln: int): Stmt =
   ## A copy of `s` (and of everything nested in it) reported at line `ln`. Used when a body is

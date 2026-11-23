@@ -218,6 +218,10 @@ type
     landingDeposits: Table[int, seq[PathState]] ## landing site -> the path state at every call
                                      ## that may longjmp into it (its incoming edges)
     skippedReported: HashSet[string] ## locals already reported LONGJMP_SKIPS_DESTRUCTOR
+    landingLines: Table[int, int]    ## landing site -> the line of its setjmp
+    clobberLine: Table[string, int]  ## local -> the setjmp line a jump back to which left it
+                                     ## indeterminate (for the SETJMP_CLOBBERED message)
+    clobberReported: HashSet[string] ## `local:line` uses already reported SETJMP_CLOBBERED
     movedHandles: Table[string, int] ## owner HANDLES moved-from by an ikRaiiMove (var key ->
                                      ## the origin it held then): the resource is still owned,
                                      ## by the destination; using / moving / freeing / returning
@@ -340,6 +344,31 @@ const unstructuredGotoMsg =
   "cannot be tracked across them. Restructure into structured control flow (a loop, " &
   "early returns, or a single forward cleanup ladder of labels) so the release / " &
   "lifetime of each pointer is checkable."
+
+# LOCALS ACROSS A LONGJMP are kept in the per-path null state under reserved keys (which no
+# variable can have), so they follow every branch, join, loop and deposited path as the null
+# facts do — `nkMaybe` on either side of a join stays `nkMaybe`, a may-fact.
+const
+  jmpChangedPrefix = "@jmp-changed:"
+    ## + `<landing site>:<local>`: the local may have been changed since that site's setjmp
+    ## last ran
+  jmpIndetPrefix = "@jmp-indeterminate:"
+    ## + `<local>`: a longjmp returned on this path while the local was changed, and it has
+    ## not been assigned since
+
+proc dropRepeats(diags: var seq[Diag], mark, caseStart: int) =
+  ## The cases of a switch share the statements of the groups they fall through into, so a
+  ## finding there is met once per case that runs it. Each is kept once: a finding added since
+  ## `caseStart` that repeats one an earlier case of the switch added (since `mark`) is dropped.
+  var i = caseStart
+  while i < diags.len:
+    var dup = false
+    for j in mark ..< caseStart:
+      if diags[j].line == diags[i].line and diags[j].code == diags[i].code and
+         diags[j].msg == diags[i].msg:
+        dup = true
+        break
+    if dup: diags.delete(i) else: inc i
 
 proc addDiag(a: var Analyzer, line: int, code, msg: string, sev = sevError) =
   if a.silent: return            # a loop-fixpoint dry run — only the final pass emits
@@ -640,6 +669,28 @@ proc reportSkippedDestructors(a: var Analyzer, s: Stmt, jumps: string, afterLine
       "Keep objects with a destructor out of the scopes a longjmp can leave, or report the " &
       "error with an exception instead.")
 
+proc dropJmpChanged(nst: var NullState, id: int) =
+  ## Landing site `id`'s setjmp runs (its first return): nothing has changed since it yet.
+  let prefix = jmpChangedPrefix & $id & ":"
+  var gone: seq[string]
+  for k in nst.keys:
+    if k.startsWith(prefix): gone.add k
+  for k in gone: nst.del k
+
+proc collectLandingLines(body: seq[Stmt], acc: var Table[int, int]) =
+  ## Every landing site of a function body, with the line of its setjmp.
+  for s in body:
+    case s.kind
+    of stIf:
+      if s.landingId > 0: acc[s.landingId] = s.line
+      collectLandingLines(s.thenBody, acc)
+      collectLandingLines(s.elseBody, acc)
+    of stSwitch:
+      if s.switchLandingId > 0: acc[s.switchLandingId] = s.line
+      for c in s.cases: collectLandingLines(c, acc)
+    of stLoop: collectLandingLines(s.loopBody, acc)
+    else: discard        # never inside a `try`: the front-end refuses a setjmp there
+
 proc landingPart(s: Stmt, mask: seq[bool], noMatch: bool): Stmt =
   ## The switch of a landing site as one of its returns sees it: only the cases that return can
   ## enter (`mask`), with the no-match path only when it can match no label.
@@ -730,10 +781,11 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
   # SPATIAL sinks/sources — handled by analyzeSpatial (a separate bounds pass); the
   # temporal engine ignores them.
   of ikIndex, ikValidate, ikTaint, ikValueCopy, ikMaintainsCheck, ikEstablishCheck,
-     ikLowBound, ikLowInvariantCheck,
+     ikLowBound, ikLowInvariantCheck, ikScalarStep, ikArgLowCheck, ikArgRelCheck,
      ikLockAcquire, ikLockRelease, ikGuardedAccess, ikRequiredLockCall, ikGuardedEscape,
      ikIndirectCall, ikFnAssign,
-     ikInitWrite, ikInitRead, ikVariantAccess: discard
+     ikInitWrite, ikInitRead, ikVariantAccess,
+     ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved, ikRefReturn: discard
   of ikMustUse:
     # the front-end emits this only at a statement-level call whose result is
     # discarded; the callee is declared `@must_use`, so dropping it is the bug.
@@ -973,12 +1025,97 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
         "`if (!setjmp(b))`, `if (setjmp(b) == 0)`, `switch (setjmp(b))`), outside a `try` " &
         "block. Move it into one of those forms, or mark the line @unsafe if you take " &
         "responsibility.")
-  of ikSetjmpClobbered:
+  of ikUniqueCheck:
     if a.curCovered:
-      a.addDiag(s.line, "SETJMP_CLOBBERED",
-        "'" & s.a & "' is changed after the setjmp on line " & $s.off & " and is not volatile: " &
-        "when a longjmp returns there, its value is indeterminate, so this use may not see what " &
-        "was stored. Declare it volatile.")
+      var verdict = s.off
+      if verdict == 0:
+        # two pointer variables: decided by what each is bound to on this path
+        proc bound(a: Analyzer, key: string): int =
+          if key in a.unknownOrigin or key in a.ambiguousHandles: -1
+          else: a.varOrigin.getOrDefault(key, -1)
+        proc fresh(a: Analyzer, o: int): bool =
+          ## an allocation this function made itself: nothing it was handed can point into it
+          o >= 0 and o notin a.contractOrigins and o notin a.borrowedOrigins and
+            o notin a.undeclaredParams and o notin a.fieldOrigins and
+            o notin a.conflatedOrigins and o notin a.listOrigins and o notin a.arenaObjects
+        proc handedIn(a: Analyzer, o: int): bool =
+          ## what a pointer parameter pointed to when the function was called
+          o in a.contractOrigins or o in a.borrowedOrigins or o in a.undeclaredParams
+        let (oa, ob) = (a.bound(s.aKey), a.bound(s.bKey))
+        if oa >= 0 and oa == ob:
+          verdict = (if oa in a.conflatedOrigins: 2 else: 1)
+        elif a.fresh(oa) and a.fresh(ob): verdict = -1
+        elif (a.fresh(oa) and a.handedIn(ob)) or (a.fresh(ob) and a.handedIn(oa)): verdict = -1
+        elif a.fresh(oa) and ob < 0 and (s.off2 and 2) != 0: verdict = -1
+        elif a.fresh(ob) and oa < 0 and (s.off2 and 1) != 0: verdict = -1
+        else: verdict = 2
+      elif verdict == 3:
+        # a local object beside a pointer variable (the unique argument is the object when
+        # off2 has bit 4): a block allocated in this function is not that local
+        proc freshBlock(a: Analyzer, key: string): bool =
+          if key in a.unknownOrigin or key in a.ambiguousHandles: return false
+          let o = a.varOrigin.getOrDefault(key, -1)
+          o >= 0 and o notin a.contractOrigins and o notin a.borrowedOrigins and
+            o notin a.undeclaredParams and o notin a.fieldOrigins and
+            o notin a.conflatedOrigins and o notin a.listOrigins and o notin a.arenaObjects
+        verdict = (if a.freshBlock(if (s.off2 and 4) != 0: s.bKey else: s.aKey): -1 else: 2)
+      let f = s.cKey.split('|')
+      if verdict == 1:
+        a.addDiag(s.line, "UNIQUE_ALIASED",
+          "'" & f[0] & "' declares its parameter '" & f[1] & "' `@unique`, but this call passes '" &
+          s.a & "' for it and '" & s.b & "' as another argument, and both point into the same " &
+          "object. Pass a separate object, or a copy.")
+      elif verdict == 2:
+        a.addDiag(s.line, "UNIQUE_UNPROVEN",
+          "'" & f[0] & "' declares its parameter '" & f[1] & "' `@unique`, and nothing shows that '" &
+          s.a & "', passed for it, and '" & s.b & "', another argument of this call, point to " &
+          "different objects. kenbi can tell for distinct variables, distinct members of one " &
+          "struct, separate allocations made in this function, and a parameter this function " &
+          "itself declares `@unique`.")
+  of ikUniqueEscape:
+    if a.curCovered:
+      let borrow = s.off2 == 1
+      let code = (if borrow: "BORROW_ESCAPES" else: "UNIQUE_ESCAPES")
+      let decl = (if borrow: "`@borrows`" else: "`@unique`")
+      let what = "'" & s.a & "' is, or derives from, the " & decl & " parameter '" & s.b & "'"
+      let why = (if borrow: "the caller may release the object as soon as this call returns, " &
+                            "and the copy would dangle"
+                 else: "the caller's exclusive access would end while the copy remains")
+      if s.off == 0:
+        a.addDiag(s.line, code,
+          what & ", and is stored where it outlives the call: " & why & ". Keep it in locals, " &
+          "or drop " & decl & " from the parameter" &
+          (if borrow: " and declare what the function does take (`@moves` / `@adopts`)." else: "."))
+      else:
+        let callee = (if s.cKey.len > 0: "'" & s.cKey & "'" else: "the function called")
+        let param = (if s.bKey.len > 0: "its parameter '" & s.bKey & "'" else: "that parameter")
+        a.addDiag(s.line, code,
+          what & ", and is passed to " & callee & ", which " &
+          (if s.off == 2: "is declared to take it over"
+           else: "does not declare that it gives it back") &
+          ": if the pointer is kept there, " & why & ". " &
+          (if s.off == 2: "Pass a pointer this function owns, or drop " & decl & " from '" & s.b & "'."
+           else: "Declare " & param & " `@borrows` (or `@unique`) on " & callee &
+                 " — its body is then checked the same way — or drop " & decl & " from '" & s.b & "'."))
+  of ikJmpLocalRead:
+    # a use of a local a longjmp left indeterminate on this path. Reported once per path:
+    # the fix (volatile) is the same for every later use
+    let k = jmpIndetPrefix & s.aKey
+    if k in nst:
+      nst.del k
+      let tag = s.aKey & ":" & $s.line
+      if a.curCovered and not a.silent and tag notin a.clobberReported:
+        a.clobberReported.incl tag
+        a.addDiag(s.line, "SETJMP_CLOBBERED",
+          "'" & s.a & "' is changed after the setjmp on line " &
+          $a.clobberLine.getOrDefault(s.aKey) & " and is not volatile: " &
+          "when a longjmp returns there, its value is indeterminate, so this use may not see what " &
+          "was stored. Declare it volatile.")
+  of ikJmpLocalWrite:
+    if (s.off and 1) != 0: nst.del jmpIndetPrefix & s.aKey   # a fresh value
+    if (s.off and 2) != 0:
+      # changed since the setjmp of every landing site: whichever a later jump returns to
+      for id in a.landingLines.keys: nst[jmpChangedPrefix & $id & ":" & s.aKey] = nkMaybe
   of ikLongjmpUnmodeled:
     if a.curCovered:
       a.addDiag(s.line, "UNSUPPORTED_CONSTRUCT",
@@ -1985,6 +2122,7 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
         # a setjmp: on its first return only the non-landing branch runs. The landing branch is
         # reached by a longjmp, from states later in the function — analysed after it.
         let first = (if s.landingThen: s.elseBody else: s.thenBody)
+        dropJmpChanged(nst, s.landingId)
         if a.analyzeBody(first, st, nst): gone = true
         continue
       let known = a.predSays(s.predKey)
@@ -2355,13 +2493,14 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
       if s.switchLandingId > 0:
         # a setjmp: on its first return (0) only the cases 0 can enter run. Those a longjmp's
         # return enters are reached from states later in the function — analysed after it.
+        dropJmpChanged(nst, s.switchLandingId)
         if a.analyzeBody(@[landingPart(s, s.caseFirst, s.firstNoMatch)], st, nst): gone = true
         continue
-      # Each case is an independent branch from the switch entry (fall-through is
-      # under-approximated — sound toward FP-avoidance: cases are not treated as a
-      # sequence, so a free in two different cases is not a false double-free). The
+      # Each case is an independent branch from the switch entry: the code entered at its
+      # label, through every group it falls into (the front-end appends them), so a free in
+      # two cases is a double free only on a path that runs both. The
       # post-switch state is the may-merge of every reaching case's exit (a case that
-      # falls through OR ends in `break`), plus the entry state when there is no
+      # runs off the end of the switch OR ends in `break`), plus the entry state when there is no
       # `default` (the no-match path). The switch owns a fresh break collector — a
       # `break` here exits the switch, not any enclosing loop — restored after.
       let savedBreak = a.breakStates
@@ -2381,7 +2520,9 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
       var reached: seq[tuple[v: Table[string, int], i: Table[string, bool],
                             o: Table[string, int], u, m: HashSet[string],
                             t: Table[string, tuple[other: string, srcDisp: string, resDisp: string, line: int, isResult: bool]], sl: HashSet[string]]]
+      let mark = a.diags.len
       for caseBody in s.cases:
+        let caseStart = a.diags.len
         a.varOrigin = v0
         a.interiorVar = i0
         a.interiorOff = o0
@@ -2393,6 +2534,7 @@ proc analyzeBody(a: var Analyzer, body: seq[Stmt], st: var StateMap,
         var cn = nst
         let nBreaks = a.breakStates.len
         let d = a.analyzeBody(caseBody, cs, cn)
+        dropRepeats(a.diags, mark, caseStart)
         dropOrphanedFreed(cs, a.varOrigin)
         if not d:
           anyReach = true
@@ -2597,6 +2739,14 @@ proc analyzeLandings(a: var Analyzer, fn: Func) =
     var st: StateMap
     var nst: NullState
     a.enterJoin(paths, st, nst)
+    # what changed between this site's setjmp and the jump is indeterminate from here
+    let prefix = jmpChangedPrefix & $id & ":"
+    var changed: seq[string]
+    for k in nst.keys:
+      if k.startsWith(prefix): changed.add k[prefix.len .. ^1]
+    for v in changed:
+      nst[jmpIndetPrefix & v] = nkMaybe
+      a.clobberLine[v] = a.landingLines.getOrDefault(id)
     a.landingDeposits = initTable[int, seq[PathState]]()
     if not a.analyzeFrom(fn.body, id, st, nst): a.scanLeaks(st)
   const cap = 16
@@ -2710,6 +2860,10 @@ proc analyzeFunc(a: var Analyzer, fn: Func, covered: bool) =
   var st: StateMap = initTable[int, set[AllocState]]()
   var nst: NullState = initTable[string, NullKind]()
   a.landingDeposits = initTable[int, seq[PathState]]()
+  a.landingLines = initTable[int, int]()
+  a.clobberLine = initTable[string, int]()
+  a.clobberReported = initHashSet[string]()
+  collectLandingLines(fn.body, a.landingLines)
   let diverged = a.analyzeBody(fn.body, st, nst)
   # The fall-through end is one more exit: scan it for abandoned obligations.
   # But if every path already returned (diverged), each return was scanned at
@@ -2914,7 +3068,40 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
   for lo in fn.lowInvariants:
     lowInvByField[lo.fieldKey] = lo.lowConst
   proc diverges(stmts: seq[Stmt]): bool =
-    stmts.len > 0 and stmts[^1].kind == stInstr and stmts[^1].ik == ikReturn
+    # does `stmts` end by leaving: a `return`, or a `break` / `continue`, whose state is joined
+    # where it goes (breakFrames / contFrames) rather than after `stmts`
+    stmts.len > 0 and stmts[^1].kind == stInstr and stmts[^1].ik in {ikReturn, ikBreak, ikContinue}
+  proc joinValid(x, y: Table[string, SpBound]): Table[string, SpBound] =
+    ## The bounds that hold where two paths meet: a bound only if on BOTH paths and COMPATIBLE,
+    ## and then the weaker one.
+    for k, v in x:
+      if k notin y: continue
+      let w = y[k]
+      if v.symKey.len > 0 and v.symKey == w.symKey:
+        result[k] = SpBound(symKey: v.symKey, symDisp: v.symDisp,
+                            symOff: max(v.symOff, w.symOff),    # weaker bound holds
+                            # wrap hazards survive the join: keep the STRICTER of each
+                            # (larger gk / larger companion need refuses more; signed-strict
+                            # wins) so a merged bound never loses a wrap constraint one
+                            # branch carried.
+                            wrapVar: v.wrapVar or w.wrapVar,
+                            wrapGuardOff: max(v.wrapGuardOff, w.wrapGuardOff),
+                            wrapVarStrict: v.wrapVarStrict or w.wrapVarStrict,
+                            wrapLimNeed: max(v.wrapLimNeed, w.wrapLimNeed))
+      elif v.symKey.len == 0 and w.symKey.len == 0 and v.hasConst and w.hasConst:
+        result[k] = SpBound(hasConst: true, constB: max(v.constB, w.constB),
+                            wrapVar: v.wrapVar or w.wrapVar,
+                            wrapGuardOff: max(v.wrapGuardOff, w.wrapGuardOff),
+                            wrapVarStrict: v.wrapVarStrict or w.wrapVarStrict)
+      # else: incompatible bounds (const vs symbolic, or different symbols) -> drop
+  proc joinLow(x, y: Table[string, int]): Table[string, int] =
+    ## A lower bound holds where two paths meet only if on BOTH; the weaker (smaller) one.
+    for k, v in x:
+      if k in y: result[k] = min(v, y[k])
+  # The states a `break` / `continue` leaves with, collected for the innermost loop or switch
+  # (`break`) and the innermost loop (`continue`): they join the state after it / at its head.
+  var breakFrames: seq[seq[tuple[v: Table[string, SpBound], l: Table[string, int]]]]
+  var contFrames: seq[seq[tuple[v: Table[string, SpBound], l: Table[string, int]]]]
   # `low[key]` = a known LOWER bound on a scalar (`value >= low[key]`). Tracked in parallel
   # with the upper-bound `valid` table so a signed index can be shown to be `>= 0` (the
   # access reads `i + k`, needing `i + k >= 0`). An unsigned index gets `>= 0` from its type
@@ -2932,6 +3119,106 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
         of ikLowBound:                                           # value >= off (tighter wins)
           low[s.keyA] = max(low.getOrDefault(s.keyA, low(int)), s.off)
         of ikTaint: valid.del s.keyA; low.del s.keyA             # untrusted: both bounds lost
+        of ikArgRelCheck:
+          # prove  x + xo < y + yo + base  (base 1 for `<=`)
+          let base = s.off3 and 1
+          let yUnsigned = (s.off3 and 2) == 2
+          let xo = s.off
+          let yo = s.off2
+          var ok = false
+          if s.a == "@opaque": ok = false
+          elif s.aKey.len == 0 and s.bKey.len == 0: ok = xo < yo + base
+          elif s.aKey.len == 0:
+            # constant vs variable: needs a lower bound on the variable
+            var yl = max(low.getOrDefault(s.bKey, low(int)), lowInvByField.getOrDefault(s.bKey, low(int)))
+            if yUnsigned and yo >= 0: yl = max(yl, 0)
+            ok = yl != low(int) and xo < yl + yo + base
+          elif s.aKey == s.bKey: ok = xo < yo + base
+          else:
+            # the bound(s) known for x: on the path, and x's own declared invariant
+            var starts: seq[tuple[key: string, off: int, isConst: bool]]
+            if s.aKey in valid:
+              let b = valid[s.aKey]
+              if not b.wrapVar and b.wrapLimNeed == 0:
+                if b.symKey.len > 0: starts.add (b.symKey, b.symOff, false)
+                elif b.hasConst: starts.add ("", b.constB, true)
+            if s.aKey in invByField:
+              starts.add (invByField[s.aKey].sizeKey, invByField[s.aKey].symOff, false)
+            for st in starts:
+              if st.isConst:                         # x < C: against a constant y only
+                if s.bKey.len == 0 and st.off + xo <= yo + base: ok = true
+                continue
+              if s.bKey.len == 0: continue
+              var k = st.key                         # x < k + off: follow k up to y
+              var off = st.off
+              var seen = initHashSet[string]()
+              while k != s.bKey and k notin seen:
+                seen.incl k
+                if k in invByField:
+                  off = off + invByField[k].symOff - 1
+                  k = invByField[k].sizeKey
+                elif k in valid and valid[k].symKey.len > 0 and not valid[k].wrapVar and
+                     valid[k].wrapLimNeed == 0:
+                  off = off + valid[k].symOff - 1
+                  k = valid[k].symKey
+                else: break
+              if k == s.bKey and off + xo <= yo + base: ok = true
+              if ok: break
+          if not ok:
+            let parts = s.cKey.split('|')
+            diags.add Diag(line: s.line, code: "INVARIANT_NOT_MAINTAINED",
+              msg: "'" & parts[0] & "' declares `@invariant(" & parts[^1] & ")`, but this call " &
+                   "is not shown to establish it — " &
+                   (if s.a == "@opaque": "kenbi cannot read the arguments it passes as a " &
+                      "variable plus or minus a constant"
+                    else: "nothing on this path relates the arguments it passes") &
+                   ". Check the relation before the call, or declare the same invariant here.",
+              sev: sevError)
+        of ikArgLowCheck:
+          var have = low(int)
+          if s.cKey notin ["@const", "@opaque"]:
+            have = max(low.getOrDefault(s.keyA, low(int)),
+                       lowInvByField.getOrDefault(s.keyA, low(int)))
+            if s.cKey == "u": have = max(have, 0)
+          if have == low(int) or have + s.off2 < s.off:
+            let passed = (if s.off2 > 0: s.a & " + " & $s.off2
+                          elif s.off2 < 0: s.a & " - " & $(-s.off2) else: s.a)
+            diags.add Diag(line: s.line, code: "INVARIANT_NOT_MAINTAINED",
+              msg: "'" & s.b & "' declares `@invariant(" & s.bKey & " >= " & $s.off & ")`, but " &
+                   "this call passes '" & passed & "', which " &
+                   (if s.cKey == "@const": "is below " & $s.off
+                    elif s.cKey == "@opaque": "kenbi cannot read as a variable plus or minus a constant"
+                    else: "nothing on this path shows is >= " & $s.off) &
+                   ". Check the value before the call (if (" & s.a & " >= " & $(s.off - s.off2) &
+                   ") …), or declare the same invariant on it.",
+              sev: sevError)
+        of ikScalarStep:
+          # The value moves by a constant; a bound moves with it only where the step cannot
+          # wrap. Up: an upper bound (one whose own guard cannot have wrapped) rules a wrap
+          # out, and both bounds shift; without one, neither is kept. Down: a lower bound
+          # rules it out — any for a signed value, `>= |step|` for an unsigned one — and the
+          # upper bound stays (it only got looser); without one, neither is kept.
+          let d = s.off
+          if d > 0:
+            var kept = false
+            if s.keyA in valid:
+              var b = valid[s.keyA]
+              if not b.wrapVar and b.wrapLimNeed == 0:
+                if b.symKey.len > 0:
+                  b.symOff += d; kept = true
+                elif b.hasConst and b.constB <= high(int) - d:
+                  b.constB += d; kept = true
+                if kept: valid[s.keyA] = b
+            if kept:
+              if s.keyA in low: low[s.keyA] = low[s.keyA] + d
+            else:
+              valid.del s.keyA; low.del s.keyA
+          elif d < 0:
+            let lo = low.getOrDefault(s.keyA, low(int))
+            if lo != low(int) and (s.cKey != "u" or lo >= -d):
+              low[s.keyA] = lo + d
+            else:
+              valid.del s.keyA; low.del s.keyA
         of ikValueCopy:
           if s.keyB in valid: valid[s.keyA] = valid[s.keyB] else: valid.del s.keyA
           if s.keyB in low: low[s.keyA] = low[s.keyB] else: low.del s.keyA
@@ -3062,6 +3349,7 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
           # following protected-field invariants AND validated runtime scalar bounds. Returns the
           # final (key, off) reached. (`valid` is a var param — snapshot it for the closure.)
           let validSnap = valid
+          let lowSnap = low            # immutable views for the closures (a `var` cannot be captured)
           proc chase(symKey: string, symOff: int): tuple[key: string, off: int] =
             var effKey = symKey
             var effOff = symOff
@@ -3087,14 +3375,21 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
             if b.symKey.len > 0:
               let (k, off) = chase(b.symKey, b.symOff)
               bufSym.len > 0 and k == bufSym and off + j <= needOff + bufOff
+            elif bufN >= 0:
+              b.constB + j <= bufN + needOff
             else:
-              bufN >= 0 and b.constB + j <= bufN + needOff
+              # a constant bound against a buffer of `bufSym + bufOff` elements: covered once
+              # the path shows the size itself is large enough (`if (n >= 4)` before `buf[3]`)
+              # — by a check on the path, or by its declared `@invariant(n >= K)`
+              let szLow = max(lowSnap.getOrDefault(bufSym, low(int)),
+                              lowInvByField.getOrDefault(bufSym, low(int)))
+              bufSym.len > 0 and b.hasConst and szLow != low(int) and
+                b.constB + j <= szLow + bufOff + needOff
           # OVERFLOW-SAFETY: a bound that covers in ℤ is still unsound where the guard's OWN
           # arithmetic wraps at runtime for THIS access. A variable-side `var + gk` (unsigned)
           # wraps near the type max, so it only bounds an access at exactly `gk` — any SMALLER
           # offset (`j < gk`) is exposed. A limit-side `sym - k` (unsigned) underflows to a huge
           # value unless the companion `sym >= k` is a tracked lower bound on the path.
-          let lowSnap = low            # immutable view for the closure (a `var` cannot be captured)
           proc wrapBlocks(b: SpBound): bool =
             # variable-side: unsigned exposes `j < gk`; SIGNED (wrapVarStrict) exposes every
             # access including `j == gk` (the INT_MIN wrap passes `< lim` yet is OOB).
@@ -3132,7 +3427,15 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
             effLow = max(effLow, lowInvByField[s.keyA])
           if s.cKey == "u": effLow = max(effLow, 0)              # unsigned: >= 0 by type
           let lowerOk = effLow != low(int) and effLow >= needLow
-          if candidates.len == 0:
+          if s.aKey.len == 0:
+            # an index kenbi cannot read as `variable ± constant`: nothing can bound it
+            diags.add Diag(line: s.line, code: codeBase,
+              msg: "'" & s.a & "' " & what & " a buffer, but kenbi cannot read this expression " &
+                   "as a variable plus or minus a constant, so no bound check can be matched " &
+                   "to it. Store it in a variable and bound that before the use (if (v < N) …), " &
+                   "or mark the access @unsafe.",
+              sev: sevError)
+          elif candidates.len == 0:
             diags.add Diag(line: s.line, code: codeBase,
               msg: "'" & access & "' " & what & " a buffer but no bound check is present on " &
                    "this path — kenbi cannot confirm it is in range (it is an untrusted " &
@@ -3141,12 +3444,18 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
               sev: sevError)
           elif covered and not lowerOk:
             diags.add Diag(line: s.line, code: "INDEX_MAYBE_NEGATIVE",
-              msg: "'" & access & "' is bounded above but not below — '" & s.a & "' is signed " &
-                   "and nothing on this path shows it is " & (if needLow > 0: ">= " & $needLow
-                   else: ">= 0") & ", so the access could go below the buffer. Make '" & s.a &
-                   "' unsigned, add a lower-bound guard (if (" & s.a & " >= " &
-                   (if needLow > 0: $needLow else: "0") & ") …), or declare `@invariant(" &
-                   s.a & " >= 0)`.",
+              msg: (if s.cKey == "u":
+                      "'" & access & "' is bounded above but not below — '" & s.a & "' is " &
+                      "unsigned and nothing on this path shows it is >= " & $needLow & ", so the " &
+                      "subtraction could wrap around to a huge index. Add a lower-bound guard " &
+                      "(if (" & s.a & " >= " & $needLow & ") …) before the use."
+                    else:
+                      "'" & access & "' is bounded above but not below — '" & s.a & "' is signed " &
+                      "and nothing on this path shows it is " & (if needLow > 0: ">= " & $needLow
+                      else: ">= 0") & ", so the access could go below the buffer. Make '" & s.a &
+                      "' unsigned, add a lower-bound guard (if (" & s.a & " >= " &
+                      (if needLow > 0: $needLow else: "0") & ") …), or declare `@invariant(" &
+                      s.a & " >= 0)`."),
               sev: sevError)
           elif not covered and wrapHit:
             # OVERFLOW-SAFETY: a bound covered this access in ℤ but its guard arithmetic can
@@ -3227,7 +3536,11 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
                     msg: "'" & access & "' " & what & " a buffer whose size is a VARIABLE, but it " &
                          "is bounded by a constant (< " & $bound & ") — kenbi cannot confirm a " &
                          "constant covers a variable size. Bound '" & s.a & "' by the buffer's " &
-                         "own allocation count (the identifier passed to malloc/calloc).",
+                         "own allocation count (the identifier passed to malloc/calloc), or " &
+                         "show the count is at least " & $(bound + j - needOff) & " first: " &
+                         "check it on the path (if (count >= " & $(bound + j - needOff) &
+                         ") …) or declare it (`@invariant(count >= " &
+                         $(bound + j - needOff) & ")`).",
                     sev: sevError)
                 else:
                   diags.add Diag(line: s.line, code: codeBase,
@@ -3242,6 +3555,10 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
                        "out of range. Bound it to the buffer's size (need '" & access &
                        needRel & $bufN & "').",
                   sev: sevError)
+        of ikBreak:
+          if breakFrames.len > 0: breakFrames[^1].add (valid, low)
+        of ikContinue:
+          if contFrames.len > 0: contFrames[^1].add (valid, low)
         else: discard
       of stIf:
         var thenV = valid
@@ -3278,51 +3595,129 @@ proc analyzeSpatial(fn: Func): seq[Diag] =
         elif ed and not td: valid = thenV; low = thenLow
         elif td and ed: discard
         else:                                       # merge: keep a bound only if on BOTH
-          var merged = initTable[string, SpBound]() # paths and COMPATIBLE; weaker holds
-          for k, v in thenV:
-            if k notin elseV: continue
-            let w = elseV[k]
-            if v.symKey.len > 0 and v.symKey == w.symKey:
-              merged[k] = SpBound(symKey: v.symKey, symDisp: v.symDisp,
-                                  symOff: max(v.symOff, w.symOff),    # weaker bound holds
-                                  # wrap hazards survive the join: keep the STRICTER of each
-                                  # (larger gk / larger companion need refuses more; signed-strict
-                                  # wins) so a merged bound never loses a wrap constraint one
-                                  # branch carried.
-                                  wrapVar: v.wrapVar or w.wrapVar,
-                                  wrapGuardOff: max(v.wrapGuardOff, w.wrapGuardOff),
-                                  wrapVarStrict: v.wrapVarStrict or w.wrapVarStrict,
-                                  wrapLimNeed: max(v.wrapLimNeed, w.wrapLimNeed))
-            elif v.symKey.len == 0 and w.symKey.len == 0 and v.hasConst and w.hasConst:
-              merged[k] = SpBound(hasConst: true, constB: max(v.constB, w.constB),
-                                  wrapVar: v.wrapVar or w.wrapVar,
-                                  wrapGuardOff: max(v.wrapGuardOff, w.wrapGuardOff),
-                                  wrapVarStrict: v.wrapVarStrict or w.wrapVarStrict)
-            # else: incompatible bounds (const vs symbolic, or different symbols) -> drop
-          valid = merged
-          var mergedLow = initTable[string, int]()  # a lower bound holds only if on BOTH;
-          for k, v in thenLow:                       # the weaker (smaller) one holds
-            if k in elseLow: mergedLow[k] = min(v, elseLow[k])
-          low = mergedLow
+          valid = joinValid(thenV, elseV)           # paths and COMPATIBLE; weaker holds
+          low = joinLow(thenLow, elseLow)
       of stLoop:
-        var loopV = valid
-        var loopLow = low
-        walk(s.loopBody, loopV, loopLow)
+        # Each iteration starts at the head: the entry joined with the state every iteration
+        # ends or `continue`s with, iterated until it settles (a join only drops or weakens a
+        # bound; one that is still weakening after two rounds is dropped, so it does). The
+        # rounds before the last report nothing. After the loop: the head (where the condition fails) joined
+        # with every `break`.
+        let header = (if s.headerAt >= 0 and s.headerAt <= s.loopBody.len:
+                        s.loopBody[s.headerAt .. ^1] else: @[])
+        var head = valid
+        var headLow = low
+        var rounds = 0
+        while true:
+          let mark = diags.len
+          var bv = head
+          var bl = headLow
+          breakFrames.add @[]
+          contFrames.add @[]
+          walk(s.loopBody, bv, bl)
+          discard breakFrames.pop()
+          let conts = contFrames.pop()
+          diags.setLen(mark)
+          var nh = joinValid(head, bv)
+          var nl = joinLow(headLow, bl)
+          for c in conts:
+            var cv = c.v                    # a `continue` still runs the loop header
+            var cl = c.l
+            walk(header, cv, cl)
+            nh = joinValid(nh, cv)
+            nl = joinLow(nl, cl)
+          diags.setLen(mark)
+          if nh == head and nl == headLow: break
+          inc rounds
+          if rounds > 2:
+            # a bound still moving after two rounds (a counter stepped every iteration) has
+            # no limit the head can keep: drop it, so the rounds end
+            var moving: seq[string]
+            for k, v in nh:
+              if head[k] != v: moving.add k
+            for k in moving: nh.del k
+            moving.setLen 0
+            for k, v in nl:
+              if headLow[k] != v: moving.add k
+            for k in moving: nl.del k
+          head = nh
+          headLow = nl
+        var bv = head
+        var bl = headLow
+        breakFrames.add @[]
+        contFrames.add @[]
+        let lmark = diags.len
+        walk(s.loopBody, bv, bl)
+        let brks = breakFrames.pop()
+        for c in contFrames.pop():          # the header as reached by each `continue`
+          var cv = c.v
+          var cl = c.l
+          let hstart = diags.len
+          walk(header, cv, cl)
+          dropRepeats(diags, lmark, hstart)
+        valid = head
+        low = headLow
+        for b in brks:
+          valid = joinValid(valid, b.v)
+          low = joinLow(low, b.l)
       of stSwitch:
+        # After the switch: every case that reaches its end, every `break`, and — without a
+        # `default:` — the entry (no case matches), joined.
+        var accV = valid
+        var accL = low
+        var have = not s.hasDefault
+        let mark = diags.len
+        breakFrames.add @[]
         for c in s.cases:
           var cv = valid
           var cLow = low
+          let caseStart = diags.len
           walk(c, cv, cLow)
+          dropRepeats(diags, mark, caseStart)
+          if diverges(c): continue
+          if have:
+            accV = joinValid(accV, cv)
+            accL = joinLow(accL, cLow)
+          else:
+            accV = cv
+            accL = cLow
+            have = true
+        for b in breakFrames.pop():
+          if have:
+            accV = joinValid(accV, b.v)
+            accL = joinLow(accL, b.l)
+          else:
+            accV = b.v
+            accL = b.l
+            have = true
+        if have:
+          valid = accV
+          low = accL
       of stTry:
         # a handler is entered from an unknown point of the body: no bound the body established
-        # is proven there — walk it from the ENTRY facts; after the try the entry facts stand.
+        # is proven there — walk it from the ENTRY facts. After the try: the end of the body and
+        # of every handler that reaches its end, joined.
         var tv = valid
         var tLow = low
         walk(s.tryBody, tv, tLow)
+        var accV = tv
+        var accL = tLow
+        var have = not diverges(s.tryBody)
         for h in s.handlers:
           var hv = valid
           var hLow = low
           walk(h, hv, hLow)
+          if diverges(h): continue
+          if have:
+            accV = joinValid(accV, hv)
+            accL = joinLow(accL, hLow)
+          else:
+            accV = hv
+            accL = hLow
+            have = true
+        if have:
+          valid = accV
+          low = accL
       of stLabel: discard
   var valid = initTable[string, SpBound]()
   var low = initTable[string, int]()
@@ -3390,9 +3785,13 @@ proc analyzeConcurrency(fn: Func): seq[Diag] =
         held = inter(held, bodyH)               # held after iff held on the 0-trip AND a run
       of stSwitch:
         var acc = held                          # the no-match path keeps the entry held-set
+        let mark = diags.len
         for c in s.cases:
           var cv = held
+          let caseStart = diags.len
           walk(c, cv)
+          dropRepeats(diags, mark, caseStart)
+          if diverges(c): continue              # a case that returns does not reach the join
           acc = inter(acc, cv)
         held = acc
       of stTry:
@@ -3619,9 +4018,13 @@ proc analyzeLockBalance(fn: Func, lockOrder: seq[tuple[before, after: string]]):
         var accMay = mayH                              # no-match path keeps the entry set
         var accMust = mayH
         var firstMust = true
+        let mark = diags.len
         for c in s.cases:
           var cMay = mayH; var cMust = mustH
+          let caseStart = diags.len
           walk(c, cMay, cMust, lt)
+          dropRepeats(diags, mark, caseStart)
+          if diverges(c): continue                     # a case that returns does not reach the join
           accMay = uni(accMay, cMay)
           accMust = (if firstMust: cMust else: inter(accMust, cMust)); firstMust = false
         mayH = accMay
@@ -3694,9 +4097,12 @@ proc analyzeInit(fn: Func): seq[Diag] =
       of stSwitch:
         var acc = initHashSet[string]()
         var first = true
+        let mark = diags.len
         for c in s.cases:
           var cv = asgn
+          let caseStart = diags.len
           walk(c, cv)
+          dropRepeats(diags, mark, caseStart)
           if diverges(c): continue             # a case that returns doesn't constrain the join
           if first: acc = cv; first = false
           else: acc = inter(acc, cv)
@@ -3760,11 +4166,14 @@ proc analyzeTypeConfusion(fn: Func): seq[Diag] =
         walk(s.loopBody, bodyK)
       of stSwitch:
         # a `case VALUE:` on the discriminant proves `tag == VALUE` in that case body (V2).
+        let mark = diags.len
         for i, c in s.cases:
           var cv = known
           if s.switchKey.len > 0 and i < s.caseValues.len and s.caseValues[i] != low(int):
             cv[s.switchKey] = s.caseValues[i]
+          let caseStart = diags.len
           walk(c, cv)
+          dropRepeats(diags, mark, caseStart)
         # after the switch the discriminant is no longer a single proven value -> `known` stands
         # (a variant access past the switch needs its own guard).
       of stTry:
@@ -3779,6 +4188,195 @@ proc analyzeTypeConfusion(fn: Func): seq[Diag] =
   walk(fn.body, known)
   diags
 
+proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
+  ## Reference validity. A local that holds a pointer, reference or iterator into storage some
+  ## other object manages (ikRefDerive) must not be used (ikRefUse) once a call may have
+  ## reallocated or released that storage (ikRefInvalidate). MAY-analysis: what a local may
+  ## refer into, and whether it may be invalid, are joined by union, so a use is reported when
+  ## any path reaches it with the storage possibly gone. A loop body is walked twice so that
+  ## what one iteration invalidates reaches the next, and the function twice so that a backward
+  ## `goto` does. The promise of a function that declares `@preserves` (ikRefNotPreserved) is
+  ## checked whether or not the axis is on: its callers rely on it.
+  type
+    Cause = tuple[line, kind: int, callee, obj, via: string]
+    RefState = object
+      dead: bool
+      src: Table[string, HashSet[string]]
+      bad: Table[string, Cause]
+  var diags: seq[Diag]
+  var seen = initHashSet[string]()
+  var gotoIn = initTable[string, RefState]()
+  proc report(line: int, code, msg: string) =
+    let k = $line & "|" & code & "|" & msg
+    if k in seen: return
+    seen.incl k
+    diags.add Diag(line: line, code: code, msg: msg, sev: sevError)
+  proc join(x: var RefState, y: RefState) =
+    if y.dead: return
+    if x.dead:
+      x = y
+      return
+    for k, v in y.src:
+      if k in x.src: x.src[k].incl v
+      else: x.src[k] = v
+    for k, v in y.bad:
+      if k notin x.bad: x.bad[k] = v
+  proc invalidate(st: var RefState, s: Stmt) =
+    let region = (if s.bKey.len > 0: s.bKey.split('/') else: @[])
+    let keeps = s.bKey.split(';')
+    let changes = s.cKey.split(';')
+    for p, sources in st.src:
+      for source in sources:
+        let f = source.split("\x1f")
+        if f.len < 4: continue
+        let steps = (if f[1].len > 0: f[1].split('/') else: @[])
+        var kind = -1
+        case s.off
+        of 3:
+          if f[3] == "g" and f[2] notin keeps: kind = (if f[2] in changes: 0 else: 1)
+        of 2:
+          # the block that pointer holds, and everything reached through it
+          if f[0] == s.aKey and (steps == region or
+             (steps.len > region.len and steps[0 .. region.len] == region & @["*"])): kind = 2
+        else:
+          if f[0] == s.aKey and region.len <= steps.len and steps[0 ..< region.len] == region:
+            kind = s.off
+        if kind >= 0:
+          let via = (if f.len > 4: f[4] else: "")
+          st.bad[p] = (s.line, (if via.len > 0: 1 else: kind), s.b, f[2], via)
+          break
+  proc walk(stmts: seq[Stmt], st: var RefState, breaks, conts: var seq[RefState]) =
+    for s in stmts:
+      case s.kind
+      of stInstr:
+        if st.dead: continue
+        case s.ik
+        of ikRefDerive:
+          var now = initHashSet[string]()
+          var inherited = false
+          var cause: Cause
+          for c in s.cKey.split('\x1e'):
+            if c.len == 0: continue
+            if c in st.src: now.incl st.src[c]
+            if c != s.aKey and c in st.bad and not inherited:
+              inherited = true
+              cause = st.bad[c]
+          for b in s.bKey.split('\x1e'):
+            if b.len > 0: now.incl b
+          if s.off == 1:
+            # one element among several: the others keep what they hold
+            if s.aKey in st.src: now.incl st.src[s.aKey]
+            if inherited and s.aKey notin st.bad: st.bad[s.aKey] = cause
+          elif inherited: st.bad[s.aKey] = cause
+          else: st.bad.del s.aKey
+          if now.len > 0: st.src[s.aKey] = now
+          else: st.src.del s.aKey
+        of ikRefUse:
+          if s.aKey in st.bad:
+            let c = st.bad[s.aKey]
+            st.bad.del s.aKey                      # once per path: the fix is the same for every use
+            if not axisOn: continue
+            let what = (if s.off == 1: "This loop is still going over '" & s.a & "'"
+                        else: "'" & s.a & "' refers into storage that '" & c.obj & "' manages") &
+                       ", and "
+            let callee = (if c.callee.len > 0: "'" & c.callee & "'" else: "a call")
+            let again = (if s.off == 1: "Leave the loop after changing what it goes over, or " &
+                                        "loop by index."
+                         else: "Take '" & s.a & "' again after the call.")
+            if c.kind == 1 and c.via.len > 0:
+              report(s.line, "REF_UNPROVEN",
+                "'" & s.a & "' was returned by '" & c.via & "', which does not declare what its " &
+                "result points into, and " & callee & " at line " & $c.line & " may reallocate " &
+                "or release what '" & c.obj & "' holds. Declare `@returns_into(<parameter>)` on '" &
+                c.via & "' — with nothing between the parentheses if the result points into none " &
+                "of its arguments. " & again)
+            elif c.kind == 1:
+              report(s.line, "REF_UNPROVEN",
+                what & "nothing shows that " & callee & " at line " & $c.line & " leaves that " &
+                "storage in place. If it reallocates and releases nothing there, declare the " &
+                "parameter `@preserves` on " & callee & " — its body is then checked; if it may, " &
+                "declare it `@invalidates`. " & again)
+            else:
+              report(s.line, "REF_INVALIDATED",
+                what & callee & " at line " & $c.line &
+                (if c.kind == 2: " releases or moves it" else: " may reallocate or release it") &
+                ": this use may reach storage that is gone. " & again)
+        of ikRefInvalidate: invalidate(st, s)
+        of ikRefNotPreserved:
+          let callee = (if s.cKey.len > 0: "'" & s.cKey & "'" else: "a call")
+          report(s.line, "REF_NOT_PRESERVED",
+            "this function declares '" & s.b & "' `@preserves`, but passes '" & s.a & "' to " &
+            callee & ", which " &
+            (if s.off == 2: "releases or moves the storage it holds"
+             elif s.off == 0: "may reallocate or release what it holds"
+             else: "does not declare that it leaves it in place") &
+            ". Callers keep pointers into it across the call on the strength of the declaration. " &
+            (if s.off == 1: "Declare the parameter `@preserves` on " & callee &
+                            " if that holds there too, or declare"
+             else: "Declare") & " this function `@invalidates(" & s.b & ")` instead.")
+        of ikRefReturn:
+          if axisOn or s.off == 1:
+            report(s.line, "REF_RETURN_UNDECLARED",
+              "this function returns '" & s.a & "', which points into what its parameter '" & s.b &
+              "' holds, " & (if s.off == 1: "but its `@returns_into` does not name '" & s.b & "'"
+                             else: "without declaring it") &
+              ". A caller that keeps the result while that storage is reallocated or released " &
+              "is left with a dangling pointer, and can only be checked if it is told. Declare " &
+              "`@returns_into(" & s.b & ")` above the function.")
+        of ikReturn, ikThrow: st.dead = true
+        of ikBreak:
+          breaks.add st
+          st.dead = true
+        of ikContinue:
+          conts.add st
+          st.dead = true
+        of ikGoto:
+          if s.a in gotoIn: join(gotoIn[s.a], st)
+          else: gotoIn[s.a] = st
+          st.dead = true
+        else: discard
+      of stIf:
+        var other = st
+        walk(s.thenBody, st, breaks, conts)
+        walk(s.elseBody, other, breaks, conts)
+        join(st, other)
+      of stLoop:
+        var acc = st                               # the loop may not run at all
+        var cur = st
+        for round in 0 ..< 2:
+          var inner, innerConts: seq[RefState]
+          var body = cur
+          walk(s.loopBody, body, inner, innerConts)
+          for c in innerConts: join(body, c)
+          for b in inner: join(acc, b)
+          join(acc, body)
+          join(cur, body)
+        st = acc
+      of stSwitch:
+        var acc = (if s.hasDefault: RefState(dead: true) else: st)
+        var inner: seq[RefState]
+        for c in s.cases:
+          var cv = st
+          walk(c, cv, inner, conts)
+          join(acc, cv)
+        for b in inner: join(acc, b)
+        st = acc
+      of stTry:
+        var entry = st
+        walk(s.tryBody, st, breaks, conts)
+        join(entry, st)                            # a handler is entered from anywhere in the body
+        for h in s.handlers:
+          var hv = entry
+          walk(h, hv, breaks, conts)
+          join(st, hv)
+      of stLabel:
+        if s.labelName in gotoIn: join(st, gotoIn[s.labelName])
+  for round in 0 ..< 2:
+    var st: RefState
+    var breaks, conts: seq[RefState]
+    walk(fn.body, st, breaks, conts)
+  diags
+
 type
   Axis* = enum
     ## The independent checks kenbi runs on a function, each opted into separately.
@@ -3787,6 +4385,7 @@ type
     axLocks = "locks"               ## `@threadsafe`
     axInit = "initialisation"       ## `@initcheck`
     axUnions = "taggedUnions"       ## `@typecheck`
+    axRefs = "references"           ## `@refcheck`
 
 proc axesOf*(prog: Program, fn: Func): set[Axis] =
   ## Which checks run on `fn`. analyzeFull runs exactly these, and the reported scope of a
@@ -3798,6 +4397,7 @@ proc axesOf*(prog: Program, fn: Func): set[Axis] =
   if prog.concurrentAll or fn.name in prog.concurrentFuncs: result.incl axLocks
   if prog.initAll or fn.name in prog.initFuncs: result.incl axInit
   if prog.typecheckAll or fn.name in prog.typecheckFuncs: result.incl axUnions
+  if prog.refAll or fn.name in prog.refFuncs: result.incl axRefs
 
 proc analyzeFull*(prog: Program): tuple[diags: seq[Diag], cov: CoverageStats, unit: ProjectUnit] =
   ## Analyze + compute adoption/safety coverage. `analyze*` is the diags-only view. `unit` is
@@ -3832,6 +4432,9 @@ proc analyzeFull*(prog: Program): tuple[diags: seq[Diag], cov: CoverageStats, un
       # TYPE-CONFUSION (tagged union) axis — independent opt-in (`@typecheck`).
       if axUnions in axes:
         for d in analyzeTypeConfusion(fn): a.diags.add d
+      # REFERENCE VALIDITY axis — independent opt-in (`@refcheck`). The promise of a function
+      # that declares `@preserves` is checked on every function, opted in or not.
+      for d in analyzeRefs(fn, axRefs in axes): a.diags.add d
       var hasRed = false
       var vouched = false
       for i in mark ..< a.diags.len:

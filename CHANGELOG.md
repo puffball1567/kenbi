@@ -5,6 +5,98 @@ All notable changes to kenbi are recorded here. The format follows
 [Semantic Versioning](https://semver.org/); before 1.0 the interfaces, the annotation vocabulary
 and the JSON output may change in any minor version.
 
+## [0.2.0] - 2026-11-24
+
+### Added
+
+- `// @unique(param)` above a function declares a pointer parameter exclusive for the call: no
+  other argument reaches the object it points into. Every call is verified — the same object
+  passed twice is `UNIQUE_ALIASED`, a pair nothing shows to be distinct is `UNIQUE_UNPROVEN` —
+  and the body may not store the pointer where it outlives the call (`UNIQUE_ESCAPES`).
+- `@borrows` and `@unique` parameters are checked for outliving the call: the body may not store
+  the pointer or a copy of it in a global, a field or through another pointer, nor pass it to a
+  function whose parameter is not itself `@borrows` / `@unique` (`BORROW_ESCAPES` /
+  `UNIQUE_ESCAPES`). The C library's readers and writers and declared deallocators are known.
+  A `@borrows` function that hands its pointer to an undeclared function will now draw a
+  finding; declare the receiving parameter.
+- A new opt-in check, `// @refcheck`: a pointer, reference, iterator or view into storage another
+  object manages (`p = buf->data`, `&v[0]`, `v.begin()`, `s.c_str()`) may not be used after a
+  call that may have reallocated or released that storage. Functions declare which they are
+  with `// @invalidates(param)` / `// @preserves(param)` (also as `@contract` keys); a
+  `@preserves` body is verified. `realloc`, `free` and the standard containers' methods are
+  known. Findings: `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED`. The scope reported
+  with each result gains a `references` entry. Followed: pointer, reference and iterator
+  variables, views (also built from their parts), pointers kept in members of local structs
+  and in elements of local arrays, and closures (what a lambda captures, and what its body does where the
+  closure is used).
+- `// @returns_into(param)` (also a `@contract` key) declares that a function's result points
+  into storage reached through a parameter, so a pointer obtained from an accessor is followed
+  under `@refcheck` like one read out of the object. A function that returns such a pointer
+  without declaring it is `REF_RETURN_UNDECLARED`; the result of a function that declares
+  nothing is taken to point into what any of its pointer arguments may hold.
+- `--format=sarif` writes the findings as a SARIF 2.1.0 log for code-scanning services. Each
+  result carries a fingerprint that does not depend on its line.
+- `--write-baseline=PATH` records the findings of a run, and `--baseline=PATH` reports only the
+  findings that are not in that record; only those decide the exit code. Findings are matched
+  by file, code and message, so they are followed as code moves. With a baseline, JSON findings
+  carry `baseline` (`new` / `known`) and SARIF results `baselineState`.
+- `explain_finding` (MCP) has worked examples for the new findings: `UNIQUE_ALIASED`,
+  `BORROW_ESCAPES`, `REF_INVALIDATED` (C and C++), `REF_UNPROVEN`, `REF_NOT_PRESERVED` and
+  `REF_RETURN_UNDECLARED`. The three-state corpus they are generated from has 61 entries.
+- Every opt-in marker takes `file` — `// @kenbi file`, `// @spatial file`, `// @refcheck file` —
+  to cover the whole file wherever it is written. Without it a marker still covers the function
+  just below it, or the file when no function follows within a few lines.
+
+### Changed
+
+- Bounds (`@spatial`): an index or a length that is not a variable plus or minus a constant — a
+  product, a call, two variables, a nested read — is now reported (`UNVALIDATED_INDEX` /
+  `UNVALIDATED_SIZE`), since no bound check can be matched to it; previously such an access was
+  not checked at all. Store the value in a variable and bound that. Code that passed only
+  because its index was not read will now draw findings (#7).
+- Bounds: a constant index or length, `x % K` and `x & K` are checked against a fixed-size
+  buffer (`tab[8]` on an 8-element array, `memcpy(dst, src, 16)` into 8 bytes), and `*(p + i)`
+  is checked as `p[i]` (#7).
+- Bounds: a constant index or length into a buffer of variable size (`buf[0]` on
+  `malloc(n * …)`, `memcpy(dst, src, 4)` into a `@counted_by` buffer) is reported unless the
+  size is shown large enough, by a check on the path (`if (n >= 1)`, `if (n == 0) return;`) or
+  by a declared `@invariant(n >= K)`.
+- An `@invariant` on a function's parameters — `@invariant(param >= K)`, or a relation between
+  two parameters such as `@invariant(next <= num)` — is verified at each call under `@spatial`:
+  the arguments must be shown to satisfy it, else the call is `INVARIANT_NOT_MAINTAINED`.
+  Previously it was assumed of every caller.
+- Agent guidance (`integrations/agent/SKILL.md`): adds the opt-in axes (`@spatial`,
+  `@initcheck`, `@typecheck`, `@threadsafe`, non-local jumps), the procedure for the kenbi MCP
+  tools, a per-code table of what resolves each finding, and the changes that do not resolve
+  one (`@unsafe` to silence, removing a marker, declaring what does not hold).
+
+### Fixed
+
+- Bounds: `i++`, `--i`, `i += k` and `i = i ± k` move the bounds of the value they change, as a
+  statement or inside an expression (`buf[i++]`, `buf[++i]`), on variables and fields. Before,
+  `if (i < n) { i++; buf[i]; }` passed. `i &= K` / `i %= K` bound the value to `K` instead of
+  marking it as checked against any buffer (#8).
+- Bounds: a bound checked before a `switch`, a loop or a `try` holds after it only if it holds
+  on every path through it, and each loop iteration starts from what the previous one left. A
+  `do … while (c)` no longer applies `c` to its first iteration, a `continue` in a `for` runs
+  the increment, and an access in a statement reads its index as it was before that statement
+  assigns it (`i = tab[i] % 8`) (#9).
+- Fall-through between the cases of a `switch` is followed. A case that can reach its end runs
+  on into the next one, and every check now analyses that path: a release repeated along it is a
+  double free, a lock released before it is not held after it, and a `case VALUE:` no longer
+  proves its value for code reached by falling into it. Previously each case was analysed as if
+  entered only at its own label, so such a path was missed (#6).
+- Lock checks: a `switch` case that returns no longer takes part in the state after the switch,
+  so a release after the switch is not reported as `UNLOCK_WITHOUT_LOCK` because of it.
+- `SETJMP_CLOBBERED`: a plain assignment to the local, where a jump lands, is no longer reported
+  as a use of its value.
+- `SETJMP_CLOBBERED` follows a local along the paths a longjmp takes instead of looking only
+  inside the landing branch. A use after a landing branch that falls through, or after a
+  `switch` on the setjmp that a landing case breaks out of, is reported; a local assigned again
+  before the use, or not changed since the setjmp last ran, is not. A local array changed
+  through an element or handed to a callee, and a struct changed through a member, count as
+  changed (#5).
+
 ## [0.1.3] - 2026-11-17
 
 ### Added
@@ -91,6 +183,7 @@ Also: `--project` closure over a `compile_commands.json`, `--emit-contracts`, `k
 which checks ran on which functions, and what a result without findings rests on without
 having checked it.
 
+[0.2.0]: https://github.com/puffball1567/kenbi/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/puffball1567/kenbi/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/puffball1567/kenbi/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/puffball1567/kenbi/compare/v0.1.0...v0.1.1

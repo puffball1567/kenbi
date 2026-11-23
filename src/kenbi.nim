@@ -8,24 +8,31 @@
 ## (searched upward from the source, or passed via --compile-commands=PATH).
 ## Extra clang args can be appended after `--`.
 ##
-## Usage: kenbi [--format=text|json] [--compile-commands=PATH] [--project[=PATH]]
-##              [--emit-contracts] <file> [more...] [-- <clang args>]
+## Usage: kenbi [--format=text|json|sarif] [--compile-commands=PATH] [--project[=PATH]]
+##              [--baseline=PATH | --write-baseline=PATH] [--emit-contracts]
+##              <file> [more...] [-- <clang args>]
 ##        kenbi [--format=text|json] --safety=project.json
 ##        kenbi --version
 ## Exit:  0 = clean, 1 = issues found, 2 = usage/parse error.
+##
+## `--format=sarif` writes the findings as a SARIF 2.1.0 log, the format code-scanning services
+## read. `--write-baseline=PATH` records the findings of a run; `--baseline=PATH` then reports
+## only findings that are not in that record, and only those decide the exit status — the way
+## to adopt kenbi, or a new check, on code that already has findings. See applyBaseline.
 ##
 ## `--emit-contracts` publishes the contract SURFACE of what was analysed instead of
 ## checking it: the packages, the alloc/free vocabulary and every function contract, each
 ## carrying what this run established about the implementation behind it. See emitContracts.
 
 import std/[os, strutils, json, sets, tables, algorithm]
+import checksums/sha1
 import version
 import ir, parse, analyze, frontend_c, cfront_core, compile_db
 import strip, cfront_annotations, clang
 import safety_check
 
 type
-  Format = enum fmtText, fmtJson
+  Format = enum fmtText, fmtJson, fmtSarif
   FileResult = object
     path: string
     ok: bool            ## parsed successfully
@@ -37,6 +44,12 @@ type
     resources: seq[Resource]      ## the resource families it declared (ditto)
     deepFrees: HashSet[string]    ## releases declared `frees_fields:`
     scope: JsonNode               ## what was checked, axis by axis (scopeOf)
+    known: seq[bool]              ## parallel to `diags` when a baseline is in use: the finding
+                                  ## is one the baseline already records
+  BaselineStats = object
+    active: bool
+    path: string
+    fresh, known, gone: int       ## findings not in the baseline / in it / in it and not found
 
 proc isCSource(p: string): bool =
   let l = p.toLowerAscii
@@ -167,6 +180,94 @@ proc sevStr(s: Severity): string =
   of sevWarning: "warning"
   of sevAdvisory: "advisory"
 
+proc displayPath(p: string): string =
+  ## A file as findings name it wherever the run is repeated: relative to the working
+  ## directory when it lies under it, with forward slashes.
+  result = normalizedPath(p)
+  if isAbsolute(result):
+    let rel = relativePath(result, getCurrentDir())
+    if not rel.startsWith(".."): result = rel
+  result = result.replace('\\', '/')
+
+proc stableMessage(msg: string): string =
+  ## A finding's message without the line numbers it cites, which move whenever code above
+  ## them is edited.
+  var i = 0
+  while i < msg.len:
+    if msg.continuesWith("line ", i) and i + 5 < msg.len and msg[i + 5] in Digits:
+      result.add "line N"
+      i += 5
+      while i < msg.len and msg[i] in Digits: inc i
+    else:
+      result.add msg[i]
+      inc i
+
+proc findingKey(path: string, d: Diag): string =
+  ## What identifies a finding from one run to the next: its file, its code and its message.
+  ## Not its line — a finding stays the same finding when the code around it moves.
+  displayPath(path) & "\x1f" & d.code & "\x1f" & stableMessage(d.msg)
+
+proc writeBaseline(path: string, results: seq[FileResult]) =
+  ## Record the findings of this run. Identical findings in one file are recorded with their
+  ## number, so that one more of them later is a new finding.
+  var counts = initOrderedTable[string, int]()
+  for r in results:
+    if not r.ok: continue
+    for d in r.diags:
+      if d.sev != sevAdvisory: counts.mgetOrPut(findingKey(r.path, d), 0).inc
+  var keys: seq[string]
+  for k in counts.keys: keys.add k
+  keys.sort()
+  var entries = newJArray()
+  var total = 0
+  for k in keys:
+    let f = k.split("\x1f")
+    entries.add %*{"file": f[0], "code": f[1], "message": f[2], "count": counts[k]}
+    total += counts[k]
+  try:
+    writeFile(path, (%*{"version": 1, "tool": "kenbi", "kind": "baseline",
+                        "kenbiVersion": kenbiVersion, "findings": entries}).pretty & "\n")
+  except IOError:
+    stderr.writeLine "kenbi: cannot write the baseline " & path
+    quit(2)
+  stderr.writeLine "kenbi: recorded " & $total & " finding(s) in " & path
+
+proc applyBaseline(results: var seq[FileResult], path: string): BaselineStats =
+  ## Mark the findings a baseline already records. A baseline is the findings of an earlier
+  ## run, accepted as the starting point: they remain findings, but they are not reported
+  ## again and do not fail the run, so that only what changes since is in the way. Findings
+  ## are matched by file, code and message; of several identical ones in a file the first
+  ## recorded number are known and any further one is new. `gone` counts recorded findings
+  ## of the files analysed that no longer occur — the baseline can be written again.
+  result = BaselineStats(active: true, path: path)
+  var remaining = initTable[string, int]()
+  try:
+    let doc = parseFile(path)
+    if doc{"kind"}.getStr != "baseline": raise newException(ValueError, "not a kenbi baseline")
+    for e in doc["findings"]:
+      remaining[e["file"].getStr & "\x1f" & e["code"].getStr & "\x1f" & e["message"].getStr] =
+        e["count"].getInt
+  except CatchableError as e:
+    stderr.writeLine "kenbi: cannot read the baseline " & path & ": " & e.msg
+    quit(2)
+  var analysed = initHashSet[string]()
+  for r in results.mitems:
+    if not r.ok: continue
+    analysed.incl displayPath(r.path)
+    r.known = newSeq[bool](r.diags.len)
+    for i, d in r.diags:
+      if d.sev == sevAdvisory: continue
+      let k = findingKey(r.path, d)
+      if remaining.getOrDefault(k) > 0:
+        remaining[k].dec
+        r.known[i] = true
+        inc result.known
+      else: inc result.fresh
+  for k, n in remaining:
+    if k.split("\x1f")[0] in analysed: result.gone += n
+
+proc isKnown(r: FileResult, i: int): bool = i < r.known.len and r.known[i]
+
 proc totalCoverage(results: seq[FileResult]): CoverageStats =
   ## Coverage over everything analysed in this run. The counts and the CLOSURE are computed
   ## on the merged function set (projectCoverage), so a contracted call into a function
@@ -181,16 +282,30 @@ proc totalCoverage(results: seq[FileResult]): CoverageStats =
 proc pct(n, d: int): string =
   (if d > 0: $int(n.float / d.float * 100 + 0.5) else: "0") & "%"
 
-proc renderText(results: seq[FileResult]) =
+proc renderText(results: seq[FileResult], base: BaselineStats) =
   for r in results:
     if not r.ok:
       stderr.writeLine r.path & ": " & r.err
       continue
-    for d in r.diags:
+    var shown, hidden = 0
+    for i, d in r.diags:
+      if r.isKnown(i):
+        inc hidden
+        continue
+      inc shown
       echo r.path, ":", d.line, ": ", sevStr(d.sev), ": ", d.msg, " [", d.code, "]"
-    if r.diags.len == 0:
-      echo r.path, ": ok — no findings from the checks that ran"
+    if shown == 0:
+      if hidden > 0:
+        echo r.path, ": no new findings — ", hidden, " recorded in the baseline, not shown"
+      else: echo r.path, ": ok — no findings from the checks that ran"
     echo "  ", scopeText(r.scope)
+  if base.active:
+    echo "── baseline (", base.path, ") ─────────────────"
+    echo "  new findings              : ", base.fresh, "  ← these decide the result"
+    echo "  recorded, not shown       : ", base.known, "  ← still findings; fix them to shrink the baseline"
+    if base.gone > 0:
+      echo "  recorded, no longer found : ", base.gone,
+           "  ← write the baseline again to drop them"
   let c = totalCoverage(results)
   if c.totalMem > 0:
     echo "── kenbi coverage ───────────────────────────"
@@ -242,13 +357,80 @@ proc renderText(results: seq[FileResult]) =
     if c.adopted == 0 and c.blocks == 0:
       echo "  (no @kenbi markers — add one to adopt a function/file and start raising coverage)"
 
-proc renderJson(results: seq[FileResult]) =
+proc sarifUri(path: string): string =
+  ## The path as a URI reference: percent-encoded, relative where `displayPath` made it so.
+  for ch in displayPath(path):
+    if ch in {'A'..'Z', 'a'..'z', '0'..'9', '.', '_', '~', '/', '-'}: result.add ch
+    else: result.add "%" & toHex(ord(ch), 2)
+
+proc renderSarif(results: seq[FileResult], base: BaselineStats) =
+  ## The findings as a SARIF 2.1.0 log (one run). Each finding is a result whose rule is its
+  ## code; `partialFingerprints` carries the identity a baseline uses, so a service that
+  ## tracks alerts across commits follows a finding as the code around it moves. With a
+  ## baseline, each result says whether it is `new` or `unchanged`. A file that could not be
+  ## parsed is a tool notification, and the invocation is marked unsuccessful.
+  var codes: seq[string]
+  var level = initTable[string, string]()
+  proc levelOf(s: Severity): string =
+    case s
+    of sevError: "error"
+    of sevWarning: "warning"
+    of sevAdvisory: "note"
+  for r in results:
+    if not r.ok: continue
+    for d in r.diags:
+      if d.code notin level:
+        codes.add d.code
+        level[d.code] = levelOf(d.sev)
+  codes.sort()
+  var rules = newJArray()
+  for c in codes:
+    rules.add %*{"id": c, "defaultConfiguration": {"level": level[c]},
+                 "helpUri": "https://github.com/puffball1567/kenbi#readme"}
+  var sarifResults = newJArray()
+  var notifications = newJArray()
+  var parsedAll = true
+  for r in results:
+    if not r.ok:
+      parsedAll = false
+      notifications.add %*{
+        "level": "error", "message": {"text": r.err},
+        "locations": [{"physicalLocation": {"artifactLocation": {"uri": sarifUri(r.path)}}}]}
+      continue
+    var nth = initTable[string, int]()
+    for i, d in r.diags:
+      let key = findingKey(r.path, d)
+      let occurrence = nth.getOrDefault(key)
+      nth[key] = occurrence + 1
+      var physical = %*{"artifactLocation": {"uri": sarifUri(r.path)}}
+      if d.line >= 1: physical["region"] = %*{"startLine": d.line}
+      var res = %*{
+        "ruleId": d.code, "ruleIndex": codes.find(d.code), "level": levelOf(d.sev),
+        "message": {"text": d.msg},
+        "locations": [{"physicalLocation": physical}],
+        "partialFingerprints": {
+          "kenbiFinding/v1": toLowerAscii($secureHash(key & "\x1f" & $occurrence))}}
+      if base.active: res["baselineState"] = %(if r.isKnown(i): "unchanged" else: "new")
+      sarifResults.add res
+  echo (%*{
+    "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+    "version": "2.1.0",
+    "runs": [{
+      "tool": {"driver": {"name": "kenbi", "version": kenbiVersion,
+                          "informationUri": "https://github.com/puffball1567/kenbi",
+                          "rules": rules}},
+      "invocations": [{"executionSuccessful": parsedAll,
+                       "toolExecutionNotifications": notifications}],
+      "results": sarifResults}]}).pretty
+
+proc renderJson(results: seq[FileResult], base: BaselineStats) =
   ## Stable machine-readable schema: { version, tool, findings: [ {file, line,
   ## code, severity, message} ] }. Codes are stable; ordering is deterministic
   ## (file order, then the engine's (line, code) sort). Parse/read failures are
   ## reported as PARSE_ERROR findings so consumers see one structured document.
   ## `coverage` is the adoption and trust picture over the whole run, and `scope` lists, per
-  ## analysed file, which checks ran on which functions (see scopeOf).
+  ## analysed file, which checks ran on which functions (see scopeOf). With `--baseline`,
+  ## each finding carries `baseline` ("new" or "known") and the document a `baseline` summary.
   var findings = newJArray()
   for r in results:
     if not r.ok:
@@ -256,10 +438,13 @@ proc renderJson(results: seq[FileResult]) =
         "file": r.path, "line": 0, "code": "PARSE_ERROR",
         "severity": "error", "message": r.err}
       continue
-    for d in r.diags:
-      findings.add %*{
+    for i, d in r.diags:
+      var f = %*{
         "file": r.path, "line": d.line, "code": d.code,
         "severity": sevStr(d.sev), "message": d.msg}
+      if base.active and d.sev != sevAdvisory:
+        f["baseline"] = %(if r.isKnown(i): "known" else: "new")
+      findings.add f
   let c = totalCoverage(results)
   var frontierJson = newJArray()
   for f in c.trustedFrontier: frontierJson.add %f
@@ -300,8 +485,12 @@ proc renderJson(results: seq[FileResult]) =
       var s = r.scope.copy
       s["file"] = %r.path
       scopeJson.add s
-  echo (%*{"version": 1, "tool": "kenbi", "findings": findings,
-           "coverage": coverage, "scope": scopeJson}).pretty
+  var doc = %*{"version": 1, "tool": "kenbi", "findings": findings,
+               "coverage": coverage, "scope": scopeJson}
+  if base.active:
+    doc["baseline"] = %*{"path": base.path, "new": base.fresh, "known": base.known,
+                         "noLongerFound": base.gone}
+  echo doc.pretty
 
 type DefVerdict = tuple[adopted, green, verified: bool, defs: int]
   ## Everything this run established about the implementations of ONE function NAME. `defs`
@@ -544,6 +733,7 @@ proc main() =
   var safetyPath = ""
   var safetyRequested = false
   var safetyArgError = false
+  var baselinePath, writeBaselinePath = ""
   for idx in 1 .. paramCount():
     let a = paramStr(idx)
     if afterDD: extra.add a
@@ -552,9 +742,12 @@ proc main() =
       case a["--format=".len .. ^1]
       of "text": format = fmtText
       of "json": format = fmtJson
+      of "sarif": format = fmtSarif
       else:
-        stderr.writeLine "kenbi: unknown --format (use text|json)"
+        stderr.writeLine "kenbi: unknown --format (use text|json|sarif)"
         quit(2)
+    elif a.startsWith("--baseline="): baselinePath = a["--baseline=".len .. ^1]
+    elif a.startsWith("--write-baseline="): writeBaselinePath = a["--write-baseline=".len .. ^1]
     elif a.startsWith("--compile-commands="): dbOverride = a["--compile-commands=".len .. ^1]
     elif a == "--project": projectMode = true
     elif a.startsWith("--project="): projectMode = true; projectDb = a["--project=".len .. ^1]
@@ -568,7 +761,9 @@ proc main() =
     elif a.startsWith("-"): extra.add a
     else: files.add a
   if safetyRequested:
-    if safetyArgError or files.len > 0 or extra.len > 0 or dbOverride.len > 0 or projectMode or dumpIrMode or emitMode:
+    if safetyArgError or files.len > 0 or extra.len > 0 or dbOverride.len > 0 or projectMode or
+       dumpIrMode or emitMode or format == fmtSarif or baselinePath.len > 0 or
+       writeBaselinePath.len > 0:
       if format == fmtJson:
         echo (%*{"schemaVersion": 1, "kind": "safety-result", "phase": "source", "status": "unverified", "accepted": false,
           "findings": [{"code": "SAFETY_INPUT_ERROR", "message":
@@ -594,9 +789,14 @@ proc main() =
       stderr.writeLine "kenbi: " & projectDb & " lists no source files"
       quit(2)
     files = units
+  if baselinePath.len > 0 and writeBaselinePath.len > 0:
+    stderr.writeLine "kenbi: use --baseline to compare with a record or --write-baseline to " &
+                     "make one, not both"
+    quit(2)
   if files.len == 0:
-    stderr.writeLine "usage: kenbi [--format=text|json] [--compile-commands=PATH] " &
-                     "[--project[=PATH]] [--emit-contracts] <file> [more...] [-- <clang args>]"
+    stderr.writeLine "usage: kenbi [--format=text|json|sarif] [--compile-commands=PATH] " &
+                     "[--project[=PATH]] [--baseline=PATH | --write-baseline=PATH] " &
+                     "[--emit-contracts] <file> [more...] [-- <clang args>]"
     stderr.writeLine "       kenbi [--format=text|json] --safety=project.json"
     stderr.writeLine "       kenbi --version"
     quit(2)
@@ -620,19 +820,27 @@ proc main() =
         quit(2)
     return
 
+  var base: BaselineStats
+  if baselinePath.len > 0: base = applyBaseline(results, baselinePath)
   case format
-  of fmtText: renderText(results)
-  of fmtJson: renderJson(results)
+  of fmtText: renderText(results, base)
+  of fmtJson: renderJson(results, base)
+  of fmtSarif: renderSarif(results, base)
 
   var issues = 0
   var hadError = false
   for r in results:
     if not r.ok: hadError = true
     else:
-      # advisory findings are for the review layer; they never gate the build.
-      for d in r.diags:
-        if d.sev != sevAdvisory: inc issues
+      # advisory findings are for the review layer; they never gate the build. Nor do the
+      # findings a baseline records: only what is new since it was written does.
+      for i, d in r.diags:
+        if d.sev != sevAdvisory and not r.isKnown(i): inc issues
   if hadError: quit(2)
+  if writeBaselinePath.len > 0:
+    # recording the starting point is not a check of it
+    writeBaseline(writeBaselinePath, results)
+    return
   if issues > 0: quit(1)
 
 main()

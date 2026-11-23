@@ -6,7 +6,7 @@
 
 **AI エージェントと C/C++ を書くために作りました。** [MCP サーバ](#ai-コーディングエージェントと使う-mcp)を通して、エージェントは書いたばかりの C/C++ を検査し、指摘が出た理由と直し方を確かめ、検査が何も報告しなくなるまで繰り返します。メモリ安全性は、書いた後のレビューではなく、エージェントが書く流れの一部になります。エージェントが書いた注釈は、kenbi が検査し続ける規則としてコードに残ります。
 
-> ステータス: **v0.1.3**、開発初期段階です。インタフェース、注釈の語彙、
+> ステータス: **v0.2.0**、開発初期段階です。インタフェース、注釈の語彙、
 > JSON 出力は今後も変わる可能性があります。
 
 ## 最初の例
@@ -74,7 +74,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 0 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -111,7 +111,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 1 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -131,8 +131,13 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 | 境界 | `@spatial` | バッファに届く信頼できないインデックスやサイズには、存在し・十分で・オーバーフローしない境界チェックが必要。`@counted_by` と、宣言されたデータ構造不変条件（`@invariant` / `@maintains`） |
 | 初期化 | `@initcheck` | すべてのパスで代入される前に読まれるローカル変数 |
 | タグ付き共用体 | `@typecheck` + `@variant` | タグが証明されていない箇所で使われる共用体メンバ |
+| 参照の有効性 | `@refcheck` + `@invalidates` / `@preserves` | バッファやコンテナの中を指すポインタ・参照・イテレータを、再確保や解放が起きうる呼び出しの後で使う |
 | ロック | `@threadsafe` | ロックなしのアクセス、釣り合わないロック、宣言されたロック順序（AB-BA デッドロック） |
 | 低レベル性質 | `--safety=project.json` | 呼び出し閉包内の禁止された効果、リソースの状態機械、スタックと呼び出しの深さ、メモリ領域、MMIO など。[設定による低レベル検証](#設定による低レベル検証--safety)を参照 |
+
+関数の上に書いたマーカーは、その関数に付きます。下の数行以内に関数がないマーカーは、ファイル全体に
+付きます。書いた位置に関係なくファイル全体を対象にするには、`file` を付けます: `// @kenbi file`、
+`// @spatial file`、`// @refcheck file`。
 
 libclang フロントエンドが実際の C / C++ を（`compile_commands.json` を読んで）typestate
 エンジンへ lowering します。ループは有界不動点まで解析され、前方 `goto` クリーンアップ ラダー、
@@ -223,7 +228,8 @@ nimble build -d:release -d:kenbiLibclang=libclang.dll
 ## 使い方
 
 ```
-kenbi [--format=text|json] [--compile-commands=PATH] [--project[=PATH]] [--emit-contracts]
+kenbi [--format=text|json|sarif] [--compile-commands=PATH] [--project[=PATH]]
+      [--baseline=PATH | --write-baseline=PATH] [--emit-contracts]
       <file> [more...] [-- <extra clang args>]
 kenbi [--format=text|json] --safety=project.json
 kenbi --version
@@ -244,9 +250,32 @@ kenbi --version
   最初に与えたファイルから上方向に辿ってデータベースを探します。
 - `--format=json` は安定したコードを持つ機械可読な findings を出力します（CI・
   エディタ・エージェント向け）。`--format=text`（デフォルト）は人間可読です。
+- `--format=sarif` は、指摘を SARIF 2.1.0 のログとして出力します。GitHub の code scanning などが
+  読める形式です。各指摘には行番号に依存しない指紋が付くので、周囲のコードが動いても同じ警告として
+  追跡されます。
+- `--write-baseline=PATH` は、その実行の指摘を記録します（終了コードは `0`）。`--baseline=PATH` を
+  付けると、その記録にない指摘だけを報告し、終了コードもそれだけで決まります。記録済みの指摘は
+  指摘のままで、出力には件数が表示されますが、すでに指摘のあるコードへ kenbi や新しい検査を導入する
+  間の妨げにはなりません。照合は行番号ではなく、ファイル・コード・メッセージで行います。JSON では
+  各指摘に `baseline: "new" | "known"`、SARIF では `baselineState` が付きます。
 - `--safety=project.json` は、
   [設定による低レベル検証](#設定による低レベル検証--safety)で説明する設定済みの低レベル検査を実行します。
 - 終了コード: `0` クリーン · `1` 問題あり · `2` 使用法 / パースエラー。
+
+### CI で使う
+
+出発点を一度記録してコミットし、以後の実行は新しく増えた指摘だけで失敗させます。
+
+```yaml
+- run: kenbi --format=sarif --baseline=kenbi-baseline.json --project > kenbi.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: kenbi.sarif
+```
+
+指摘を直したら `kenbi --write-baseline=kenbi-baseline.json --project` を実行し直して、記録も一緒に
+減らしてください。
 
 
 ## opt-in の単位: ファイル、関数、ブロック
@@ -404,6 +433,19 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 - **must-use 戻り値**: 関数の上の `// @must_use` は、その結果が消費されなければならない
   ことを宣言する。値が捨てられる呼び出し（代入 / return / 受け渡し / 検査されない裸の文）は
   `UNUSED_MUST_USE` —— 無視されたエラーコードやリークした確保に対する `#[must_use]` の規律。
+- **排他引数**: 関数の上の `// @unique(param)` は、呼び出しの間、`param` が指すオブジェクトに
+  他の引数からは届かないことを宣言します（C の `restrict` が約束し、コンパイラが検査しない内容
+  です）。呼び出しごとに、その引数を他のすべてのポインタ引数と比べます。同じオブジェクトなら
+  `UNIQUE_ALIASED`、別物だと示せない組は `UNIQUE_UNPROVEN` です。別の変数、同じ構造体の別の
+  メンバ、呼び出し側で行った別々の確保、呼び出し側自身が `@unique` と宣言した引数は別物として
+  扱われます。本体で、そのポインタやそのコピーを呼び出しより長く残る場所へ保存すると
+  `UNIQUE_ESCAPES` です。
+- **呼び出しの後は手放す**: `@borrows(param)` と `@unique(param)` は、どちらも「呼び出しが
+  終わった後はそのポインタを誰も持っていない」という約束で、本体がそれを守っているかを検査します。
+  ポインタやそのコピーを大域変数、フィールド、別のポインタ経由で保存すると `BORROW_ESCAPES` /
+  `UNIQUE_ESCAPES` です。同じ約束（`@borrows` か `@unique`。その関数の本体でも同じ検査をします）を
+  宣言していない引数へ渡した場合も同じです。C ライブラリの読み書き関数（`memcpy`、`strlen`、
+  `printf` など）と宣言済みの解放関数は既知として扱います。
 
 ### Goto ボキャブラリ（任意 —— goto の構造化された意図を宣言する）
 
@@ -436,12 +478,50 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 `i + 4 <= n` は認められず、`n >= 4 && i <= n - 4` は認められます。kenbi はパス上のチェックを
 探すのであって、チェックを取り除くことはありません。
 
+kenbi が添字や長さとして読めるのは、変数に定数を足し引きした形（`buf[i]`、`buf[i + 1]`、
+`buf[i++]`、`*(p + i)`）、定数、`x % K` / `x & K` です。それ以外（積、関数呼び出し、変数どうしの
+演算、入れ子の読み出し）はチェックと対応づけられないため報告されます。値を変数に入れ、その変数を
+境界チェックしてください。定数の添字や長さもバッファのサイズと照合されます。サイズが可変の
+バッファ（`malloc(n * …)` に対する `buf[0]`）では、経路上のチェック（`if (n >= 1)`）か、宣言した
+`@invariant(n >= 1)` によって、サイズが足りることを示す必要があります。
+
 - 関数の上の `// @counted_by(<buf>: <len>)` はポインタ引数にサイズを与えます。フィールド
   （`b->buf: b->cap`）やリングバッファのマスク（`b->mask + 1`）としても指定できます。
 - `// @invariant(<field> <rel> <size>)` はデータ構造の不変条件を宣言します（例:
   `parser->toknext <= num_tokens`）。そのフィールドは保護され、それへの書き込みはすべて
   `// @maintains(...)` を必要とし、kenbi がそれを検証します（`UNGUARDED_INVARIANT_WRITE`、
   `INVARIANT_NOT_MAINTAINED`）。そのフィールドで抑えられたインデックスは、この関係を通じてカバーされます。
+- 関数の上の `// @invariant(<param> >= <K>)` や `// @invariant(<param> <rel> <param>)` は、
+  本体が引数について仮定することを宣言します（`@invariant(n >= 2)`、`@invariant(next <= num)`）。
+  kenbi は `@spatial` のコードにあるすべての呼び出しでこれを検証します。引数が条件を満たすことを、
+  経路上のチェック、定数、または呼び出し側自身が宣言した不変条件で示せなければ、その呼び出しは
+  `INVARIANT_NOT_MAINTAINED` です。
+
+### 管理された記憶域への参照（`@refcheck`）
+
+- 関数の上またはファイルレベルの `// @refcheck`: 他のオブジェクトが管理する記憶域の中を指すポインタ、
+  参照、イテレータ、ビュー（`p = buf->data`、`&v[0]`、`v.begin()`、`s.c_str()`）を持つローカル変数を、
+  経路ごとに追います。その記憶域を再確保または解放しうる呼び出しの後で使うと、呼び出しがそう宣言
+  されているか既知の場合（`realloc`、`free`、標準コンテナ自身のメソッド）は `REF_INVALIDATED`、
+  オブジェクトへの書き込み可能なポインタや参照を受け取りながら何も宣言していない場合は
+  `REF_UNPROVEN` です。呼び出しの後でポインタを取り直してください。
+- 追う対象: ポインタ・参照・イテレータの変数、ビュー（`string_view`、`span`。部品から組み立てた場合も
+  含む）、ローカルの構造体のメンバやローカル配列に入れたポインタ（メンバも配列の要素も
+  個別に追います。定数でない添字で触れた要素は、どの要素でもありうるものとして扱います）、そしてクロージャです。ラムダは、値でキャプチャしたもののコピーを持ち、参照でキャプチャ
+  したものは本体の実行時に読みます。本体は、クロージャが使われる場所ごとに読まれます。
+- 関数の上の `// @invalidates(param)` / `// @preserves(param)` で、どちらなのかを宣言します
+  （メソッドは `this`、大域変数は名前で指定。ライブラリには `@contract` ブロックの `invalidates:` /
+  `preserves:`）。`@preserves` の本体は検証されます。引数が持つ記憶域を解放・再確保する、または
+  同じ約束をしていない関数へ渡すと `REF_NOT_PRESERVED` です。`const` の引数には宣言は要りません。
+- 大域変数から届く記憶域は、プログラムのどの関数からも変更できます。そこを指すポインタを呼び出しを
+  またいで持つには、呼ばれる関数が `@preserves(<大域変数>)` を宣言している必要があります。
+- 関数の上の `// @returns_into(param)` は、戻り値が `param` から届く記憶域の中を指すことを宣言します。
+  呼び出し側が受け取ったポインタは、オブジェクトから直接読んだポインタと同じように追われます
+  （`// @returns_into()` はどの引数の中も指さないという宣言。`@contract` ブロックでは `returns_into:`）。
+  そのようなポインタを宣言なしで返す関数は `REF_RETURN_UNDECLARED` です。何も宣言していない関数の
+  戻り値は、ポインタ引数のどれかが持つ記憶域の中を指すかもしれないものとして扱い、その引数が
+  無効化された後で使うと `REF_UNPROVEN` です。`strchr` や `memcpy` などは、引数のブロックの中を指す
+  ポインタを返すものとして既知です。
 
 ### 初期化（`@initcheck`）とタグ付き共用体（`@typecheck`）
 
@@ -497,7 +577,8 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
 
 別のバッファへのジャンプは、関数から抜ける経路として扱います。バッファを宣言していないジャンプは
 `UNKNOWN_LONGJMP_TARGET`、宣言したバッファへ本体が飛んでいなければ `LONGJMP_TARGET_MISMATCH`
-です。`volatile` でなく、setjmp の後で変更され、着地側の分岐で読まれる局所変数は
+です。`volatile` でなく、setjmp からジャンプまでの間に変更され、再び代入される前に
+ジャンプが通る経路（着地側の分岐の中でも、その後でも）で読まれる局所変数は
 `SETJMP_CLOBBERED` です（そこでの値は不定です）。これ以外の形の setjmp（式文、ループの
 条件、代入、`try` ブロックの中）は `UNSUPPORTED_SETJMP` です。
 
@@ -557,6 +638,9 @@ use <var> | free <var> | move <var> | if / else / endif
 ジャンプ）、`SETJMP_CLOBBERED`（longjmp の着地点で読まれる volatile でない局所変数）、
 `UNSUPPORTED_SETJMP`（kenbi がモデル化しない形の `setjmp`）、
 `FINALLY_BYPASSED`（所有したまま出る exit が、宣言された `@goto_finally` ファネルを迂回する）、
+`BORROW_ESCAPES`（本体が `@borrows` のポインタを保存する、または保存しうる関数へ渡す）、
+`UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES`（他の引数から届く、または本体が保持する
+`@unique` 引数）、
 `FREE_NONHEAP`（スタックなどヒープ以外の記憶域を指すポインタの `free`）、`BORROW_MOVED` /
 `UNCONTRACTED_MOVE`（借用からの move、または受け取りを宣言しない callee への move）、
 `REALLOC_UNVERIFIED` / `REALLOC_SELF_REASSIGN`（結果が使用前に確定しない `realloc`、または唯一の
@@ -565,7 +649,7 @@ use <var> | free <var> | move <var> | if / else / endif
 加えて `UNKNOWN_RESOURCE` / `STALE_UNSAFE` の衛生チェック。opt-in の軸の下では:
 `UNVALIDATED_INDEX`、`UNVALIDATED_SIZE`、`INAPPROPRIATE_BOUND`、`INDEX_MAYBE_NEGATIVE`、
 `UNGUARDED_INVARIANT_WRITE`、`INVARIANT_NOT_MAINTAINED`（`@spatial`）、`USE_OF_UNINITIALIZED`
-（`@initcheck`）、`TYPE_CONFUSION`（`@typecheck`）、そして `UNGUARDED_ACCESS`、`GUARDED_ESCAPE`、
+（`@initcheck`）、`REF_INVALIDATED`、`REF_UNPROVEN`、`REF_RETURN_UNDECLARED`、`REF_NOT_PRESERVED`（`@refcheck`）、`TYPE_CONFUSION`（`@typecheck`）、そして `UNGUARDED_ACCESS`、`GUARDED_ESCAPE`、
 `LOCK_LEAKED`、`DOUBLE_LOCK`、`UNLOCK_WITHOUT_LOCK`、`LOCK_NOT_ACQUIRED`、
 `REQUIRED_LOCK_NOT_HELD`、`LOCK_ORDER_VIOLATION`、`SAME_CLASS_NO_ORDER`、
 `UNDECLARED_INDIRECT_CALL`、`UNDECLARED_FN_TARGET`（`@threadsafe`）。ループ
@@ -798,7 +882,7 @@ C/C++ のパースは差し替え可能な部品です。
 ## テスト
 
 `tests/*.mc` はエンジンを直接駆動します（17 ケース）。`tests/c/*.c` と `tests/cpp/*.cpp` は、
-それらのシナリオに加えて注釈固有のチェックを実際の C / C++ で書いたものです（349 ケース）。ランナーは
+それらのシナリオに加えて注釈固有のチェックを実際の C / C++ で書いたものです（370 ケース）。ランナーは
 各ファイルを libclang で lowering し、生成された診断を —— **その発生行も含めて** —— 各ファイルの
 `//EXPECT CODE` マーカー（その行自体に書くか、`//EXPECT CODE@LINE`）と突き合わせて検証します。
 行が違っても、診断の過不足があっても suite は失敗します。`tests/run_tests_project.nim` は

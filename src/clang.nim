@@ -123,6 +123,7 @@ const
   ckParenExpr*           = 111
   ckUnexposedExpr*       = 100
   ckIntegerLiteral*      = 106
+  ckStringLiteral*       = 109
   ckArraySubscriptExpr*  = 113
   ckCStyleCastExpr*      = 117
   ckCXXNewExpr*          = 134
@@ -141,6 +142,8 @@ const
   tyRecord*              = 105
   tyEnum*                = 106
   tyPointer*             = 101
+  tyLValueReference*     = 103
+  tyRValueReference*     = 104
   tyConstantArray*       = 112
   tyIncompleteArray*     = 114
   tyVariableArray*       = 115
@@ -208,9 +211,11 @@ proc clang_getTypeSpelling*(t: CXType): CXString   ## `kir_owned_scalar<std::uin
                                                     ## to match a local's type against `@raii` owners
 proc clang_isConstQualifiedType*(t: CXType): cuint
 proc clang_isVolatileQualifiedType*(t: CXType): cuint
+proc clang_isExpression*(k: cint): cuint
 proc clang_getTypeDeclaration*(t: CXType): CXCursor
 proc clang_getCursorDefinition*(c: CXCursor): CXCursor
 proc clang_CXXMethod_isVirtual*(c: CXCursor): cuint
+proc clang_CXXMethod_isConst*(c: CXCursor): cuint
 proc clang_getPointeeType*(t: CXType): CXType
 proc clang_getArrayElementType*(t: CXType): CXType
 proc clang_Type_getAlignOf*(t: CXType): clonglong

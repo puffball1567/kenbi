@@ -13,7 +13,7 @@ looks like, and repeats until the checks report nothing. Memory safety becomes p
 agent's write loop rather than a review after the fact, and the annotations it writes stay in
 the code as rules kenbi keeps checking.
 
-> Status: **v0.1.3**, early development. The interfaces, the annotation vocabulary and the
+> Status: **v0.2.0**, early development. The interfaces, the annotation vocabulary and the
 > JSON output may still change.
 
 ## A first look
@@ -96,7 +96,7 @@ summary is followed by kenbi's full JSON document, left out here):
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 0 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -134,7 +134,7 @@ summary is followed by kenbi's full JSON document, left out here):
 
    Scope — the result covers only this:
      - ownership, lifetime and null (`@kenbi`, or a file with no marker): checked in every function
-     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`)
+     - NOT checked anywhere: bounds (`@spatial`); locks (`@threadsafe`); initialisation (`@initcheck`); tagged unions (`@typecheck`); references into managed storage (`@refcheck`)
      - verified (nothing taken on trust): 1 of 1 adopted memory-relevant functions
      - code the preprocessor excluded under these flags was not analysed
    ```
@@ -155,8 +155,13 @@ Each check is opted into separately:
 | bounds | `@spatial` | an untrusted index or size reaching a buffer needs a present, sufficient, overflow-safe bound check; `@counted_by` and declared data-structure invariants (`@invariant` / `@maintains`) |
 | initialisation | `@initcheck` | a local read before it is assigned on every path |
 | tagged unions | `@typecheck` + `@variant` | a union member used where its tag is not proven |
+| references | `@refcheck` + `@invalidates` / `@preserves` | a pointer, reference or iterator into a buffer or container used after a call that may have reallocated or released it |
 | locks | `@threadsafe` | unguarded access, unbalanced locks, declared lock order (AB-BA deadlock) |
 | low-level properties | `--safety=project.json` | forbidden effects in a call closure, resource state machines, stack and call depth, memory regions, MMIO and more — see [Configured low-level verification](#configured-low-level-verification---safety) |
+
+A marker written above a function covers that function; one with no function within a few lines
+below it covers the whole file. To cover the whole file wherever the marker is written, add
+`file`: `// @kenbi file`, `// @spatial file`, `// @refcheck file`.
 
 A libclang front-end lowers real C / C++ (reading `compile_commands.json`) into a typestate
 engine. Loops are analysed to a bounded fixpoint, forward `goto` cleanup ladders,
@@ -247,7 +252,8 @@ nimble build -d:release -d:kenbiLibclang=libclang.dll
 ## Usage
 
 ```
-kenbi [--format=text|json] [--compile-commands=PATH] [--project[=PATH]] [--emit-contracts]
+kenbi [--format=text|json|sarif] [--compile-commands=PATH] [--project[=PATH]]
+      [--baseline=PATH | --write-baseline=PATH] [--emit-contracts]
       <file> [more...] [-- <extra clang args>]
 kenbi [--format=text|json] --safety=project.json
 kenbi --version
@@ -268,9 +274,33 @@ kenbi --version
   FFI edge). Without a path the database is found by walking up from the first file given.
 - `--format=json` emits machine-readable findings with stable codes (for CI,
   editors, and agents); `--format=text` (default) is human-readable.
+- `--format=sarif` writes the findings as a SARIF 2.1.0 log, the format GitHub code scanning and
+  other services read. Each finding carries a fingerprint that does not depend on its line, so an
+  alert is followed as the code around it moves.
+- `--write-baseline=PATH` records the findings of a run (and exits `0`); `--baseline=PATH` then
+  reports only the findings that are not in that record, and only those decide the exit code.
+  Recorded findings are still findings — the output counts them and says so — but they are not
+  in the way while you adopt kenbi, or turn on a new check, in code that already has some.
+  Findings are matched by file, code and message, not by line. In JSON each finding gets
+  `baseline: "new" | "known"`; in SARIF, `baselineState`.
 - `--safety=project.json` runs the configured low-level checks described in
   [Configured low-level verification](#configured-low-level-verification---safety).
 - Exit code: `0` clean · `1` issues found · `2` usage / parse error.
+
+### In CI
+
+Record the starting point once and commit it, then let each run fail only on what is new:
+
+```yaml
+- run: kenbi --format=sarif --baseline=kenbi-baseline.json --project > kenbi.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: kenbi.sarif
+```
+
+Run `kenbi --write-baseline=kenbi-baseline.json --project` again whenever findings are fixed, so
+the record shrinks with them.
 
 
 ## Opting in: file, function, or block
@@ -430,6 +460,19 @@ sink(p);  // @move demo::buf   — obligation transferred out; p is now moved-fr
   be consumed; a call whose value is dropped (a bare statement, not assigned /
   returned / passed / tested) is `UNUSED_MUST_USE` — the `#[must_use]` discipline
   for ignored error codes and leaked allocations.
+- **exclusive parameter**: `// @unique(param)` above a function declares that, during a
+  call, no other argument reaches the object `param` points into (what C's `restrict` promises
+  and no compiler checks). At every call the argument is compared with each other pointer
+  argument: the same object is `UNIQUE_ALIASED`, a pair nothing shows to be distinct is
+  `UNIQUE_UNPROVEN`. Distinct variables, distinct members of one struct, separate allocations
+  made in the caller, and a parameter the caller itself declares `@unique` are distinct. In the
+  body, storing the pointer or a copy of it where it outlives the call is `UNIQUE_ESCAPES`.
+- **given back after the call**: `@borrows(param)` and `@unique(param)` both promise that nothing
+  holds the pointer once the call has returned, and the body is checked for it. Storing the
+  pointer or a copy of it in a global, a field or through another pointer is `BORROW_ESCAPES` /
+  `UNIQUE_ESCAPES`; so is passing it to a function whose parameter does not make the same
+  promise (`@borrows` or `@unique`, verified in that function's body in turn). The C library's
+  readers and writers (`memcpy`, `strlen`, `printf`, …) and declared deallocators are known.
 
 ### Goto vocabulary (optional — declare the structured intent of a goto)
 
@@ -462,12 +505,54 @@ else it is `UNVALIDATED_INDEX` / `UNVALIDATED_SIZE`. The check must cover the bu
 not credited; `n >= 4 && i <= n - 4` is. kenbi looks for the check on the path; it never removes
 one.
 
+kenbi reads an index or a length as a variable plus or minus a constant (`buf[i]`, `buf[i + 1]`,
+`buf[i++]`, `*(p + i)`), a constant, or `x % K` / `x & K`. Anything else — a product, a call, two
+variables, a nested read — cannot be matched to a check and is reported: store the value in a
+variable and bound that. A constant index or length is checked against the buffer's size too:
+on a buffer of variable size (`buf[0]` on `malloc(n * …)`) the size must be shown large enough,
+by a check on the path (`if (n >= 1)`) or by a declared `@invariant(n >= 1)`.
+
 - `// @counted_by(<buf>: <len>)` above a function gives a pointer parameter its size, also as a
   field (`b->buf: b->cap`) or a ring-buffer mask (`b->mask + 1`).
 - `// @invariant(<field> <rel> <size>)` declares a data-structure invariant (for example
   `parser->toknext <= num_tokens`). The field is then protected: every write to it needs
   `// @maintains(...)`, which kenbi verifies (`UNGUARDED_INVARIANT_WRITE`,
   `INVARIANT_NOT_MAINTAINED`), and an index bounded by the field is covered through the relation.
+- `// @invariant(<param> >= <K>)` or `// @invariant(<param> <rel> <param>)` above a function
+  declares what its body assumes of its parameters (`@invariant(n >= 2)`,
+  `@invariant(next <= num)`). kenbi verifies it at every call in `@spatial` code: the arguments
+  must be shown to satisfy it — by a check on the path, by constants, or by the caller's own
+  declared invariant — else the call is `INVARIANT_NOT_MAINTAINED`.
+
+### References into managed storage (`@refcheck`)
+
+- `// @refcheck` above a function or at file level: a local that holds a pointer, a reference, an
+  iterator or a view into storage another object manages (`p = buf->data`, `&v[0]`, `v.begin()`,
+  `s.c_str()`) is followed along each path. Using it after a call that may have reallocated or
+  released that storage is `REF_INVALIDATED` when the call is declared or known to (`realloc`,
+  `free`, the standard containers' own methods) and `REF_UNPROVEN` when the call is handed a
+  writable pointer or reference to the object and declares nothing. Take the pointer again
+  after the call.
+- What is followed: pointer, reference and iterator variables; views (`string_view`, `span`),
+  also when built from their parts; a pointer kept in a member of a local struct or in a local
+  array (each member and each element on its own; an element reached with an index that is not a
+  constant may be any of them); and closures — a lambda
+  holds a copy of what it captures by value, reads what it captures by reference when its body
+  runs, and its body is read wherever the closure is used.
+- `// @invalidates(param)` / `// @preserves(param)` above a function declare which it is (`this`
+  for a method, a global by name; `invalidates:` / `preserves:` in a `@contract` block for a
+  library). A `@preserves` body is verified: releasing or reallocating what the parameter holds,
+  or passing it to a function that does not make the same promise, is `REF_NOT_PRESERVED`. A
+  `const` parameter needs no declaration.
+- Storage reached from a global can be changed by any function of the program, so a pointer into
+  it held across a call needs that function to declare `@preserves(<global>)`.
+- `// @returns_into(param)` above a function declares that its result points into storage reached
+  through `param`, so the caller's copy is followed like a pointer read out of the object
+  (`// @returns_into()`: into none of its arguments; `returns_into:` in a `@contract` block). A
+  function that returns such a pointer without declaring it is `REF_RETURN_UNDECLARED`. The
+  result of a function that declares nothing may point into what any pointer argument holds:
+  using it after that argument is invalidated is `REF_UNPROVEN`. `strchr`, `memcpy` and the
+  like are known to return a pointer into their argument's block.
 
 ### Initialisation (`@initcheck`) and tagged unions (`@typecheck`)
 
@@ -524,8 +609,9 @@ expression in which `$N` or a parameter name stands for the call's argument:
 
 A jump to another buffer leaves the function instead; a jump whose buffer is not declared is
 `UNKNOWN_LONGJMP_TARGET`, and a declared buffer that the body does not jump to is
-`LONGJMP_TARGET_MISMATCH`. A local that is not `volatile`, changed after the setjmp and read in
-the landing branch, is `SETJMP_CLOBBERED`: its value is indeterminate there. A setjmp in any
+`LONGJMP_TARGET_MISMATCH`. A local that is not `volatile`, changed between the setjmp and the jump and then read on a path
+the jump takes — in the landing branch or after it — before it is assigned again, is
+`SETJMP_CLOBBERED`: its value is indeterminate there. A setjmp in any
 other form (an expression statement, a loop condition, an assignment, or inside a `try` block)
 is `UNSUPPORTED_SETJMP`.
 
@@ -585,6 +671,9 @@ can reach a longjmp without declaring `@longjmps`), `UNKNOWN_LONGJMP_TARGET` / `
 not the declared one), `SETJMP_CLOBBERED` (a non-volatile local read where a longjmp lands),
 `UNSUPPORTED_SETJMP` (a `setjmp` in a form kenbi does not model),
 `FINALLY_BYPASSED` (an owning exit bypasses a declared `@goto_finally` funnel),
+`BORROW_ESCAPES` (the body stores an `@borrows` pointer, or passes it to a function that may),
+`UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (an `@unique` parameter that another
+argument reaches, or that the body keeps),
 `FREE_NONHEAP` (a `free` of a pointer into stack or other non-heap storage), `BORROW_MOVED` /
 `UNCONTRACTED_MOVE` (a move out of a borrow, or into a callee that declares no intake),
 `REALLOC_UNVERIFIED` / `REALLOC_SELF_REASSIGN` (a `realloc` whose outcome is not settled before
@@ -593,7 +682,7 @@ use, or whose only handle is overwritten), `MISSING_COPY_CONTROL` / `SELF_ASSIGN
 rather than dropped), plus `UNKNOWN_RESOURCE` / `STALE_UNSAFE` hygiene checks. Under the opt-in
 axes: `UNVALIDATED_INDEX`, `UNVALIDATED_SIZE`, `INAPPROPRIATE_BOUND`, `INDEX_MAYBE_NEGATIVE`,
 `UNGUARDED_INVARIANT_WRITE`, `INVARIANT_NOT_MAINTAINED` (`@spatial`), `USE_OF_UNINITIALIZED`
-(`@initcheck`), `TYPE_CONFUSION` (`@typecheck`), and `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
+(`@initcheck`), `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_RETURN_UNDECLARED`, `REF_NOT_PRESERVED` (`@refcheck`), `TYPE_CONFUSION` (`@typecheck`), and `UNGUARDED_ACCESS`, `GUARDED_ESCAPE`,
 `LOCK_LEAKED`, `DOUBLE_LOCK`, `UNLOCK_WITHOUT_LOCK`, `LOCK_NOT_ACQUIRED`,
 `REQUIRED_LOCK_NOT_HELD`, `LOCK_ORDER_VIOLATION`, `SAME_CLASS_NO_ORDER`,
 `UNDECLARED_INDIRECT_CALL`, `UNDECLARED_FN_TARGET` (`@threadsafe`). Loops
@@ -828,7 +917,7 @@ parsing C/C++ is a replaceable part.
 ## Tests
 
 `tests/*.mc` drive the engine directly (17 cases). `tests/c/*.c` and `tests/cpp/*.cpp` carry
-those scenarios plus the annotation-specific checks in real C and C++ (349 cases); the runner
+those scenarios plus the annotation-specific checks in real C and C++ (370 cases); the runner
 lowers each through libclang and asserts the produced diagnostics — **including their source
 line** — against the `//EXPECT CODE` markers in each file (on the line itself, or
 `//EXPECT CODE@LINE`). A wrong line or a missing/extra

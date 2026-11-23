@@ -1597,5 +1597,208 @@ export const FINDINGS: Record<string, FindingEntry[]> =
         "why": "the buffer is held by a unique_ptr: the unwinding itself releases it, so `process` may throw freely (alternatively, prove it cannot: declare it `noexcept` or vouch `@nothrow`). GREEN."
       }
     }
+  ],
+  "REF_INVALIDATED": [
+    {
+      "id": "CWE416_Use_After_Free__realloc_stale_pointer_05",
+      "cwe": "CWE-416",
+      "class": [
+        "REF_INVALIDATED"
+      ],
+      "axis": "refcheck",
+      "intent": "keep a pointer into a buffer across a call that may reallocate it",
+      "title": "A pointer taken out of a buffer is used after the buffer was appended to",
+      "contracts": [
+        "@refcheck",
+        "@invalidates"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcheck\nstruct Buf { char *data; unsigned len, cap; };\n\n// @invalidates(b)\nvoid buf_append(struct Buf *b, const char *s);\n\nvoid CWE416_Use_After_Free__realloc_stale_pointer_05_bad(struct Buf *b)\n{\n    char *first = b->data;\n    buf_append(b, \"abc\");\n    /* POTENTIAL FLAW: `first` points where the buffer was before the append */\n    first[0] = 'x';\n}\n",
+        "why": "a pointer into the buffer is taken, the buffer is appended to (which may reallocate it, as `buf_append` declares), and the old pointer is used. kenbi follows the pointer under @refcheck: REF_INVALIDATED."
+      },
+      "B": {
+        "code": "// @refcheck\nstruct Buf { char *data; unsigned len, cap; };\n\n// @invalidates(b)\nvoid buf_append(struct Buf *b, const char *s);\n\nvoid CWE416_Use_After_Free__realloc_stale_pointer_05_bad(struct Buf *b, int refresh)\n{\n    char *first = b->data;\n    buf_append(b, \"abc\");\n    if (refresh) first = b->data;\n    /* POTENTIAL FLAW: when `refresh` is 0, `first` is the pointer from before the append */\n    first[0] = 'x';\n}\n",
+        "why": "a half-fix: the pointer is taken again after the append, but only on one path. On the other path the old pointer is still used, so it is STILL REF_INVALIDATED."
+      },
+      "C": {
+        "code": "// @refcheck\nstruct Buf { char *data; unsigned len, cap; };\n\n// @invalidates(b)\nvoid buf_append(struct Buf *b, const char *s);\n\nvoid CWE416_Use_After_Free__realloc_stale_pointer_05_fixed(struct Buf *b)\n{\n    buf_append(b, \"abc\");\n    char *first = b->data;   /* FIXED: taken after the append */\n    first[0] = 'x';\n}\n",
+        "why": "the pointer is taken after the call that may move the buffer, so it refers to where the buffer is now. GREEN."
+      }
+    },
+    {
+      "id": "CWE416_Use_After_Free__iterator_invalidated_06",
+      "cwe": "CWE-416",
+      "class": [
+        "REF_INVALIDATED"
+      ],
+      "axis": "refcheck",
+      "intent": "erase elements of a container while iterating over it (C++)",
+      "title": "An iterator is stepped after `erase` invalidated it",
+      "contracts": [
+        "@refcheck"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcheck\n#include <vector>\n\nvoid CWE416_Use_After_Free__iterator_invalidated_06_bad(std::vector<int> &v)\n{\n    /* POTENTIAL FLAW: `++it` runs on an iterator `erase` has invalidated */\n    for (auto it = v.begin(); it != v.end(); ++it) {\n        if (*it == 0) v.erase(it);\n    }\n}\n",
+        "why": "an element is erased through the iterator the loop then steps. `erase` invalidates that iterator, so `++it` uses one that no longer refers into the vector: REF_INVALIDATED."
+      },
+      "B": {
+        "code": "// @refcheck\n#include <vector>\n\nvoid CWE416_Use_After_Free__iterator_invalidated_06_bad(std::vector<int> &v)\n{\n    auto it = v.begin();\n    while (it != v.end()) {\n        if (*it == 0) {\n            auto next = it + 1;\n            v.erase(it);\n            /* POTENTIAL FLAW: `next` was taken before the erase and is invalid too */\n            it = next;\n        } else {\n            ++it;\n        }\n    }\n}\n",
+        "why": "a half-fix: the next position is saved before the erase and used afterwards. But erasing from a vector invalidates every iterator at or after the erased element, the saved one included, so it is STILL REF_INVALIDATED."
+      },
+      "C": {
+        "code": "// @refcheck\n#include <vector>\n\nvoid CWE416_Use_After_Free__iterator_invalidated_06_fixed(std::vector<int> &v)\n{\n    auto it = v.begin();\n    while (it != v.end()) {\n        if (*it == 0) it = v.erase(it);   /* FIXED: the iterator the erase hands back */\n        else ++it;\n    }\n}\n",
+        "why": "`erase` returns the iterator to the element after the erased one; continuing from that is the form the container supports. GREEN."
+      }
+    }
+  ],
+  "REF_UNPROVEN": [
+    {
+      "id": "CWE416_Use_After_Free__undeclared_callee_07",
+      "cwe": "CWE-416",
+      "class": [
+        "REF_UNPROVEN"
+      ],
+      "axis": "refcheck",
+      "intent": "keep a pointer into a buffer across calls that declare nothing about it",
+      "title": "A pointer into a buffer is held across a call that may or may not move the buffer",
+      "contracts": [
+        "@refcheck",
+        "@preserves"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcheck\nstruct Buf { char *data; unsigned len, cap; };\n\nvoid buf_normalise(struct Buf *b);\nvoid buf_trim(struct Buf *b);\n\nvoid CWE416_Use_After_Free__undeclared_callee_07_bad(struct Buf *b)\n{\n    char *first = b->data;\n    buf_normalise(b);\n    buf_trim(b);\n    /* POTENTIAL FLAW: either call may have moved the buffer */\n    first[0] = 'x';\n}\n",
+        "why": "a pointer into the buffer is held across two calls that are handed the buffer and say nothing about what they do to it. Nothing shows the storage stays in place: REF_UNPROVEN."
+      },
+      "B": {
+        "code": "// @refcheck\nstruct Buf { char *data; unsigned len, cap; };\n\n// @preserves(b)\nvoid buf_normalise(struct Buf *b);\nvoid buf_trim(struct Buf *b);\n\nvoid CWE416_Use_After_Free__undeclared_callee_07_bad(struct Buf *b)\n{\n    char *first = b->data;\n    buf_normalise(b);\n    buf_trim(b);\n    /* POTENTIAL FLAW: `buf_trim` declares nothing about the buffer */\n    first[0] = 'x';\n}\n",
+        "why": "a half-fix: one of the two calls is declared to leave the buffer in place. The other still declares nothing, so the pointer is STILL REF_UNPROVEN after it."
+      },
+      "C": {
+        "code": "// @refcheck\nstruct Buf { char *data; unsigned len, cap; };\n\n// @preserves(b)\nvoid buf_normalise(struct Buf *b);\n// @preserves(b)\nvoid buf_trim(struct Buf *b);\n\nvoid CWE416_Use_After_Free__undeclared_callee_07_fixed(struct Buf *b)\n{\n    char *first = b->data;\n    buf_normalise(b);\n    buf_trim(b);\n    first[0] = 'x';\n}\n",
+        "why": "every function handed the buffer while the pointer is held declares that it reallocates and releases nothing there (each declaration is checked against the function's body where that is defined). GREEN."
+      }
+    }
+  ],
+  "REF_NOT_PRESERVED": [
+    {
+      "id": "CWE416_Use_After_Free__preserves_not_kept_08",
+      "cwe": "CWE-416",
+      "class": [
+        "REF_NOT_PRESERVED"
+      ],
+      "axis": "refcheck",
+      "intent": "declare that a function leaves a buffer in place",
+      "title": "A function declared `@preserves` reallocates what it promised to leave alone",
+      "contracts": [
+        "@refcheck",
+        "@preserves",
+        "@invalidates"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcheck\n#include <stdlib.h>\nstruct Buf { char *data; unsigned len, cap; };\n\nvoid buf_reserve(struct Buf *b, unsigned n)\n{\n    if (n > b->cap) {\n        b->data = realloc(b->data, n);\n        b->cap = n;\n    }\n}\n\nvoid CWE416_Use_After_Free__preserves_not_kept_08_bad(struct Buf *b)\n{\n    char *first = b->data;\n    buf_reserve(b, 64);\n    /* POTENTIAL FLAW: `buf_reserve` may have moved the buffer */\n    first[0] = 'x';\n}\n",
+        "why": "`buf_reserve` reallocates the buffer and declares nothing, and its caller keeps a pointer across the call. The caller's use is REF_UNPROVEN: nothing says the buffer stays."
+      },
+      "B": {
+        "code": "// @refcheck\n#include <stdlib.h>\nstruct Buf { char *data; unsigned len, cap; };\n\n// @preserves(b)\nvoid buf_reserve(struct Buf *b, unsigned n)\n{\n    if (n > b->cap) {\n        /* POTENTIAL FLAW: the declaration above says this does not happen */\n        b->data = realloc(b->data, n);\n        b->cap = n;\n    }\n}\n\nvoid CWE416_Use_After_Free__preserves_not_kept_08_bad(struct Buf *b)\n{\n    char *first = b->data;\n    buf_reserve(b, 64);\n    first[0] = 'x';\n}\n",
+        "why": "a half-fix: `buf_reserve` is declared `@preserves` to make the caller pass. The declaration is checked against the body, which reallocates what it promised to leave in place: REF_NOT_PRESERVED. A declaration cannot make the pointer safe."
+      },
+      "C": {
+        "code": "// @refcheck\n#include <stdlib.h>\nstruct Buf { char *data; unsigned len, cap; };\n\n// @invalidates(b)\nvoid buf_reserve(struct Buf *b, unsigned n)\n{\n    if (n > b->cap) {\n        b->data = realloc(b->data, n);\n        b->cap = n;\n    }\n}\n\nvoid CWE416_Use_After_Free__preserves_not_kept_08_fixed(struct Buf *b)\n{\n    buf_reserve(b, 64);\n    char *first = b->data;   /* FIXED: taken after the call that may move the buffer */\n    first[0] = 'x';\n}\n",
+        "why": "`buf_reserve` declares what it does (`@invalidates`), and the caller takes its pointer after the call. GREEN."
+      }
+    }
+  ],
+  "REF_RETURN_UNDECLARED": [
+    {
+      "id": "CWE416_Use_After_Free__accessor_result_09",
+      "cwe": "CWE-416",
+      "class": [
+        "REF_RETURN_UNDECLARED"
+      ],
+      "axis": "refcheck",
+      "intent": "return a pointer into an object from an accessor",
+      "title": "An accessor hands out a pointer into its argument without declaring it",
+      "contracts": [
+        "@refcheck",
+        "@returns_into",
+        "@invalidates"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcheck\nstruct Buf { char *data; unsigned len, cap; };\n\nchar *buf_data(struct Buf *b)\n{\n    /* POTENTIAL FLAW: the result points into `b`, and nothing declares it */\n    return b->data;\n}\n",
+        "why": "an accessor returns a pointer into the buffer it is given without saying so. Its callers cannot be checked against a later reallocation unless they are told: REF_RETURN_UNDECLARED."
+      },
+      "B": {
+        "code": "// @refcheck\nstruct Buf { char *data; unsigned len, cap; };\n\n// @returns_into()\nchar *buf_data(struct Buf *b)\n{\n    /* POTENTIAL FLAW: the declaration says the result is not into `b` */\n    return b->data;\n}\n",
+        "why": "a half-fix: the accessor is declared, but as returning a pointer into none of its arguments. The body returns one into `b`, so it is STILL REF_RETURN_UNDECLARED."
+      },
+      "C": {
+        "code": "// @refcheck\nstruct Buf { char *data; unsigned len, cap; };\n\n// @returns_into(b)\nchar *buf_data(struct Buf *b)\n{\n    return b->data;   /* FIXED: declared above */\n}\n\n// @invalidates(b)\nvoid buf_append(struct Buf *b, const char *s);\n\nvoid CWE416_Use_After_Free__accessor_result_09_fixed(struct Buf *b)\n{\n    buf_append(b, \"abc\");\n    char *first = buf_data(b);\n    first[0] = 'x';\n}\n",
+        "why": "the accessor declares that its result points into `b`. A caller's copy of it is then followed like a pointer read out of the buffer, and here it is taken after the append. GREEN."
+      }
+    }
+  ],
+  "BORROW_ESCAPES": [
+    {
+      "id": "CWE416_Use_After_Free__borrow_stored_10",
+      "cwe": "CWE-416",
+      "class": [
+        "BORROW_ESCAPES"
+      ],
+      "axis": "ownership",
+      "intent": "pass a pointer to a function that only uses it during the call",
+      "title": "A function declared `@borrows` keeps the pointer in a field",
+      "contracts": [
+        "@mem",
+        "@borrows"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "#include <stdlib.h>\nstruct Label { const char *text; };\n\nvoid label_set(struct Label *l, const char *s)\n{\n    /* POTENTIAL FLAW: `s` is kept; the caller still owns and frees it */\n    l->text = s;\n}\n\nvoid CWE416_Use_After_Free__borrow_stored_10_bad(struct Label *l)\n{\n    /* @mem app::name { alloc: malloc, free: free, owner: name } */\n    char *name = malloc(8);\n    if (!name) return;\n    name[0] = 0;\n    label_set(l, name);\n    free(name);\n}\n",
+        "why": "`label_set` keeps the pointer it is given in a field, and its caller frees the string afterwards. With no contract on `label_set`, kenbi cannot tell what it does with the owned pointer: UNCONTRACTED_ESCAPE."
+      },
+      "B": {
+        "code": "#include <stdlib.h>\nstruct Label { const char *text; };\n\n// @borrows(s)\nvoid label_set(struct Label *l, const char *s)\n{\n    /* POTENTIAL FLAW: a borrowed pointer stored where it outlives the call */\n    l->text = s;\n}\n\nvoid CWE416_Use_After_Free__borrow_stored_10_bad(struct Label *l)\n{\n    /* @mem app::name { alloc: malloc, free: free, owner: name } */\n    char *name = malloc(8);\n    if (!name) return;\n    name[0] = 0;\n    label_set(l, name);\n    free(name);\n}\n",
+        "why": "a half-fix: `label_set` is declared `@borrows` so that the call passes. A borrowed pointer is given back when the call returns, and the body stores it in a field, so the declaration does not hold: BORROW_ESCAPES."
+      },
+      "C": {
+        "code": "#include <stdlib.h>\n#include <string.h>\nstruct Label { char text[16]; };\n\n// @borrows(s)\nvoid label_set(struct Label *l, const char *s)\n{\n    strncpy(l->text, s, sizeof l->text - 1);   /* FIXED: the contents are copied */\n    l->text[sizeof l->text - 1] = 0;\n}\n\nvoid CWE416_Use_After_Free__borrow_stored_10_fixed(struct Label *l)\n{\n    /* @mem app::name { alloc: malloc, free: free, owner: name } */\n    char *name = malloc(8);\n    if (!name) return;\n    name[0] = 0;\n    label_set(l, name);\n    free(name);\n}\n",
+        "why": "`label_set` only reads the string (it copies the characters into storage the label already has), so `@borrows` is true of it and the caller's free is safe. GREEN."
+      }
+    }
+  ],
+  "UNIQUE_ALIASED": [
+    {
+      "id": "CWE475_Undefined_Behavior_for_Input_to_API__overlap_01",
+      "cwe": "CWE-475",
+      "class": [
+        "UNIQUE_ALIASED"
+      ],
+      "axis": "ownership",
+      "intent": "call a function whose source and destination must not overlap",
+      "title": "An `@unique` destination is passed together with a pointer into the same block",
+      "contracts": [
+        "@mem",
+        "@unique",
+        "@borrows"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "#include <stdlib.h>\n// @unique(dst)\n// @borrows(dst)\nvoid copy_bytes(char *dst, const char *src, unsigned n);\n\nvoid CWE475_Undefined_Behavior_for_Input_to_API__overlap_01_bad(void)\n{\n    /* @mem app::row { alloc: malloc, free: free, owner: row } */\n    char *row = malloc(16);\n    if (!row) return;\n    /* POTENTIAL FLAW: both arguments point into `row` */\n    copy_bytes(row, row + 4, 8);\n    free(row);\n}\n",
+        "why": "`copy_bytes` declares its destination exclusive (`@unique`): its result is wrong when source and destination overlap. The call passes a block and a pointer into the same block: UNIQUE_ALIASED."
+      },
+      "B": {
+        "code": "#include <stdlib.h>\n// @unique(dst)\n// @borrows(dst)\nvoid copy_bytes(char *dst, const char *src, unsigned n);\n\nvoid CWE475_Undefined_Behavior_for_Input_to_API__overlap_01_bad(void)\n{\n    /* @mem app::row { alloc: malloc, free: free, owner: row } */\n    char *row = malloc(16);\n    if (!row) return;\n    char *tail = row + 4;\n    /* POTENTIAL FLAW: `tail` is another name for part of `row` */\n    copy_bytes(row, tail, 8);\n    free(row);\n}\n",
+        "why": "a half-fix: the source is given a name of its own. It is still a pointer into the same block, and kenbi follows where it came from, so it is STILL UNIQUE_ALIASED."
+      },
+      "C": {
+        "code": "#include <stdlib.h>\n// @unique(dst)\n// @borrows(dst)\nvoid copy_bytes(char *dst, const char *src, unsigned n);\n\nvoid CWE475_Undefined_Behavior_for_Input_to_API__overlap_01_fixed(void)\n{\n    /* @mem app::row { alloc: malloc, free: free, owner: row } */\n    char *row = malloc(16);\n    if (!row) return;\n    char tmp[8];\n    copy_bytes(tmp, row + 4, 8);   /* FIXED: out to a separate object ... */\n    copy_bytes(row, tmp, 8);       /* ... and back from it */\n    free(row);\n}\n",
+        "why": "the bytes are copied out to a separate local first, so the exclusive destination and the source are different objects. GREEN."
+      }
+    }
   ]
 };

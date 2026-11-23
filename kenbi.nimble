@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.1.3"
+version       = "0.2.0"
 author        = "puffball1567"
 description   = "Annotation-driven static memory-safety checker for C/C++"
 license       = "Apache-2.0"
@@ -25,6 +25,7 @@ task testsafety, "build and test configured effect and protocol verification":
   exec "python3 tests/run_tests_protocols.py"
   exec "python3 tests/run_tests_borrows.py"
   exec "python3 tests/run_tests_results.py"
+  exec "python3 tests/run_tests_baseline.py"
   exec "python3 tests/run_tests_contexts.py"
   exec "python3 tests/run_tests_boundaries.py"
   exec "python3 tests/run_tests_boundary_results.py"
@@ -102,6 +103,7 @@ task testall, "run every test suite":
   exec "python3 tests/run_tests_protocols.py"
   exec "python3 tests/run_tests_borrows.py"
   exec "python3 tests/run_tests_results.py"
+  exec "python3 tests/run_tests_baseline.py"
   exec "python3 tests/run_tests_contexts.py"
   exec "python3 tests/run_tests_boundaries.py"
   exec "python3 tests/run_tests_boundary_results.py"
