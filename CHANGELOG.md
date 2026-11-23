@@ -5,7 +5,7 @@ All notable changes to kenbi are recorded here. The format follows
 [Semantic Versioning](https://semver.org/); before 1.0 the interfaces, the annotation vocabulary
 and the JSON output may change in any minor version.
 
-## [Unreleased]
+## [0.2.0] - 2026-11-23
 
 ### Added
 
@@ -34,18 +34,15 @@ and the JSON output may change in any minor version.
   under `@refcheck` like one read out of the object. A function that returns such a pointer
   without declaring it is `REF_RETURN_UNDECLARED`; the result of a function that declares
   nothing is taken to point into what any of its pointer arguments may hold.
-
 - `--format=sarif` writes the findings as a SARIF 2.1.0 log for code-scanning services. Each
   result carries a fingerprint that does not depend on its line.
 - `--write-baseline=PATH` records the findings of a run, and `--baseline=PATH` reports only the
   findings that are not in that record; only those decide the exit code. Findings are matched
   by file, code and message, so they are followed as code moves. With a baseline, JSON findings
   carry `baseline` (`new` / `known`) and SARIF results `baselineState`.
-
 - `explain_finding` (MCP) has worked examples for the new findings: `UNIQUE_ALIASED`,
   `BORROW_ESCAPES`, `REF_INVALIDATED` (C and C++), `REF_UNPROVEN`, `REF_NOT_PRESERVED` and
   `REF_RETURN_UNDECLARED`. The three-state corpus they are generated from has 61 entries.
-
 - Every opt-in marker takes `file` — `// @kenbi file`, `// @spatial file`, `// @refcheck file` —
   to cover the whole file wherever it is written. Without it a marker still covers the function
   just below it, or the file when no function follows within a few lines.
@@ -60,7 +57,6 @@ and the JSON output may change in any minor version.
 - Bounds: a constant index or length, `x % K` and `x & K` are checked against a fixed-size
   buffer (`tab[8]` on an 8-element array, `memcpy(dst, src, 16)` into 8 bytes), and `*(p + i)`
   is checked as `p[i]` (#7).
-
 - Bounds: a constant index or length into a buffer of variable size (`buf[0]` on
   `malloc(n * …)`, `memcpy(dst, src, 4)` into a `@counted_by` buffer) is reported unless the
   size is shown large enough, by a check on the path (`if (n >= 1)`, `if (n == 0) return;`) or
@@ -69,7 +65,6 @@ and the JSON output may change in any minor version.
   two parameters such as `@invariant(next <= num)` — is verified at each call under `@spatial`:
   the arguments must be shown to satisfy it, else the call is `INVARIANT_NOT_MAINTAINED`.
   Previously it was assumed of every caller.
-
 - Agent guidance (`integrations/agent/SKILL.md`): adds the opt-in axes (`@spatial`,
   `@initcheck`, `@typecheck`, `@threadsafe`, non-local jumps), the procedure for the kenbi MCP
   tools, a per-code table of what resolves each finding, and the changes that do not resolve
@@ -188,7 +183,7 @@ Also: `--project` closure over a `compile_commands.json`, `--emit-contracts`, `k
 which checks ran on which functions, and what a result without findings rests on without
 having checked it.
 
-[Unreleased]: https://github.com/puffball1567/kenbi/compare/v0.1.3...HEAD
+[0.2.0]: https://github.com/puffball1567/kenbi/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/puffball1567/kenbi/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/puffball1567/kenbi/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/puffball1567/kenbi/compare/v0.1.0...v0.1.1
