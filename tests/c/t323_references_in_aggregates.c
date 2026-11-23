@@ -6,7 +6,8 @@
  * an array of row pointers. Under `@refcheck` each such member is followed like a variable of
  * its own — assigning it again replaces what it held, reading another member of the struct is
  * not a use of it, and using the struct as a whole is a use of every reference in it. The
- * elements of an array are followed together.
+ * elements of an array are followed one by one where the index is a constant; an element
+ * reached with an index that is not may be any of them.
  */
 
 struct Buf { char *data; unsigned len, cap; };
@@ -49,6 +50,43 @@ void row_pointers(struct Buf *a, struct Buf *b) {
   rows[1] = b->data;
   buf_append(b, "abc");
   rows[1][0] = 'x';                               //EXPECT REF_INVALIDATED
+}
+
+// an index that is not a constant may name the element that is invalid
+void row_by_variable(struct Buf *a, struct Buf *b, int i) {
+  char *rows[2];
+  rows[0] = a->data;
+  rows[1] = b->data;
+  buf_append(b, "abc");
+  rows[i][0] = 'x';                               //EXPECT REF_INVALIDATED
+}
+
+// ... and a store through one may have put the pointer in any element
+void row_stored_by_variable(struct Buf *a, struct Buf *b, int i) {
+  char *rows[2];
+  rows[0] = a->data;
+  rows[1] = a->data;
+  rows[i] = b->data;
+  buf_append(b, "abc");
+  rows[0][0] = 'x';                               //EXPECT REF_INVALIDATED
+}
+
+// the other element still points into a buffer nothing changed
+void other_row(struct Buf *a, struct Buf *b) {
+  char *rows[2];
+  rows[0] = a->data;
+  rows[1] = b->data;
+  buf_append(b, "abc");
+  rows[0][0] = 'x';
+}
+
+// the element is assigned again after the call
+void row_retaken(struct Buf *b) {
+  char *rows[2];
+  rows[1] = b->data;
+  buf_append(b, "abc");
+  rows[1] = b->data;
+  rows[1][0] = 'x';
 }
 
 // only the length is read after the call

@@ -109,7 +109,10 @@ Rules of thumb:
 Nothing is checked until the code opts in. `// @kenbi` above a function (or at
 file level, or on a block) adopts it for the ownership checks; each further
 axis has its own marker and is off without it. A result always lists which
-checks ran on which functions — read that list before reporting.
+checks ran on which functions — read that list before reporting. A marker
+covers the function just below it when one follows within a few lines, and the
+whole file only otherwise; write `// @kenbi file` (or `@spatial file`,
+`@refcheck file`, …) when the whole file is meant.
 
 **Bounds — `// @spatial`.** An index or a length that comes from outside must
 have a bound check on the path to the access.

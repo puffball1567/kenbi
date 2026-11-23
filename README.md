@@ -159,6 +159,10 @@ Each check is opted into separately:
 | locks | `@threadsafe` | unguarded access, unbalanced locks, declared lock order (AB-BA deadlock) |
 | low-level properties | `--safety=project.json` | forbidden effects in a call closure, resource state machines, stack and call depth, memory regions, MMIO and more — see [Configured low-level verification](#configured-low-level-verification---safety) |
 
+A marker written above a function covers that function; one with no function within a few lines
+below it covers the whole file. To cover the whole file wherever the marker is written, add
+`file`: `// @kenbi file`, `// @spatial file`, `// @refcheck file`.
+
 A libclang front-end lowers real C / C++ (reading `compile_commands.json`) into a typestate
 engine. Loops are analysed to a bounded fixpoint, forward `goto` cleanup ladders,
 `break` / `continue` and `try` / `catch` are modelled, and whatever kenbi cannot model is
@@ -531,7 +535,8 @@ by a check on the path (`if (n >= 1)`) or by a declared `@invariant(n >= 1)`.
   after the call.
 - What is followed: pointer, reference and iterator variables; views (`string_view`, `span`),
   also when built from their parts; a pointer kept in a member of a local struct or in a local
-  array (each member on its own, the elements of an array together); and closures — a lambda
+  array (each member and each element on its own; an element reached with an index that is not a
+  constant may be any of them); and closures — a lambda
   holds a copy of what it captures by value, reads what it captures by reference when its body
   runs, and its body is read wherever the closure is used.
 - `// @invalidates(param)` / `// @preserves(param)` above a function declare which it is (`this`
@@ -912,7 +917,7 @@ parsing C/C++ is a replaceable part.
 ## Tests
 
 `tests/*.mc` drive the engine directly (17 cases). `tests/c/*.c` and `tests/cpp/*.cpp` carry
-those scenarios plus the annotation-specific checks in real C and C++ (369 cases); the runner
+those scenarios plus the annotation-specific checks in real C and C++ (370 cases); the runner
 lowers each through libclang and asserts the produced diagnostics — **including their source
 line** — against the `//EXPECT CODE` markers in each file (on the line itself, or
 `//EXPECT CODE@LINE`). A wrong line or a missing/extra

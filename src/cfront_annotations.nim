@@ -258,6 +258,11 @@ proc scanCommentTokens(ctx: var Ctx, toks: ptr CXToken, n: cuint) =
       let op = body.find('('); let cp = body.find(')')
       if op >= 0 and cp > op: body[op+1 ..< cp].strip else: ""
     let rest = body[words[0].len .. ^1].strip  # freeform text after the keyword token
+    # `// @spatial file`: the marker covers the whole file wherever it is written. Without the
+    # word it binds to the function just below it, when there is one within a few lines, and
+    # to the file only otherwise — so a marker at the top of a short file can mean either.
+    # Recorded far above any line so that nothing is "just below" it.
+    let markLine = (if words.len >= 2 and words[1] == "file": low(int) div 2 else: line)
     # plugin annotations (annotations/*.nim) self-register and handle their keyword;
     # only the engine-core directives below remain inline.
     if runCollector(ctx, kw, AnnArgs(kw: kw, body: body, pa: pa, rest: rest, file: fileOf(loc), line: line)):
@@ -272,27 +277,27 @@ proc scanCommentTokens(ctx: var Ctx, toks: ptr CXToken, n: cuint) =
     of "@kenbi":
       # opt-in marker: this unit is under kenbi discipline. Resolved later to the
       # function below it (function-level) or, if none is near, the whole file.
-      ctx.kenbiSites.add (fileOf(loc), line)
+      ctx.kenbiSites.add (fileOf(loc), markLine)
       ctx.prog.hasKenbiMarker = true
     of "@spatial":
       # opt-in marker for the SEPARATE bounds axis: this unit is bounds-checked
       # (an unvalidated value reaching an index / size sink is UNVALIDATED_INDEX).
       # Independent of @kenbi so temporal-only files are never bounds-checked.
-      ctx.spatialSites.add (fileOf(loc), line)
+      ctx.spatialSites.add (fileOf(loc), markLine)
     of "@threadsafe":
       # opt-in marker for the SEPARATE lock-discipline axis: this unit is lock-checked
       # (a `@guarded_by(field: lock)` access without the lock held is UNGUARDED_ACCESS).
       # Independent of the other axes so non-concurrent files are never lock-checked.
-      ctx.concurrentSites.add (fileOf(loc), line)
+      ctx.concurrentSites.add (fileOf(loc), markLine)
     of "@initcheck":
       # opt-in marker for the SEPARATE definite-assignment axis: a read of a local that is
       # not definitely assigned on every path is USE_OF_UNINITIALIZED. Independent opt-in so
       # existing files are never init-checked.
-      ctx.initSites.add (fileOf(loc), line)
+      ctx.initSites.add (fileOf(loc), markLine)
     of "@typecheck":
       # opt-in marker for the SEPARATE tagged-union type-confusion axis: a `@variant` member
       # accessed without its discriminant proven is TYPE_CONFUSION. Independent opt-in.
-      ctx.typecheckSites.add (fileOf(loc), line)
+      ctx.typecheckSites.add (fileOf(loc), markLine)
     of "@variant":
       # declare a tagged-union variant: `@variant(member : tag == value)` — `member` is the
       # active union member only when the discriminant `tag == value`.
@@ -316,7 +321,7 @@ proc scanCommentTokens(ctx: var Ctx, toks: ptr CXToken, n: cuint) =
       # opt-in marker for the SEPARATE reference-validity axis: a pointer, reference or iterator
       # into storage another object manages, used after that object may have reallocated or
       # released it, is REF_INVALIDATED / REF_UNPROVEN. Independent opt-in.
-      ctx.refSites.add (fileOf(loc), line)
+      ctx.refSites.add (fileOf(loc), markLine)
     of "@invalidates":
       # the function below may reallocate or release storage reached through these parameters
       # (`@invalidates(buf)`): pointers taken into it before a call are invalid after it.

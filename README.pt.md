@@ -135,6 +135,10 @@ Cada verificação é ativada separadamente:
 | locks | `@threadsafe` | acesso sem guarda, locks desbalanceados, ordem de locks declarada (deadlock AB-BA) |
 | propriedades de baixo nível | `--safety=project.json` | efeitos proibidos em um fecho de chamadas, máquinas de estados de recursos, profundidade de pilha e de chamadas, regiões de memória, MMIO e mais — veja [Verificação de baixo nível configurada](#verificação-de-baixo-nível-configurada---safety) |
 
+Um marcador escrito acima de uma função cobre essa função; um sem nenhuma função nas poucas linhas
+seguintes cobre o arquivo inteiro. Para cobrir o arquivo inteiro onde quer que o marcador esteja
+escrito, acrescente `file`: `// @kenbi file`, `// @spatial file`, `// @refcheck file`.
+
 Um front-end libclang rebaixa ("lowering") C / C++ real (lendo `compile_commands.json`) para um
 motor de typestate. Os laços são analisados até um ponto fixo limitado; escadas de limpeza com
 `goto` para frente, `break` / `continue` e `try` / `catch` são modelados, e tudo o que o kenbi
@@ -517,8 +521,8 @@ verificação no caminho (`if (n >= 1)`) ou por um `@invariant(n >= 1)` declarad
   referência modificável ao objeto e nada declara. Obtenha o ponteiro de novo após a chamada.
 - O que é seguido: variáveis ponteiro, referência e iterador; visões (`string_view`, `span`),
   também quando construídas a partir de suas partes; um ponteiro guardado em um membro de uma
-  estrutura local ou em um array local (cada membro separadamente, os elementos de um array em
-  conjunto); e closures — uma lambda guarda uma cópia do que captura por valor, lê o que captura
+  estrutura local ou em um array local (cada membro e cada elemento separadamente; um elemento alcançado com um
+  índice não constante pode ser qualquer um deles); e closures — uma lambda guarda uma cópia do que captura por valor, lê o que captura
   por referência quando seu corpo executa, e seu corpo é lido onde quer que a closure seja usada.
 - `// @invalidates(param)` / `// @preserves(param)` acima de uma função declaram qual é o caso
   (`this` para um método, uma variável global pelo nome; `invalidates:` / `preserves:` em um bloco
@@ -914,7 +918,7 @@ front-end, de modo que analisar C/C++ é uma peça substituível.
 ## Testes
 
 `tests/*.mc` acionam o motor diretamente (17 casos). `tests/c/*.c` e `tests/cpp/*.cpp` carregam
-esses cenários mais as verificações específicas de anotações em C e C++ reais (369 casos); o
+esses cenários mais as verificações específicas de anotações em C e C++ reais (370 casos); o
 runner rebaixa cada um via libclang e verifica os diagnósticos produzidos — **incluindo a sua
 linha de origem** — contra os marcadores `//EXPECT CODE` em cada arquivo (na própria linha, ou
 `//EXPECT CODE@LINE`). Uma linha errada ou um diagnóstico faltante / excedente faz a suíte

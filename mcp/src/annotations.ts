@@ -204,6 +204,11 @@ the declared intent and reports where they disagree.
 - \`// @kenbi\` above a function, or at file level — the unit is under kenbi discipline:
   an undeclared heap resource there is an error, not just a note, and the unit counts in
   the coverage report. A file with no marker is checked as a whole (single-file mode).
+- Where a marker reaches: \`@kenbi\` and every axis marker (\`@spatial\`, \`@threadsafe\`,
+  \`@initcheck\`, \`@typecheck\`, \`@refcheck\`) covers the function just below it when there is
+  one within a few lines, and the whole file only when there is none. To cover the whole file
+  wherever the marker is written, add \`file\`: \`// @refcheck file\`. Prefer that form for a
+  file-wide opt-in; the scope reported with each result says what was actually checked.
 
 ## Your project's own allocator family (declare once, in the header everyone includes)
 - \`// @allocator <scope::name> { alloc: f g h, realloc: r, free: z }\` — nearly every C
@@ -355,8 +360,9 @@ the declared intent and reports where they disagree.
   into what it goes over. Fix: take the pointer again after the call.
 - What is followed: pointer, reference and iterator variables; views (\`string_view\`,
   \`span\`), also when built from their parts (\`string_view(s.data(), n)\`); a pointer kept in a
-  member of a local struct (\`slice.ptr = buf->data\`) or in a local array — each member on its
-  own, the elements of an array together; and closures: a lambda holds a copy of what it
+  member of a local struct (\`slice.ptr = buf->data\`) or in a local array — each member and
+  each element on its own, an element reached with a non-constant index being any of them;
+  and closures: a lambda holds a copy of what it
   captures by value, reads what it captures by reference when its body runs, and its body is
   read wherever the closure is used (called, or handed to something that may call it).
 - \`// @invalidates(<param>)\` / \`// @preserves(<param>)\` above a function declare which it

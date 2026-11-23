@@ -135,6 +135,10 @@ Jede Prüfung wird einzeln aktiviert:
 | Locks | `@threadsafe` | ungeschützter Zugriff, unausgeglichene Locks, deklarierte Lock-Reihenfolge (AB-BA-Deadlock) |
 | Low-Level-Eigenschaften | `--safety=project.json` | verbotene Effekte in einer Aufrufhülle, Zustandsautomaten für Ressourcen, Stack- und Aufruftiefe, Speicherregionen, MMIO und mehr – siehe [Konfigurierte Low-Level-Verifikation](#konfigurierte-low-level-verifikation---safety) |
 
+Ein Marker über einer Funktion gilt für diese Funktion; einer, unter dem innerhalb weniger Zeilen
+keine Funktion folgt, gilt für die ganze Datei. Um die ganze Datei abzudecken, egal wo der Marker
+steht, `file` anhängen: `// @kenbi file`, `// @spatial file`, `// @refcheck file`.
+
 Ein libclang-Frontend überführt echtes C / C++ (liest `compile_commands.json`) in eine
 Typestate-Engine. Schleifen werden bis zu einem beschränkten Fixpunkt analysiert,
 vorwärtsgerichtete `goto`-Aufräumleitern, `break` / `continue` und `try` / `catch` werden
@@ -534,7 +538,8 @@ durch eine Prüfung auf dem Pfad (`if (n >= 1)`) oder ein deklariertes `@invaria
   Aufruf neu holen.
 - Was verfolgt wird: Zeiger-, Referenz- und Iteratorvariablen; Sichten (`string_view`, `span`),
   auch wenn sie aus ihren Teilen gebaut werden; ein Zeiger in einem Member einer lokalen Struktur
-  oder in einem lokalen Array (jeder Member für sich, die Elemente eines Arrays gemeinsam); und
+  oder in einem lokalen Array (jeder Member und jedes Element für sich; ein Element, das über einen
+  nicht konstanten Index erreicht wird, kann jedes davon sein); und
   Closures — ein Lambda hält eine Kopie dessen, was es per Wert erfasst, liest das per Referenz
   Erfasste, wenn sein Rumpf läuft, und sein Rumpf wird überall dort gelesen, wo die Closure
   verwendet wird.
@@ -946,7 +951,7 @@ IR, sodass das Parsen von C/C++ ein austauschbarer Teil ist.
 ## Tests
 
 `tests/*.mc` treiben die Engine direkt an (17 Fälle). `tests/c/*.c` und `tests/cpp/*.cpp` tragen
-diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (369 Fälle); der
+diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (370 Fälle); der
 Runner überführt jedes über libclang und prüft die erzeugten Diagnosen — **einschließlich ihrer
 Quellzeile** — gegen die `//EXPECT CODE`-Marker in jeder Datei (in der Zeile selbst oder
 `//EXPECT CODE@LINE`). Eine falsche Zeile oder eine fehlende / überzählige

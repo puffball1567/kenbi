@@ -134,6 +134,9 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 | 锁 | `@threadsafe` | 未受保护的访问、不平衡的加锁、声明的加锁顺序（AB-BA 死锁） |
 | 底层性质 | `--safety=project.json` | 调用闭包中被禁止的效应、资源状态机、栈与调用深度、内存区域、MMIO 等——见[配置驱动的底层验证](#配置驱动的底层验证--safety) |
 
+写在函数上方的标记作用于该函数；其下数行内没有函数的标记作用于整个文件。若要无论写在何处都覆盖整个
+文件，请加上 `file`：`// @kenbi file`、`// @spatial file`、`// @refcheck file`。
+
 libclang 前端将真实的 C / C++（读取 `compile_commands.json`）下降（lowering）到 typestate
 引擎。循环被分析到有界不动点；前向 `goto` 清理阶梯、`break` / `continue` 以及 `try` / `catch`
 都被建模；kenbi 无法建模的内容会被报告，而不是被跳过。输出为文本或 `--format=json`。
@@ -477,7 +480,7 @@ kenbi 能读懂的索引或长度是：变量加减一个常量（`buf[i]`、`bu
   自身的方法）为 `REF_INVALIDATED`；若该调用得到指向该对象的可写指针或引用却未作任何声明，为
   `REF_UNPROVEN`。请在调用之后重新获取指针。
 - 被跟踪的对象：指针、引用和迭代器变量；视图（`string_view`、`span`，包括由各部分构造而成的）；
-  保存在局部结构体成员或局部数组中的指针（各成员分别跟踪，数组元素一并跟踪）；以及闭包——lambda
+  保存在局部结构体成员或局部数组中的指针（各成员和各元素分别跟踪；用非常量下标访问的元素可能是其中任何一个）；以及闭包——lambda
   持有按值捕获内容的副本，按引用捕获的内容在其函数体运行时读取，其函数体在闭包被使用的每一处被读取。
 - 函数上方的 `// @invalidates(param)` / `// @preserves(param)` 声明属于哪一种（方法用 `this`，
   全局变量用其名称；库函数用 `@contract` 块中的 `invalidates:` / `preserves:`）。`@preserves` 的
@@ -833,7 +836,7 @@ kenbi 无法建模的内容会被拒绝而不是被跳过：`UNSTRUCTURED_GOTO`�
 ## 测试
 
 `tests/*.mc` 直接驱动引擎（17 个用例）。`tests/c/*.c` 与 `tests/cpp/*.cpp` 以真实
-C 和 C++ 承载这些场景外加注解专属的检查（369 个用例）；运行器通过 libclang 下降每个
+C 和 C++ 承载这些场景外加注解专属的检查（370 个用例）；运行器通过 libclang 下降每个
 文件，并将产生的诊断 —— **连同其源代码行号** —— 与各文件中的 `//EXPECT CODE` 标记进行
 核对（标记位于该行本身，或写作 `//EXPECT CODE@LINE`）。行号错误，或诊断缺失 / 多余，都会
 使测试集失败。`tests/run_tests_project.nim` 检查项目范围的覆盖率结果，`tests/run_tests_*.py`

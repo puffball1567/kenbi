@@ -27,7 +27,7 @@ and the JSON output may change in any minor version.
   known. Findings: `REF_INVALIDATED`, `REF_UNPROVEN`, `REF_NOT_PRESERVED`. The scope reported
   with each result gains a `references` entry. Followed: pointer, reference and iterator
   variables, views (also built from their parts), pointers kept in members of local structs
-  and in local arrays, and closures (what a lambda captures, and what its body does where the
+  and in elements of local arrays, and closures (what a lambda captures, and what its body does where the
   closure is used).
 - `// @returns_into(param)` (also a `@contract` key) declares that a function's result points
   into storage reached through a parameter, so a pointer obtained from an accessor is followed
@@ -45,6 +45,10 @@ and the JSON output may change in any minor version.
 - `explain_finding` (MCP) has worked examples for the new findings: `UNIQUE_ALIASED`,
   `BORROW_ESCAPES`, `REF_INVALIDATED` (C and C++), `REF_UNPROVEN`, `REF_NOT_PRESERVED` and
   `REF_RETURN_UNDECLARED`. The three-state corpus they are generated from has 61 entries.
+
+- Every opt-in marker takes `file` — `// @kenbi file`, `// @spatial file`, `// @refcheck file` —
+  to cover the whole file wherever it is written. Without it a marker still covers the function
+  just below it, or the file when no function follows within a few lines.
 
 ### Changed
 

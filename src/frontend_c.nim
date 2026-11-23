@@ -2641,37 +2641,53 @@ proc refCallEffects(ctx: Ctx, call: CXCursor, outp: var seq[Stmt]) =
 proc refAggSlot(ctx: Ctx, e: CXCursor): tuple[key, root: string, steps: seq[string],
                                                element: bool] =
   ## The member of a local struct, or the element of a local array, that the lvalue `e` names
-  ## — storage inside the local itself, not something reached through a pointer. `element`:
-  ## an array is indexed on the way, so the key stands for every element.
-  let p = ctx.refLvalue(e)
-  if not p.ok or p.global or p.root == "this" or "*" in p.steps or ".#" in p.steps: return
-  if p.root notin ctx.uqLocals or p.root in ctx.uqParams: return
+  ## — storage inside the local itself, not something reached through a pointer. Steps are
+  ## `.name` for a member and `[k]` for an element, `[?]` when the index is not a constant;
+  ## `element`: an index is not known, so the slot may be any element.
   var u = unwrap(e)
+  var steps: seq[string]
   for _ in 0 ..< 16:
     let k = clang_getCursorKind(u)
-    if k == ckArraySubscriptExpr: result.element = true
-    if k notin [ckMemberRefExpr, ckArraySubscriptExpr]: break
     let kids = collectChildren(u)
-    if kids.len == 0: break
-    u = unwrap(kids[0])
-  if p.steps.len == 0 and not result.element: return ("", "", @[], false)   # the variable itself
-  result.root = p.root
-  result.steps = p.steps
-  result.key = p.root & "\x1d" & p.steps.join("/")
+    if k == ckMemberRefExpr:
+      if clang_getCursorKind(clang_getCursorReferenced(u)) != ckFieldDecl or kids.len == 0: return
+      let toks = ctx.cursorTokens(u)
+      if toks.len >= 2 and toks[^2] == "->": return
+      steps.insert("." & spelling(u), 0)
+      u = unwrap(kids[0])
+    elif k == ckArraySubscriptExpr:
+      if kids.len != 2 or not isArrayType(unwrap(kids[0])): return
+      let idx = constIntValue(kids[1])
+      steps.insert((if idx.known: "[" & $idx.value & "]" else: "[?]"), 0)
+      u = unwrap(kids[0])
+    elif k == ckDeclRefExpr:
+      let key = referencedUsr(u)
+      if steps.len == 0 or clang_getCursorKind(clang_getCursorReferenced(u)) != ckVarDecl or
+         key notin ctx.uqLocals or key in ctx.uqParams: return
+      return (key & "\x1d" & steps.join("/"), key, steps, "[?]" in steps)
+    else: return
+
+proc refSlotsMeet(a, b: seq[string]): bool =
+  ## Can two slots of one local be the same storage, or one contain the other?
+  for i in 0 ..< min(a.len, b.len):
+    if a[i] == b[i]: continue
+    if a[i].startsWith("[") and b[i].startsWith("[") and (a[i] == "[?]" or b[i] == "[?]"): continue
+    return false
+  true
 
 proc refEvents(ctx: Ctx, n: CXCursor, outp: var seq[Stmt])
+proc refBodyStmts(ctx: Ctx, c: CXCursor, outp: var seq[Stmt])
 
 var refLambdaDepth {.threadvar.}: int
 
 proc refLambdaBody(ctx: Ctx, lambda: CXCursor, outp: var seq[Stmt]) =
   ## The events of a lambda's body, at a place where it may run: where it is called, or handed
-  ## to something that may call it. The body is read as one sequence — which of its branches
-  ## run is not followed — so what any path through it invalidates counts.
+  ## to something that may call it.
   if refLambdaDepth >= 2: return                  # a closure that refers to itself
   let kids = collectChildren(lambda)
   if kids.len == 0 or clang_getCursorKind(kids[^1]) != ckCompoundStmt: return
   inc refLambdaDepth
-  ctx.refEvents(kids[^1], outp)
+  ctx.refBodyStmts(kids[^1], outp)
   dec refLambdaDepth
 
 proc refLambdaCaptures(ctx: Ctx, lambda: CXCursor): seq[string] =
@@ -2739,8 +2755,7 @@ proc refEvents(ctx: Ctx, n: CXCursor, outp: var seq[Stmt]) =
     if slot.key.len > 0 and slot.root in ctx.refAggFields:
       let disp = ctx.cursorTokens(n).join("")
       for f in ctx.refAggFields[slot.root]:
-        let m = min(f.steps.len, slot.steps.len)
-        if f.steps[0 ..< m] == slot.steps[0 ..< m]:
+        if refSlotsMeet(f.steps, slot.steps):
           outp.add emit(ikRefUse, line, a = disp, aKey = f.key)
       if k == ckArraySubscriptExpr and kids.len == 2: ctx.refEvents(kids[1], outp)
       return
@@ -2801,6 +2816,50 @@ proc refRangeBody(ctx: Ctx, body: CXCursor, lowered: seq[Stmt]): seq[Stmt] =
     result.add emit(ikRefDerive, rb.line, a = rb.varDisp, aKey = rb.varKey, bKey = rb.source)
   result.add lowered
   result.add emit(ikRefUse, rb.line, a = rb.disp, aKey = rb.synth, off = 1)
+
+proc refBodyStmts(ctx: Ctx, c: CXCursor, outp: var seq[Stmt]) =
+  ## The reference-validity events of statement `c` and everything nested in it, with its
+  ## `if`s and loops kept as branches and loops — for a lambda's body, which is read from the
+  ## source at each place the closure is used. A `return` ends the lambda, not the function
+  ## around it, so it transfers nothing here; what follows it is read as reachable. A `switch`
+  ## or a `try` is read as one sequence.
+  let k = clang_getCursorKind(c)
+  let kids = collectChildren(c)
+  case k
+  of ckCompoundStmt:
+    for ch in kids: ctx.refBodyStmts(ch, outp)
+  of ckIfStmt:
+    var i = 0
+    if kids.len >= 3 and clang_getCursorKind(kids[0]) in [ckDeclStmt, ckVarDecl]:
+      ctx.refEvents(kids[0], outp)
+      i = 1
+    if i < kids.len: ctx.refEvents(kids[i], outp)
+    var s = Stmt(line: startLine(c), kind: stIf)
+    if i + 1 < kids.len: ctx.refBodyStmts(kids[i + 1], s.thenBody)
+    if i + 2 < kids.len: ctx.refBodyStmts(kids[i + 2], s.elseBody)
+    outp.add s
+  of ckForStmt, ckWhileStmt, ckDoStmt:
+    # the header runs on every iteration (its initialiser too: reading it again changes nothing)
+    var s = Stmt(line: startLine(c), kind: stLoop)
+    for i in 0 ..< kids.len - 1: ctx.refEvents(kids[i], s.loopBody)
+    if kids.len > 0: ctx.refBodyStmts(kids[^1], s.loopBody)
+    s.headerAt = s.loopBody.len
+    outp.add s
+  of ckCXXForRangeStmt:
+    if kids.len >= 3:
+      ctx.refEvents(kids[^2], outp)
+      let rb = ctx.refRangeBodies.getOrDefault(startOffset(kids[^1]))
+      if rb.synth.len > 0:
+        outp.add emit(ikRefDerive, startLine(c), a = rb.disp, aKey = rb.synth, bKey = rb.source)
+      var inner: seq[Stmt]
+      ctx.refBodyStmts(kids[^1], inner)
+      var s = Stmt(line: startLine(c), kind: stLoop)
+      s.loopBody = ctx.refRangeBody(kids[^1], inner)
+      s.headerAt = s.loopBody.len
+      outp.add s
+  of ckReturnStmt:
+    for ch in kids: ctx.refEvents(ch, outp)
+  else: ctx.refEvents(c, outp)
 
 proc withoutRefEvents(stmts: seq[Stmt]): seq[Stmt] =
   ## A lowered body without its reference-validity events. A lambda's body is spliced in where

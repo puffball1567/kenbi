@@ -5,8 +5,9 @@
 /*
  * CLOSURES AND VIEWS. A closure holds a copy of each pointer it captures by value, taken when
  * the closure is made, and reads one captured by reference when its body runs; its body runs
- * wherever the closure is used. A view built from its parts — `string_view(s.data(), n)` —
- * refers into what those parts point into.
+ * wherever the closure is used, branch by branch: a use that follows an invalidation on some
+ * path through the body is reported, one that follows it on none is not. A view built from
+ * its parts — `string_view(s.data(), n)` — refers into what those parts point into.
  */
 
 // a view built from a pointer and a length
@@ -48,6 +49,40 @@ void inside_the_closure(std::vector<int> &v) {
     int *e = &v[0];
     v.push_back(1);
     *e = 0;                                       //EXPECT REF_INVALIDATED
+  };
+  f();
+}
+
+// invalidated on one branch of the body, used after the branches meet
+void one_branch_then_use(std::vector<int> &v, bool grow) {
+  int *e = &v[0];
+  auto f = [&] {
+    if (grow) v.push_back(1);
+    *e = 1;                                       //EXPECT REF_INVALIDATED
+  };
+  f();
+}
+
+// invalidated and used inside the same branch
+void inside_one_branch(std::vector<int> &v, bool keep) {
+  int *e = &v[0];
+  auto f = [&] {
+    if (keep) {
+      *e = 1;
+    } else {
+      v.push_back(1);
+      *e = 2;                                     //EXPECT REF_INVALIDATED
+    }
+  };
+  f();
+}
+
+// invalidated on one branch and used on the other: no path has both
+void either_or(std::vector<int> &v, bool grow) {
+  int *e = &v[0];
+  auto f = [&] {
+    if (grow) v.push_back(1);
+    else *e = 1;
   };
   f();
 }

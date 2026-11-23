@@ -135,6 +135,10 @@ Cada comprobación se activa por separado:
 | locks | `@threadsafe` | acceso sin protección, locks desequilibrados, orden de locks declarado (deadlock AB-BA) |
 | propiedades de bajo nivel | `--safety=project.json` | efectos prohibidos en un cierre de llamadas, máquinas de estados de recursos, profundidad de pila y de llamadas, regiones de memoria, MMIO y más — ver [Verificación configurada de bajo nivel](#verificación-configurada-de-bajo-nivel---safety) |
 
+Un marcador escrito sobre una función cubre esa función; uno sin ninguna función en las pocas
+líneas siguientes cubre todo el archivo. Para cubrir todo el archivo dondequiera que esté escrito
+el marcador, añada `file`: `// @kenbi file`, `// @spatial file`, `// @refcheck file`.
+
 Un front-end libclang baja («lowering») C / C++ real (leyendo `compile_commands.json`) a un motor
 de typestate. Los bucles se analizan hasta un punto fijo acotado; las escaleras de limpieza con
 `goto` hacia adelante, `break` / `continue` y `try` / `catch` se modelan, y todo lo que kenbi no
@@ -519,7 +523,8 @@ camino (`if (n >= 1)`) o con un `@invariant(n >= 1)` declarado.
   objeto y no declara nada. Vuelva a tomar el puntero después de la llamada.
 - Qué se sigue: variables puntero, referencia e iterador; vistas (`string_view`, `span`), también
   cuando se construyen a partir de sus partes; un puntero guardado en un miembro de una estructura
-  local o en un arreglo local (cada miembro por separado, los elementos de un arreglo juntos); y
+  local o en un arreglo local (cada miembro y cada elemento por separado; un elemento alcanzado con un
+  índice no constante puede ser cualquiera de ellos); y
   las clausuras — una lambda guarda una copia de lo que captura por valor, lee lo que captura por
   referencia cuando su cuerpo se ejecuta, y su cuerpo se lee dondequiera que se use la clausura.
 - `// @invalidates(param)` / `// @preserves(param)` sobre una función declaran cuál es el caso
@@ -921,7 +926,7 @@ front-end, de modo que analizar C/C++ es una pieza reemplazable.
 ## Pruebas
 
 `tests/*.mc` accionan el motor directamente (17 casos). `tests/c/*.c` y `tests/cpp/*.cpp` llevan
-esos escenarios más las comprobaciones específicas de anotaciones en C y C++ reales (369 casos); el
+esos escenarios más las comprobaciones específicas de anotaciones en C y C++ reales (370 casos); el
 runner baja cada uno vía libclang y verifica los diagnósticos producidos — **incluida su línea de
 origen** — frente a los marcadores `//EXPECT CODE` de cada archivo (en la propia línea, o
 `//EXPECT CODE@LINE`). Una línea incorrecta o un diagnóstico faltante / sobrante hace fallar la

@@ -135,6 +135,10 @@ Chaque vérification s'active séparément :
 | verrous | `@threadsafe` | accès non protégé, verrous non équilibrés, ordre de verrouillage déclaré (interblocage AB-BA) |
 | propriétés bas niveau | `--safety=project.json` | effets interdits dans une fermeture d'appels, machines à états de ressources, profondeur de pile et d'appels, régions mémoire, MMIO et plus — voir [Vérification bas niveau configurée](#vérification-bas-niveau-configurée---safety) |
 
+Un marqueur écrit au-dessus d'une fonction couvre cette fonction ; un marqueur sans fonction dans
+les quelques lignes qui le suivent couvre tout le fichier. Pour couvrir tout le fichier où que soit
+écrit le marqueur, ajoutez `file` : `// @kenbi file`, `// @spatial file`, `// @refcheck file`.
+
 Un front-end libclang abaisse (« lowering ») du C / C++ réel (en lisant `compile_commands.json`)
 vers un moteur de typestate. Les boucles sont analysées jusqu'à un point fixe borné ; les échelles
 de nettoyage par `goto` avant, `break` / `continue` et `try` / `catch` sont modélisés, et tout ce
@@ -523,8 +527,8 @@ vérification sur le chemin (`if (n >= 1)`) ou par un `@invariant(n >= 1)` décl
   l'objet et ne déclare rien. Reprenez le pointeur après l'appel.
 - Ce qui est suivi : les variables pointeur, référence et itérateur ; les vues (`string_view`,
   `span`), y compris construites à partir de leurs parties ; un pointeur conservé dans un membre
-  d'une structure locale ou dans un tableau local (chaque membre séparément, les éléments d'un
-  tableau ensemble) ; et les fermetures — une lambda détient une copie de ce qu'elle capture par
+  d'une structure locale ou dans un tableau local (chaque membre et chaque élément séparément ; un élément atteint par un
+  indice non constant peut être n'importe lequel) ; et les fermetures — une lambda détient une copie de ce qu'elle capture par
   valeur, lit ce qu'elle capture par référence quand son corps s'exécute, et son corps est lu
   partout où la fermeture est utilisée.
 - `// @invalidates(param)` / `// @preserves(param)` au-dessus d'une fonction déclarent ce qu'il en
@@ -931,7 +935,7 @@ front-end, si bien que l'analyse syntaxique du C/C++ est une partie remplaçable
 ## Tests
 
 `tests/*.mc` pilotent directement le moteur (17 cas). `tests/c/*.c` et `tests/cpp/*.cpp` portent
-ces scénarios plus les contrôles spécifiques aux annotations en C et C++ réels (369 cas) ; le
+ces scénarios plus les contrôles spécifiques aux annotations en C et C++ réels (370 cas) ; le
 lanceur abaisse chacun via libclang et vérifie les diagnostics produits — **y compris leur ligne
 source** — par rapport aux marqueurs `//EXPECT CODE` de chaque fichier (sur la ligne elle-même,
 ou `//EXPECT CODE@LINE`). Une mauvaise ligne ou un diagnostic manquant / superflu fait échouer la
