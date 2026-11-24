@@ -15,6 +15,11 @@ and the JSON output may change in any minor version.
   Inside the function, storage reached through one is not storage reached through another.
 - `// @invalidates()` with nothing between the parentheses declares that a function reallocates
   and releases nothing.
+- `@refcheck` follows struct and class values that carry a pointer — a slice, a cursor, an
+  iterator type of the program's own — when they are the result of a function or a copy of
+  one. The type needs no declaration; `@returns_into` on the function says what the value
+  refers into, and a function that returns such a value built from a parameter without
+  declaring it is `REF_RETURN_UNDECLARED`.
 - `explain_finding` (MCP) has worked examples for `UNIQUE_UNPROVEN`, `UNIQUE_ESCAPES`,
   `SETJMP_CLOBBERED`, `DISTINCT_ALIASED` and `DISTINCT_UNPROVEN`. The three-state corpus has
   66 entries.

@@ -2303,15 +2303,45 @@ proc refSource(ctx: Ctx, p: RefPath): string =
   if last < 0: return ""
   p.root & refSep & p.steps[0 ..< last].join("/") & refSep & p.disp & refSep & $ctx.refClass(p)
 
+var refRecordCache {.threadvar.}: Table[string, bool]
+
+proc recordHoldsPointer(t: CXType, depth = 0): bool =
+  ## Can an object of this struct or class type refer into storage outside itself? A type of
+  ## the standard library does when it is an iterator or a view (its containers own what
+  ## they point to). Any other type does when it has a pointer or reference member, directly
+  ## or in a member or base of such a type: a cursor, a slice, a handle — or an owner, which
+  ## cannot be told from them by its layout. What a particular value refers into is then a
+  ## matter of where it came from (`refDerivation`).
+  let name = $clang_getTypeSpelling(t)
+  if name in refRecordCache: return refRecordCache[name]
+  refRecordCache[name] = false                    # a type that contains itself through a pointer
+  let d = clang_getTypeDeclaration(t)
+  # by name: the iterators and views of the standard library, wherever its implementation
+  # declares them (a template's members are not always there to be read)
+  let lower = name.toLowerAscii
+  if "iter" in lower or "string_view" in lower or "span<" in lower: result = true
+  elif inStd(d): result = false
+  elif depth < 6:
+    for f in collectChildren(d):
+      let fk = clang_getCursorKind(f)
+      if fk != ckFieldDecl and fk != 44: continue  # 44: a base class
+      var ft = clang_getCanonicalType(clang_getCursorType(f))
+      while ft.kind in [tyConstantArray, tyIncompleteArray, tyVariableArray]:
+        ft = clang_getCanonicalType(clang_getArrayElementType(ft))
+      if ft.kind in [tyPointer, tyLValueReference, tyRValueReference] or
+         (ft.kind == tyRecord and recordHoldsPointer(ft, depth + 1)):
+        result = true
+        break
+  refRecordCache[name] = result
+
 proc refHandle(decl: CXCursor): int =
   ## What kind of thing a variable can hold a reference into storage with: 1 a pointer, 2 a
-  ## reference, 3 a class object that is one (an iterator, a view); 0 none of these.
+  ## reference, 3 a struct or class object that can carry one (an iterator, a view, a struct
+  ## with a pointer member); 0 none of these.
   let t = clang_getCanonicalType(clang_getCursorType(decl))
   if t.kind == tyPointer: return 1
   if t.kind in [tyLValueReference, tyRValueReference]: return 2
-  if t.kind == tyRecord:
-    let name = ($clang_getTypeSpelling(t)).toLowerAscii
-    if "iter" in name or "string_view" in name or "span<" in name: return 3
+  if t.kind == tyRecord and recordHoldsPointer(t): return 3
   0
 
 proc refPlainCall(e: CXCursor): tuple[has: bool, call: CXCursor] =
@@ -2417,6 +2447,8 @@ proc refDerivation(ctx: Ctx, decl, rhs: CXCursor): tuple[sources, inherits: seq[
        $clang_getTypeSpelling(clang_getCanonicalType(clang_getCursorType(decl))): u = raw
     if clang_getCursorKind(u) == ckDeclRefExpr:
       if referencedUsr(u) in ctx.refTargets: result.inherits.add referencedUsr(u)
+      # a copy of a struct holds what each of its members held
+      for f in ctx.refAggFields.getOrDefault(referencedUsr(u), @[]): result.inherits.add f.key
       return
     if clang_getCursorKind(u) != ckCallExpr: return
     let ctor = clang_getCursorReferenced(u)
@@ -2559,11 +2591,23 @@ proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
   var grown = true
   while grown:
     grown = false
+    proc refersIntoParam(ctx: var Ctx, root: string,
+                         d: tuple[sources, inherits: seq[string]]): bool =
+      ## records that the local `root` refers into what a parameter holds
+      if root in ctx.refParamOf: return false
+      var roots = d.inherits
+      for s in d.sources: roots.add s.split(refSep)[0]
+      for r in roots:
+        let base = r.split("\x1d")[0]
+        if base in ctx.refParamOf:
+          ctx.refParamOf[root] = ctx.refParamOf[base]
+          return true
     for b in braceInits:
       # a local struct or array initialised with braces: followed as a whole
       let key = usr(b.decl) & "\x1d"
-      if key in ctx.refTargets: continue
       let d = ctx.refInitDerivation(b.init)
+      if ctx.refersIntoParam(usr(b.decl), d): grown = true
+      if key in ctx.refTargets: continue
       if d.sources.len > 0 or d.inherits.len > 0:
         ctx.refTargets.incl key
         ctx.refAggFields.mgetOrPut(usr(b.decl), @[]).add (key, newSeq[string]())
@@ -2571,8 +2615,10 @@ proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
     for st in memberStores:
       # a member of a local struct, or an element of a local array, that is given a reference
       let slot = ctx.refAggSlot(st.target)
-      if slot.key.len == 0 or slot.key in ctx.refTargets: continue
+      if slot.key.len == 0: continue
       let d = ctx.refDerivation(st.target, st.value)
+      if ctx.refersIntoParam(slot.root, d): grown = true
+      if slot.key in ctx.refTargets: continue
       if d.sources.len > 0 or d.inherits.len > 0:
         ctx.refTargets.incl slot.key
         ctx.refAggFields.mgetOrPut(slot.root, @[]).add (slot.key, slot.steps)
@@ -2870,6 +2916,8 @@ proc refEvents(ctx: Ctx, n: CXCursor, outp: var seq[Stmt]) =
     let slot = ctx.refAggSlot(n)
     if slot.key.len > 0 and slot.root in ctx.refAggFields:
       let disp = ctx.cursorTokens(n).join("")
+      if slot.root in ctx.refTargets:             # ... and what the struct held when it was made
+        outp.add emit(ikRefUse, line, a = disp, aKey = slot.root)
       for f in ctx.refAggFields[slot.root]:
         if refSlotsMeet(f.steps, slot.steps):
           outp.add emit(ikRefUse, line, a = disp, aKey = f.key)
@@ -3033,8 +3081,17 @@ proc refStmtEvents(ctx: Ctx, c: CXCursor, outp, post: var seq[Stmt]) =
     if kids.len == 1 and canonKind(kids[0]) in [tyPointer, tyLValueReference, tyRecord]:
       var roots: seq[string]
       let pc = refPlainCall(kids[0])
+      let lit = (block:                           # `return (struct Slice){ b->data, n };`
+        var u = unwrap(kids[0])
+        if clang_getCursorKind(u) == 118 and collectChildren(u).len > 0:
+          u = unwrap(collectChildren(u)[^1])
+        u)
       if pc.has:
         let d = ctx.refCallSources(pc.call)
+        roots = d.inherits
+        for s in d.sources: roots.add s.split(refSep)[0]
+      elif clang_getCursorKind(lit) == 119:
+        let d = ctx.refInitDerivation(lit)
         roots = d.inherits
         for s in d.sources: roots.add s.split(refSep)[0]
       else:
@@ -3044,7 +3101,12 @@ proc refStmtEvents(ctx: Ctx, c: CXCursor, outp, post: var seq[Stmt]) =
       for r in roots:
         let name = ctx.refParamOf.getOrDefault(r)
         if name.len > 0 and name notin ctx.refReturns:
-          outp.add emit(ikRefReturn, startLine(c), a = ctx.cursorTokens(kids[0]).join(""),
+          var shown = ""                          # the expression as written, words kept apart
+          for t in ctx.cursorTokens(kids[0]):
+            if shown.len > 0 and t.len > 0 and shown[^1] in IdentChars and t[0] in IdentChars:
+              shown.add ' '
+            shown.add t
+          outp.add emit(ikRefReturn, startLine(c), a = shown,
                         b = name, off = (if ctx.refReturnsDeclared: 1 else: 0))
           break
   elif k in [ckIfStmt, ckSwitchStmt]:

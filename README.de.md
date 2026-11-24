@@ -536,7 +536,8 @@ durch eine Prüfung auf dem Pfad (`if (n >= 1)`) oder ein deklariertes `@invaria
   die Methoden der Standardcontainer), und `REF_UNPROVEN`, wenn der Aufruf einen schreibbaren
   Zeiger oder eine Referenz auf das Objekt erhält und nichts deklariert. Den Zeiger nach dem
   Aufruf neu holen.
-- Was verfolgt wird: Zeiger-, Referenz- und Iteratorvariablen; Sichten (`string_view`, `span`),
+- Was verfolgt wird: Zeiger-, Referenz- und Iteratorvariablen; ein Struktur- oder Klassenwert mit
+  einem Zeiger-Member (ein Slice, ein Cursor — das Ergebnis einer Funktion oder eine Kopie davon); Sichten (`string_view`, `span`),
   auch wenn sie aus ihren Teilen gebaut werden; ein Zeiger in einem Member einer lokalen Struktur
   oder in einem lokalen Array (jeder Member und jedes Element für sich; ein Element, das über einen
   nicht konstanten Index erreicht wird, kann jedes davon sein); und
@@ -964,7 +965,7 @@ IR, sodass das Parsen von C/C++ ein austauschbarer Teil ist.
 ## Tests
 
 `tests/*.mc` treiben die Engine direkt an (17 Fälle). `tests/c/*.c` und `tests/cpp/*.cpp` tragen
-diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (372 Fälle); der
+diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (374 Fälle); der
 Runner überführt jedes über libclang und prüft die erzeugten Diagnosen — **einschließlich ihrer
 Quellzeile** — gegen die `//EXPECT CODE`-Marker in jeder Datei (in der Zeile selbst oder
 `//EXPECT CODE@LINE`). Eine falsche Zeile oder eine fehlende / überzählige

@@ -525,7 +525,9 @@ vérification sur le chemin (`if (n >= 1)`) ou par un `@invariant(n >= 1)` décl
   l'appel le déclare ou est connu pour le faire (`realloc`, `free`, les méthodes des conteneurs
   standard), et `REF_UNPROVEN` quand l'appel reçoit un pointeur ou une référence modifiable vers
   l'objet et ne déclare rien. Reprenez le pointeur après l'appel.
-- Ce qui est suivi : les variables pointeur, référence et itérateur ; les vues (`string_view`,
+- Ce qui est suivi : les variables pointeur, référence et itérateur ; une valeur de structure ou de
+  classe ayant un membre pointeur (une tranche, un curseur — le résultat d'une fonction, ou une
+  copie) ; les vues (`string_view`,
   `span`), y compris construites à partir de leurs parties ; un pointeur conservé dans un membre
   d'une structure locale ou dans un tableau local (chaque membre et chaque élément séparément ; un élément atteint par un
   indice non constant peut être n'importe lequel) ; et les fermetures — une lambda détient une copie de ce qu'elle capture par
@@ -946,7 +948,7 @@ front-end, si bien que l'analyse syntaxique du C/C++ est une partie remplaçable
 ## Tests
 
 `tests/*.mc` pilotent directement le moteur (17 cas). `tests/c/*.c` et `tests/cpp/*.cpp` portent
-ces scénarios plus les contrôles spécifiques aux annotations en C et C++ réels (372 cas) ; le
+ces scénarios plus les contrôles spécifiques aux annotations en C et C++ réels (374 cas) ; le
 lanceur abaisse chacun via libclang et vérifie les diagnostics produits — **y compris leur ligne
 source** — par rapport aux marqueurs `//EXPECT CODE` de chaque fichier (sur la ligne elle-même,
 ou `//EXPECT CODE@LINE`). Une mauvaise ligne ou un diagnostic manquant / superflu fait échouer la

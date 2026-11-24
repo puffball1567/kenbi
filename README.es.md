@@ -521,7 +521,8 @@ camino (`if (n >= 1)`) o con un `@invariant(n >= 1)` declarado.
   llamada lo declara o se sabe que lo hace (`realloc`, `free`, los métodos de los contenedores
   estándar), y `REF_UNPROVEN` cuando la llamada recibe un puntero o una referencia modificable al
   objeto y no declara nada. Vuelva a tomar el puntero después de la llamada.
-- Qué se sigue: variables puntero, referencia e iterador; vistas (`string_view`, `span`), también
+- Qué se sigue: variables puntero, referencia e iterador; un valor de estructura o clase con un
+  miembro puntero (una porción, un cursor — el resultado de una función, o una copia); vistas (`string_view`, `span`), también
   cuando se construyen a partir de sus partes; un puntero guardado en un miembro de una estructura
   local o en un arreglo local (cada miembro y cada elemento por separado; un elemento alcanzado con un
   índice no constante puede ser cualquiera de ellos); y
@@ -938,7 +939,7 @@ front-end, de modo que analizar C/C++ es una pieza reemplazable.
 ## Pruebas
 
 `tests/*.mc` accionan el motor directamente (17 casos). `tests/c/*.c` y `tests/cpp/*.cpp` llevan
-esos escenarios más las comprobaciones específicas de anotaciones en C y C++ reales (372 casos); el
+esos escenarios más las comprobaciones específicas de anotaciones en C y C++ reales (374 casos); el
 runner baja cada uno vía libclang y verifica los diagnósticos producidos — **incluida su línea de
 origen** — frente a los marcadores `//EXPECT CODE` de cada archivo (en la propia línea, o
 `//EXPECT CODE@LINE`). Una línea incorrecta o un diagnóstico faltante / sobrante hace fallar la

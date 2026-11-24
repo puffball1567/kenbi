@@ -358,7 +358,10 @@ the declared intent and reports where they disagree.
   methods), and \`REF_UNPROVEN\` (RED until shown) when the call is handed a writable pointer
   or reference to the object and declares nothing. A range-\`for\` counts as holding iterators
   into what it goes over. Fix: take the pointer again after the call.
-- What is followed: pointer, reference and iterator variables; views (\`string_view\`,
+- What is followed: pointer, reference and iterator variables; a struct or class value with a
+  pointer member — a slice, a cursor, a user-defined iterator — as the result of a function
+  (\`@returns_into\` says what it refers into) or a copy of one, with no declaration on the
+  type; views (\`string_view\`,
   \`span\`), also when built from their parts (\`string_view(s.data(), n)\`); a pointer kept in a
   member of a local struct (\`slice.ptr = buf->data\`) or in a local array — each member and
   each element on its own, an element reached with a non-constant index being any of them;
