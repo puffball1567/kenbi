@@ -156,6 +156,8 @@ type
                  ## variable, is distinct from it when bound to a block this function allocated.
                  ## `off2` bit 0 / bit 1: `a` / `b` is a parameter of the caller that still holds
                  ## the value it was called with; bit 2: `a` is the local object of an `off` 3.
+                 ## A third part in `cKey` (`callee|param|other`) makes it the check of a
+                 ## `@distinct(param, other)` instead: DISTINCT_ALIASED / DISTINCT_UNPROVEN.
     ikUniqueEscape ## the body of a function lets `a`, which is or derives from its `@unique`
                  ## or `@borrows` (off2 = 1) parameter `b`, outlive the call: off 0 it stores it,
                  ## 1 it passes it to `cKey` (parameter `bKey`), which declares nothing about
@@ -165,6 +167,9 @@ type
                  ## storage and — when a callee that declares nothing returned it — that callee,
                  ## separated by U+001F; several separated by U+001E), together with whatever
                  ## the locals `cKey` hold when it is a copy or an offset of them.
+    ikRefDistinct ## the function declares the parameters and globals `a` names (separated by
+                 ## `;`) to be different objects: storage reached through one is not storage
+                 ## reached through another.
     ikRefReturn  ## the function returns `a`, which points into what its parameter `b` holds,
                  ## without declaring `@returns_into(b)` (off 1: it declares other parameters).
                  ## off 1: one element of an array is assigned, so what the others hold stays.

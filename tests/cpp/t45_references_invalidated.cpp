@@ -15,6 +15,7 @@
 
 struct Item { int id; std::string name; };
 void fill(std::vector<int> &v);
+// @invalidates()
 int total(const std::vector<int> &v);
 
 void element_pointer(std::vector<int> &v) {
@@ -126,7 +127,7 @@ void range_for_then_break(std::vector<int> &v) {
   }
 }
 
-// const access, element writes and size queries move nothing
+// a function declared to reallocate nothing, element writes and size queries move nothing
 void reads_only(std::vector<int> &v) {
   int *e = v.data();
   (void)total(v);

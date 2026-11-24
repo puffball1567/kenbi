@@ -1885,5 +1885,63 @@ export const FINDINGS: Record<string, FindingEntry[]> =
         "why": "the counter is `volatile`: every change is written to memory, so the value read after the jump is the one last stored. GREEN."
       }
     }
+  ],
+  "DISTINCT_ALIASED": [
+    {
+      "id": "CWE475_Undefined_Behavior_for_Input_to_API__same_object_04",
+      "cwe": "CWE-475",
+      "class": [
+        "DISTINCT_ALIASED"
+      ],
+      "axis": "ownership",
+      "intent": "call a function that needs two different objects",
+      "title": "One block is passed where a function declares two `@distinct` objects",
+      "contracts": [
+        "@distinct",
+        "@borrows"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "#include <stdlib.h>\n// @distinct(dst, src)\n// @borrows(dst)\n// @borrows(src)\nvoid combine(char *dst, const char *src, unsigned n);\n\nvoid CWE475_Undefined_Behavior_for_Input_to_API__same_object_04_bad(void)\n{\n    /* @mem app::row { alloc: malloc, free: free, owner: row } */\n    char *row = malloc(16);\n    if (!row) return;\n    /* POTENTIAL FLAW: `row` is both the destination and the source */\n    combine(row, row, 16);\n    free(row);\n}\n",
+        "why": "`combine` declares its two buffers `@distinct`: it reads one while it writes the other. The call passes the same block for both: DISTINCT_ALIASED."
+      },
+      "B": {
+        "code": "#include <stdlib.h>\n// @distinct(dst, src)\n// @borrows(dst)\n// @borrows(src)\nvoid combine(char *dst, const char *src, unsigned n);\n\nvoid CWE475_Undefined_Behavior_for_Input_to_API__same_object_04_bad(void)\n{\n    /* @mem app::row { alloc: malloc, free: free, owner: row } */\n    char *row = malloc(16);\n    if (!row) return;\n    char *from = row;\n    /* POTENTIAL FLAW: `from` is `row` under another name */\n    combine(row, from, 16);\n    free(row);\n}\n",
+        "why": "a half-fix: the source is passed through a second variable. It holds the same pointer, and kenbi follows what each variable is bound to, so it is STILL DISTINCT_ALIASED."
+      },
+      "C": {
+        "code": "#include <stdlib.h>\n// @distinct(dst, src)\n// @borrows(dst)\n// @borrows(src)\nvoid combine(char *dst, const char *src, unsigned n);\n\nvoid CWE475_Undefined_Behavior_for_Input_to_API__same_object_04_fixed(void)\n{\n    /* @mem app::row { alloc: malloc, free: free, owner: row } */\n    char *row = malloc(16);\n    if (!row) return;\n    /* @mem app::tmp { alloc: malloc, free: free, owner: tmp } */\n    char *tmp = malloc(16);\n    if (!tmp) { free(row); return; }\n    combine(row, tmp, 16);   /* FIXED: a separate block */\n    free(tmp);\n    free(row);\n}\n",
+        "why": "the source is a block of its own, so the two arguments are different objects. GREEN."
+      }
+    }
+  ],
+  "DISTINCT_UNPROVEN": [
+    {
+      "id": "CWE475_Undefined_Behavior_for_Input_to_API__maybe_same_05",
+      "cwe": "CWE-475",
+      "class": [
+        "DISTINCT_UNPROVEN"
+      ],
+      "axis": "ownership",
+      "intent": "forward two pointers to a function that needs two different objects",
+      "title": "Nothing shows that two forwarded pointers are different objects",
+      "contracts": [
+        "@distinct",
+        "@borrows"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @distinct(dst, src)\n// @borrows(dst)\n// @borrows(src)\nvoid combine(char *dst, const char *src, unsigned n);\n\n// @kenbi\nvoid CWE475_Undefined_Behavior_for_Input_to_API__maybe_same_05_bad(char *out, const char *in)\n{\n    /* POTENTIAL FLAW: `out` and `in` may be the same object */\n    combine(out, in, 8);\n}\n",
+        "why": "`combine` declares its two buffers `@distinct`, and this function forwards two pointers it was handed. Nothing says its own callers pass different objects: DISTINCT_UNPROVEN."
+      },
+      "B": {
+        "code": "// @distinct(dst, src)\n// @borrows(dst)\n// @borrows(src)\nvoid combine(char *dst, const char *src, unsigned n);\n\n// @kenbi\nvoid CWE475_Undefined_Behavior_for_Input_to_API__maybe_same_05_bad(char *out, const char *in)\n{\n    char *dst = out;\n    const char *src = in;\n    /* POTENTIAL FLAW: new names, the same two objects */\n    combine(dst, src, 8);\n}\n",
+        "why": "a half-fix: the pointers are copied into locals first. Each local points wherever the parameter did, so it is STILL DISTINCT_UNPROVEN."
+      },
+      "C": {
+        "code": "// @distinct(dst, src)\n// @borrows(dst)\n// @borrows(src)\nvoid combine(char *dst, const char *src, unsigned n);\n\n// @kenbi\n// @distinct(out, in)\n// @borrows(out)\n// @borrows(in)\nvoid CWE475_Undefined_Behavior_for_Input_to_API__maybe_same_05_fixed(char *out, const char *in)\n{\n    combine(out, in, 8);   /* FIXED: declared distinct by this function */\n}\n",
+        "why": "the function declares the same requirement of its own parameters. Inside it they are different objects, and each of its callers is checked in turn. GREEN."
+      }
+    }
   ]
 };

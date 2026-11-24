@@ -229,7 +229,7 @@ const engineCoreDirectives* = [
   "@counted_by", "@invariant", "@maintains", "@mem", "@move", "@goto_noreturn",
   "@goto_finally", "@goto_backward", "@copy", "@unsafe", "@escapes", "@realloc", "@raii", "@arena",
   "@allocator", "@lock_order", "@drains", "@list", "@contract", "@contracts_for", "@unique",
-  "@refcheck", "@invalidates", "@preserves", "@returns_into"]
+  "@refcheck", "@invalidates", "@preserves", "@returns_into", "@distinct"]
 
 proc allKenbiDirectives*(): HashSet[string] =
   ## The COMPLETE set of directive keywords kenbi recognises as the first token of
@@ -326,6 +326,10 @@ proc scanCommentTokens(ctx: var Ctx, toks: ptr CXToken, n: cuint) =
       # the function below may reallocate or release storage reached through these parameters
       # (`@invalidates(buf)`): pointers taken into it before a call are invalid after it.
       ctx.invalidatesSites.add (fileOf(loc), line, pa)
+    of "@distinct":
+      # the parameters and globals named are different objects for the length of a call to the
+      # function below (`@distinct(dst, src)`, `@distinct(buf, current)`); checked at each call.
+      ctx.distinctSites.add (fileOf(loc), line, pa)
     of "@returns_into":
       # the result of the function below points into storage reached through these parameters
       # (`@returns_into(buf)`); `@returns_into()` declares that it points into none of them.

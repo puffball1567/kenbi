@@ -524,14 +524,24 @@ verificação no caminho (`if (n >= 1)`) ou por um `@invariant(n >= 1)` declarad
   estrutura local ou em um array local (cada membro e cada elemento separadamente; um elemento alcançado com um
   índice não constante pode ser qualquer um deles); e closures — uma lambda guarda uma cópia do que captura por valor, lê o que captura
   por referência quando seu corpo executa, e seu corpo é lido onde quer que a closure seja usada.
-- `// @invalidates(param)` / `// @preserves(param)` acima de uma função declaram qual é o caso
-  (`this` para um método, uma variável global pelo nome; `invalidates:` / `preserves:` em um bloco
-  `@contract` para uma biblioteca). O corpo de uma função `@preserves` é verificado: liberar ou
-  realocar o que o parâmetro guarda, ou passá-lo a uma função que não faz a mesma promessa, é
-  `REF_NOT_PRESERVED`. Um parâmetro `const` não precisa de declaração.
-- O armazenamento alcançável a partir de uma variável global pode ser alterado por qualquer
-  função do programa; manter um ponteiro para ele através de uma chamada exige que a função
-  chamada declare `@preserves(<global>)`.
+- `// @invalidates(...)` acima de uma função declara o que ela pode realocar ou liberar:
+  parâmetros (`this` para um método) e variáveis globais pelo nome, sem nada entre os parênteses
+  se não houver nada (`invalidates:` em um bloco `@contract` para uma biblioteca). A declaração
+  é completa — a função não faz isso a mais nada — e seu corpo é verificado contra ela: liberar
+  ou realocar algo que ela não nomeia, ou chamar uma função que pode fazê-lo, é
+  `REF_NOT_PRESERVED`. `// @preserves(param)` diz o mesmo de um parâmetro. Uma função do
+  programa que nada declara pode realocar qualquer armazenamento atrás de um ponteiro, quer lhe
+  seja passado ou não (por uma variável global, ou outro ponteiro para o mesmo objeto); um
+  ponteiro mantido através de sua chamada é `REF_UNPROVEN`. Um parâmetro `const` não é uma
+  promessa. As funções da biblioteca C são conhecidas.
+- Um objeto que é realocado pode ser aquele para dentro do qual outro ponteiro aponta: em
+  `f(struct Buf *a, struct Buf *b)`, um ponteiro para dentro de `a` não é seguro através de uma
+  chamada que realoca `b`, nem de uma que realoca aquilo para que uma variável global aponta.
+  `// @distinct(a, b)` acima da função declara que os parâmetros e variáveis globais nomeados
+  são objetos diferentes, e cada chamada é verificada: o mesmo objeto passado para dois deles é
+  `DISTINCT_ALIASED`, um par do qual nada mostra que difere é `DISTINCT_UNPROVEN`. O
+  armazenamento que pertence apenas à função — um array local, um contêiner local — está fora
+  do alcance de qualquer função chamada.
 - `// @returns_into(param)` acima de uma função declara que seu resultado aponta para dentro de
   armazenamento alcançado através de `param`; a cópia do chamador é então seguida como um
   ponteiro lido do objeto (`// @returns_into()`: para dentro de nenhum de seus argumentos;
@@ -663,6 +673,8 @@ aterrissa), `UNSUPPORTED_SETJMP` (um `setjmp` em uma forma que o kenbi não mode
 `FINALLY_BYPASSED` (uma saída possuidora contorna um funil `@goto_finally` declarado),
 `BORROW_ESCAPES` (o corpo guarda um ponteiro `@borrows`, ou o passa a uma função que poderia
 fazê-lo),
+`DISTINCT_ALIASED` / `DISTINCT_UNPROVEN` (objetos declarados `@distinct` que são, ou podem ser,
+o mesmo),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (um parâmetro `@unique` que outro
 argumento alcança, ou que o corpo guarda),
 `FREE_NONHEAP` (um `free` de um ponteiro para a pilha ou outro armazenamento fora do heap),
@@ -918,7 +930,7 @@ front-end, de modo que analisar C/C++ é uma peça substituível.
 ## Testes
 
 `tests/*.mc` acionam o motor diretamente (17 casos). `tests/c/*.c` e `tests/cpp/*.cpp` carregam
-esses cenários mais as verificações específicas de anotações em C e C++ reais (370 casos); o
+esses cenários mais as verificações específicas de anotações em C e C++ reais (372 casos); o
 runner rebaixa cada um via libclang e verifica os diagnósticos produzidos — **incluindo a sua
 linha de origem** — contra os marcadores `//EXPECT CODE` em cada arquivo (na própria linha, ou
 `//EXPECT CODE@LINE`). Uma linha errada ou um diagnóstico faltante / excedente faz a suíte

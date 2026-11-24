@@ -527,14 +527,24 @@ camino (`if (n >= 1)`) o con un `@invariant(n >= 1)` declarado.
   índice no constante puede ser cualquiera de ellos); y
   las clausuras — una lambda guarda una copia de lo que captura por valor, lee lo que captura por
   referencia cuando su cuerpo se ejecuta, y su cuerpo se lee dondequiera que se use la clausura.
-- `// @invalidates(param)` / `// @preserves(param)` sobre una función declaran cuál es el caso
-  (`this` para un método, una variable global por su nombre; `invalidates:` / `preserves:` en un
-  bloque `@contract` para una biblioteca). El cuerpo de una función `@preserves` se verifica:
-  liberar o reasignar lo que guarda el parámetro, o pasarlo a una función que no hace la misma
-  promesa, es `REF_NOT_PRESERVED`. Un parámetro `const` no necesita declaración.
-- El almacenamiento alcanzable desde una variable global puede ser modificado por cualquier
-  función del programa; conservar un puntero a él a través de una llamada exige que la función
-  llamada declare `@preserves(<global>)`.
+- `// @invalidates(...)` sobre una función declara lo que puede reasignar o liberar: parámetros
+  (`this` para un método) y variables globales por su nombre, sin nada entre los paréntesis si no
+  hay nada (`invalidates:` en un bloque `@contract` para una biblioteca). La declaración es
+  completa — la función no se lo hace a nada más — y su cuerpo se comprueba contra ella: liberar
+  o reasignar algo que no nombra, o llamar a una función que puede hacerlo, es
+  `REF_NOT_PRESERVED`. `// @preserves(param)` dice lo mismo de un parámetro. Una función del
+  programa que no declara nada puede reasignar cualquier almacenamiento detrás de un puntero, se
+  le pase o no (a través de una variable global, o de otro puntero al mismo objeto); un puntero
+  conservado a través de su llamada es `REF_UNPROVEN`. Un parámetro `const` no es una promesa.
+  Las funciones de la biblioteca de C son conocidas.
+- Un objeto que se reasigna puede ser aquel dentro del cual apunta otro puntero: en
+  `f(struct Buf *a, struct Buf *b)`, un puntero dentro de `a` no es seguro a través de una
+  llamada que reasigna `b`, ni de una que reasigna aquello a lo que apunta una variable global.
+  `// @distinct(a, b)` sobre la función declara que los parámetros y variables globales nombrados
+  son objetos distintos, y cada llamada se comprueba: el mismo objeto pasado para dos de ellos
+  es `DISTINCT_ALIASED`, un par del que nada muestra que difiera es `DISTINCT_UNPROVEN`. El
+  almacenamiento que pertenece solo a la función — un arreglo local, un contenedor local — queda
+  fuera del alcance de toda función llamada.
 - `// @returns_into(param)` sobre una función declara que su resultado apunta dentro de
   almacenamiento alcanzado a través de `param`; la copia del llamador se sigue entonces como un
   puntero leído del objeto (`// @returns_into()`: dentro de ninguno de sus argumentos;
@@ -668,6 +678,8 @@ longjmp), `UNSUPPORTED_SETJMP` (un `setjmp` en una forma que kenbi no modela),
 `FINALLY_BYPASSED` (una salida con posesión que evita un embudo `@goto_finally` declarado),
 `BORROW_ESCAPES` (el cuerpo guarda un puntero `@borrows`, o lo pasa a una función que podría
 hacerlo),
+`DISTINCT_ALIASED` / `DISTINCT_UNPROVEN` (objetos declarados `@distinct` que son, o pueden ser,
+el mismo),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (un parámetro `@unique` que otro argumento
 alcanza, o que el cuerpo conserva),
 `FREE_NONHEAP` (un `free` de un puntero a la pila u otro almacenamiento no heap), `BORROW_MOVED` /
@@ -926,7 +938,7 @@ front-end, de modo que analizar C/C++ es una pieza reemplazable.
 ## Pruebas
 
 `tests/*.mc` accionan el motor directamente (17 casos). `tests/c/*.c` y `tests/cpp/*.cpp` llevan
-esos escenarios más las comprobaciones específicas de anotaciones en C y C++ reales (370 casos); el
+esos escenarios más las comprobaciones específicas de anotaciones en C y C++ reales (372 casos); el
 runner baja cada uno vía libclang y verifica los diagnósticos producidos — **incluida su línea de
 origen** — frente a los marcadores `//EXPECT CODE` de cada archivo (en la propia línea, o
 `//EXPECT CODE@LINE`). Una línea incorrecta o un diagnóstico faltante / sobrante hace fallar la

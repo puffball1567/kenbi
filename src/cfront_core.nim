@@ -366,6 +366,17 @@ type Ctx* = object  ## module-local state during a single parse (all fields publ
                                     ## the members of it that hold a reference into managed
                                     ## storage, each followed under a key of its own
   refLambdas*: Table[string, CXCursor] ## ... a local bound to a lambda -> the lambda
+  distinctSites*: seq[tuple[file: string, line: int, spec: string]] ## `@distinct(a, b)` sites
+  distinctSets*: Table[string, seq[seq[string]]] ## function -> each `@distinct(...)` on it: the
+                                    ## parameters (names) and globals it declares to be
+                                    ## different objects for the length of a call
+  globalUsrs*: Table[string, string] ## file-scope variable name -> USR, for those declarations
+  curDistinct*: seq[seq[string]]    ## the `@distinct` sets of the function being lowered, each
+                                    ## member a parameter's key or a global's name
+  refExclusive*: HashSet[string]    ## in the function being lowered: its `@unique` parameters
+  refReferences*: HashSet[string]   ## ... its parameters and locals of reference type
+  refDeclared*: bool                ## ... whether it declares what it may reallocate or release
+  refMayInvalidate*: seq[string]    ## ... and the parameters and globals that declaration names
   refParamOf*: Table[string, string] ## in the function being lowered: a parameter, or a local
                                     ## that refers into what one holds -> that parameter's name
   refReturnsDeclared*: bool         ## ... whether it declares `@returns_into`

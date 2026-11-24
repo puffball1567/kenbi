@@ -543,14 +543,25 @@ durch eine Prüfung auf dem Pfad (`if (n >= 1)`) oder ein deklariertes `@invaria
   Closures — ein Lambda hält eine Kopie dessen, was es per Wert erfasst, liest das per Referenz
   Erfasste, wenn sein Rumpf läuft, und sein Rumpf wird überall dort gelesen, wo die Closure
   verwendet wird.
-- `// @invalidates(param)` / `// @preserves(param)` über einer Funktion deklarieren, was zutrifft
-  (`this` für eine Methode, eine globale Variable mit ihrem Namen; `invalidates:` / `preserves:`
-  in einem `@contract`-Block für eine Bibliothek). Ein `@preserves`-Rumpf wird geprüft: Freigeben
-  oder Neuallokieren dessen, was der Parameter hält, oder die Übergabe an eine Funktion, die nicht
-  dasselbe verspricht, ist `REF_NOT_PRESERVED`. Ein `const`-Parameter braucht keine Deklaration.
-- Speicher, der über eine globale Variable erreichbar ist, kann von jeder Funktion des Programms
-  verändert werden; ein Zeiger dorthin, der über einen Aufruf hinweg gehalten wird, verlangt, dass
-  die aufgerufene Funktion `@preserves(<global>)` deklariert.
+- `// @invalidates(...)` über einer Funktion deklariert, was sie neu allokieren oder freigeben kann:
+  Parameter (`this` für eine Methode) und globale Variablen mit Namen, mit leeren Klammern, wenn
+  nichts (`invalidates:` in einem `@contract`-Block für eine Bibliothek). Die Deklaration ist
+  vollständig — die Funktion tut das mit nichts anderem —, und ihr Rumpf wird dagegen geprüft:
+  etwas freizugeben oder neu zu allokieren, das sie nicht nennt, oder eine Funktion aufzurufen,
+  die das kann, ist `REF_NOT_PRESERVED`. `// @preserves(param)` sagt dasselbe über einen
+  Parameter. Eine Funktion des Programms, die nichts deklariert, kann jeden Speicher hinter einem
+  Zeiger neu allokieren, ob er ihr übergeben wird oder nicht (über eine globale Variable oder
+  einen anderen Zeiger auf dasselbe Objekt); ein über ihren Aufruf hinweg gehaltener Zeiger ist
+  `REF_UNPROVEN`. Ein `const`-Parameter ist kein Versprechen. Die Funktionen der C-Bibliothek
+  sind bekannt.
+- Ein Objekt, das neu allokiert wird, kann dasjenige sein, in das ein anderer Zeiger zeigt: In
+  `f(struct Buf *a, struct Buf *b)` ist ein Zeiger in `a` über einen Aufruf hinweg, der `b` neu
+  allokiert, nicht sicher, ebenso wenig über einen, der neu allokiert, worauf eine globale
+  Variable zeigt. `// @distinct(a, b)` über der Funktion deklariert die genannten Parameter und
+  globalen Variablen als verschiedene Objekte, und jeder Aufruf wird geprüft: dasselbe Objekt für
+  zwei davon ist `DISTINCT_ALIASED`, ein Paar, bei dem nichts die Verschiedenheit zeigt, ist
+  `DISTINCT_UNPROVEN`. Speicher, der allein der Funktion gehört — ein lokales Array, ein lokaler
+  Container —, ist für keine aufgerufene Funktion erreichbar.
 - `// @returns_into(param)` über einer Funktion deklariert, dass ihr Ergebnis in Speicher zeigt, der
   über `param` erreichbar ist; die Kopie des Aufrufers wird dann wie ein aus dem Objekt gelesener
   Zeiger verfolgt (`// @returns_into()`: in keines ihrer Argumente; `returns_into:` in einem
@@ -688,6 +699,8 @@ longjmp landet), `UNSUPPORTED_SETJMP` (ein `setjmp` in einer Form, die kenbi nic
 `FINALLY_BYPASSED` (ein besitzender Ausgang umgeht einen deklarierten `@goto_finally`-Trichter),
 `BORROW_ESCAPES` (der Rumpf speichert einen `@borrows`-Zeiger oder übergibt ihn an eine Funktion,
 die das könnte),
+`DISTINCT_ALIASED` / `DISTINCT_UNPROVEN` (als `@distinct` deklarierte Objekte, die dasselbe sind
+oder sein können),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (ein `@unique`-Parameter, den ein anderes
 Argument erreicht oder den der Rumpf behält),
 `FREE_NONHEAP` (ein `free` eines Zeigers in Stack- oder anderen Nicht-Heap-Speicher),
@@ -951,7 +964,7 @@ IR, sodass das Parsen von C/C++ ein austauschbarer Teil ist.
 ## Tests
 
 `tests/*.mc` treiben die Engine direkt an (17 Fälle). `tests/c/*.c` und `tests/cpp/*.cpp` tragen
-diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (370 Fälle); der
+diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (372 Fälle); der
 Runner überführt jedes über libclang und prüft die erzeugten Diagnosen — **einschließlich ihrer
 Quellzeile** — gegen die `//EXPECT CODE`-Marker in jeder Datei (in der Zeile selbst oder
 `//EXPECT CODE@LINE`). Eine falsche Zeile oder eine fehlende / überzählige

@@ -5,10 +5,12 @@
 // only while the buffer stays where it is. Under `@refcheck`, a local that holds such a
 // pointer is followed along each path, and using it after a call that may have reallocated or
 // released the storage is reported: REF_INVALIDATED when the call is declared or known to
-// (`@invalidates(param)`, `realloc`, `free`), REF_UNPROVEN when it is handed a writable
-// pointer to the object and declares nothing. `@preserves(param)` declares that a function
-// reallocates and releases nothing reached through the parameter, and its body is checked
-// against that (REF_NOT_PRESERVED). A `const` parameter needs no declaration.
+// (`@invalidates(param)`, `realloc`, `free`), REF_UNPROVEN when nothing shows that it does
+// not: a function of the program that declares nothing may reach the storage whether or not
+// it is handed it, and an object that is reallocated may be the one another pointer points
+// into. A declaration is complete: with `@invalidates(...)` or `@preserves(...)` on it, a
+// function reallocates and releases nothing beyond what `@invalidates` names, and its body
+// is checked against that (REF_NOT_PRESERVED). `@invalidates()` names nothing.
 
 struct Buf { char *data; unsigned len, cap; };
 struct Buf g_buf;
@@ -18,7 +20,9 @@ void buf_append(struct Buf *b, const char *s);
 // @preserves(b)
 void buf_fill(struct Buf *b, char c);
 void buf_touch(struct Buf *b);
+// @invalidates()
 unsigned buf_len(const struct Buf *b);
+unsigned buf_peek(const struct Buf *b);
 void helper(void);
 // @preserves(g_buf)
 void logs(const char *s);
@@ -91,7 +95,21 @@ void copy_of_copy(struct Buf *b) {
   q[0] = 'x';                                     //EXPECT REF_INVALIDATED
 }
 
-// calls that leave the buffer in place: declared, `const`, the C library
+// a `const` parameter is no promise: the function may reach the buffer another way
+void const_is_no_promise(struct Buf *b) {
+  char *p = b->data;
+  (void)buf_peek(b);
+  p[0] = 'x';                                     //EXPECT REF_UNPROVEN
+}
+
+// the buffer that is reallocated may be the one the pointer points into
+void maybe_the_same(struct Buf *a, struct Buf *b) {
+  char *p = a->data;
+  buf_append(b, "abc");
+  p[0] = 'x';                                     //EXPECT REF_UNPROVEN
+}
+
+// calls that leave the buffer in place: declared to, or of the C library
 void preserved(struct Buf *b) {
   char *p = b->data;
   buf_fill(b, 'a');
@@ -108,7 +126,8 @@ void retaken(struct Buf *b) {
   p[0] = 'x';
 }
 
-// a call on a different object
+// a call on an object the function declares to be a different one
+// @distinct(a, b)
 void other_object(struct Buf *a, struct Buf *b) {
   char *p = a->data;
   buf_append(b, "abc");

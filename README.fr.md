@@ -531,15 +531,24 @@ vérification sur le chemin (`if (n >= 1)`) ou par un `@invariant(n >= 1)` décl
   indice non constant peut être n'importe lequel) ; et les fermetures — une lambda détient une copie de ce qu'elle capture par
   valeur, lit ce qu'elle capture par référence quand son corps s'exécute, et son corps est lu
   partout où la fermeture est utilisée.
-- `// @invalidates(param)` / `// @preserves(param)` au-dessus d'une fonction déclarent ce qu'il en
-  est (`this` pour une méthode, une variable globale par son nom ; `invalidates:` / `preserves:`
-  dans un bloc `@contract` pour une bibliothèque). Le corps d'une fonction `@preserves` est
-  vérifié : libérer ou réallouer ce que détient le paramètre, ou le passer à une fonction qui ne
-  fait pas la même promesse, est `REF_NOT_PRESERVED`. Un paramètre `const` n'a besoin d'aucune
-  déclaration.
-- Un stockage accessible depuis une variable globale peut être modifié par n'importe quelle
-  fonction du programme ; conserver un pointeur vers lui à travers un appel exige que la fonction
-  appelée déclare `@preserves(<globale>)`.
+- `// @invalidates(...)` au-dessus d'une fonction déclare ce qu'elle peut réallouer ou libérer : des
+  paramètres (`this` pour une méthode) et des variables globales par leur nom, sans rien entre les
+  parenthèses s'il n'y a rien (`invalidates:` dans un bloc `@contract` pour une bibliothèque). La
+  déclaration est complète — la fonction ne le fait à rien d'autre — et son corps est vérifié en
+  conséquence : libérer ou réallouer ce qu'elle ne nomme pas, ou appeler une fonction qui le
+  peut, est `REF_NOT_PRESERVED`. `// @preserves(param)` dit la même chose d'un paramètre. Une
+  fonction du programme qui ne déclare rien peut réallouer tout stockage derrière un pointeur,
+  qu'il lui soit passé ou non (par une variable globale, ou un autre pointeur vers le même
+  objet) ; un pointeur conservé à travers son appel est `REF_UNPROVEN`. Un paramètre `const`
+  n'est pas une promesse. Les fonctions de la bibliothèque C sont connues.
+- Un objet réalloué peut être celui dans lequel pointe un autre pointeur : dans
+  `f(struct Buf *a, struct Buf *b)`, un pointeur dans `a` n'est pas sûr à travers un appel qui
+  réalloue `b`, ni à travers un appel qui réalloue ce vers quoi pointe une variable globale.
+  `// @distinct(a, b)` au-dessus de la fonction déclare que les paramètres et variables globales
+  nommés sont des objets différents, et chaque appel est vérifié : le même objet passé pour deux
+  d'entre eux est `DISTINCT_ALIASED`, une paire dont rien ne montre la différence est
+  `DISTINCT_UNPROVEN`. Un stockage qui n'appartient qu'à la fonction — un tableau local, un
+  conteneur local — est hors de portée de toute fonction appelée.
 - `// @returns_into(param)` au-dessus d'une fonction déclare que son résultat pointe dans un stockage
   atteint par `param` ; la copie de l'appelant est alors suivie comme un pointeur lu dans l'objet
   (`// @returns_into()` : dans aucun de ses arguments ; `returns_into:` dans un bloc `@contract`).
@@ -675,6 +684,8 @@ longjmp arrive), `UNSUPPORTED_SETJMP` (un `setjmp` sous une forme que kenbi ne m
 `FINALLY_BYPASSED` (une sortie possédante contourne un entonnoir `@goto_finally` déclaré),
 `BORROW_ESCAPES` (le corps stocke un pointeur `@borrows`, ou le passe à une fonction qui le
 pourrait),
+`DISTINCT_ALIASED` / `DISTINCT_UNPROVEN` (des objets déclarés `@distinct` qui sont, ou peuvent
+être, le même),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (un paramètre `@unique` qu'un autre
 argument atteint, ou que le corps conserve),
 `FREE_NONHEAP` (un `free` d'un pointeur vers la pile ou un autre stockage hors tas),
@@ -935,7 +946,7 @@ front-end, si bien que l'analyse syntaxique du C/C++ est une partie remplaçable
 ## Tests
 
 `tests/*.mc` pilotent directement le moteur (17 cas). `tests/c/*.c` et `tests/cpp/*.cpp` portent
-ces scénarios plus les contrôles spécifiques aux annotations en C et C++ réels (370 cas) ; le
+ces scénarios plus les contrôles spécifiques aux annotations en C et C++ réels (372 cas) ; le
 lanceur abaisse chacun via libclang et vérifie les diagnostics produits — **y compris leur ligne
 source** — par rapport aux marqueurs `//EXPECT CODE` de chaque fichier (sur la ligne elle-même,
 ou `//EXPECT CODE@LINE`). Une mauvaise ligne ou un diagnostic manquant / superflu fait échouer la

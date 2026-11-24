@@ -149,11 +149,14 @@ must be assigned on every path before it is read.
 **References into buffers and containers — `// @refcheck`.** A local holding a
 pointer, reference, iterator or view into storage another object manages
 (`p = buf->data`, `&v[0]`, `v.begin()`, `s.c_str()`) may not be used after a call
-that may have reallocated or released that storage. Declare each function that
-is handed the object: `// @invalidates(param)` if it may, `// @preserves(param)`
-if it does not (`this` for a method, a global by name). A `@preserves` body is
-checked, so when unsure declare it and run the check. `const` parameters and the
-C library's readers and writers need nothing. An accessor that returns a pointer
+that may have reallocated or released that storage. Declare what each function
+of the program may reallocate or release: `// @invalidates(names)` — parameters
+(`this` for a method) and globals, empty if nothing. The declaration is complete
+and its body is checked, so when unsure declare `@invalidates()` and run the
+check. A function that declares nothing may reach any storage behind a pointer,
+handed to it or not; a `const` parameter is no promise. Two pointers may be the
+same object unless `// @distinct(a, b)` (parameters and globals) says otherwise,
+which is checked at each call. The C library is known. An accessor that returns a pointer
 into its argument declares `// @returns_into(param)`; `// @returns_into()` says
 the result points into none of the arguments.
 
@@ -246,8 +249,9 @@ code, then fix that. The message names the line and usually the fix.
 | `BORROW_OUTLIVES_OWNER` | a borrow or arena object used after its owner died | shorten the use or lengthen the owner |
 | `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` | an `@unique` parameter is passed an object another argument reaches, or may reach | pass a separate object or a copy; make the distinction visible (distinct variables or members, a fresh allocation, `@unique` on the caller's own parameter) |
 | `UNIQUE_ESCAPES` / `BORROW_ESCAPES` | the body stores an `@unique` / `@borrows` pointer where it outlives the call, or passes it to a function that does not declare it gives it back | keep it in locals; declare `@borrows` (or `@unique`) on the receiving parameter if that function only uses it — its body is then checked too; drop the declaration if the function really keeps the pointer |
+| `DISTINCT_ALIASED` / `DISTINCT_UNPROVEN` | objects a callee declares `@distinct` are, or may be, the same at this call | pass different objects; make the difference visible (distinct variables, a local nothing else points to), or declare `@distinct` on the caller for its own parameters |
 | `REF_INVALIDATED` | a pointer, reference or iterator into a buffer or container is used after a call that reallocates or releases it | take it again after the call (`p = buf->data;`, `it = v.erase(it);`), or use an index instead of a pointer |
-| `REF_UNPROVEN` | the same, but the call declares nothing about the object it is handed | declare the callee's parameter `@preserves` if it reallocates nothing there (its body is checked), else `@invalidates` and take the pointer again |
+| `REF_UNPROVEN` | the same, but nothing shows the storage stays: the callee declares nothing, or what it reallocates may be the same object | take the pointer after the call; or declare the callee (`@invalidates(...)`, empty if nothing — its body is checked); or, when two objects are in fact different, `@distinct(a, b)` on the function |
 | `REF_RETURN_UNDECLARED` | a function returns a pointer into what a parameter holds without saying so | declare `@returns_into(param)` above it; its callers are then checked against reallocation of that object |
 | `REF_NOT_PRESERVED` | a `@preserves` function releases or reallocates what the parameter holds, or passes it to a function that does not promise the same | change the declaration to `@invalidates`, or declare the function it calls |
 | `UNVALIDATED_INDEX` / `UNVALIDATED_SIZE` | an index or length reaches a buffer with no bound check on the path, or in a form kenbi cannot read | add the check before the access; put a computed index in a variable and bound that |

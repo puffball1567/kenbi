@@ -140,7 +140,7 @@ tail: `ALL THREE-STATE CHECKS PASS`.
 
 Nine testcases in `juliet/` are taken unchanged from the Juliet suite; the others follow its
 naming scheme and are written for kenbi, including minimal reproductions of three published
-CVEs (see [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)). The corpus lists 64 entries in
+CVEs (see [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)). The corpus lists 66 entries in
 [`juliet/manifest.json`](juliet/manifest.json). New entries are added the same way: the
 unannotated case into `juliet/`, honest annotations into `juliet_annotated/`, the safe rewrite
 into `juliet_rewritten/`, and the verifier to confirm all three.

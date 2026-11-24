@@ -539,13 +539,23 @@ by a check on the path (`if (n >= 1)`) or by a declared `@invariant(n >= 1)`.
   constant may be any of them); and closures — a lambda
   holds a copy of what it captures by value, reads what it captures by reference when its body
   runs, and its body is read wherever the closure is used.
-- `// @invalidates(param)` / `// @preserves(param)` above a function declare which it is (`this`
-  for a method, a global by name; `invalidates:` / `preserves:` in a `@contract` block for a
-  library). A `@preserves` body is verified: releasing or reallocating what the parameter holds,
-  or passing it to a function that does not make the same promise, is `REF_NOT_PRESERVED`. A
-  `const` parameter needs no declaration.
-- Storage reached from a global can be changed by any function of the program, so a pointer into
-  it held across a call needs that function to declare `@preserves(<global>)`.
+- `// @invalidates(...)` above a function declares what it may reallocate or release: parameters
+  (`this` for a method) and globals by name, with nothing between the parentheses if nothing
+  (`invalidates:` in a `@contract` block for a library). The declaration is complete — the
+  function does that to nothing else — and its body is checked against it: releasing or
+  reallocating something it does not name, or calling a function that may, is
+  `REF_NOT_PRESERVED`. `// @preserves(param)` says the same of one parameter. A function of the
+  program that declares nothing may reallocate any storage behind a pointer, whether or not it
+  is handed it (through a global, or another pointer to the same object), so a pointer kept
+  across a call to it is `REF_UNPROVEN`; a `const` parameter is no promise. The C library's
+  functions are known.
+- An object that is reallocated may be the one another pointer points into: in
+  `f(struct Buf *a, struct Buf *b)`, a pointer into `a` is not safe across a call that
+  reallocates `b`, nor across one that reallocates what a global points to. `// @distinct(a, b)`
+  above the function declares the parameters and globals it names to be different objects, and
+  each call is checked: the same object passed for two of them is `DISTINCT_ALIASED`, a pair
+  nothing shows to differ is `DISTINCT_UNPROVEN`. Storage that belongs to the function alone —
+  a local array, a local container — is out of every callee's reach.
 - `// @returns_into(param)` above a function declares that its result points into storage reached
   through `param`, so the caller's copy is followed like a pointer read out of the object
   (`// @returns_into()`: into none of its arguments; `returns_into:` in a `@contract` block). A
@@ -672,6 +682,8 @@ not the declared one), `SETJMP_CLOBBERED` (a non-volatile local read where a lon
 `UNSUPPORTED_SETJMP` (a `setjmp` in a form kenbi does not model),
 `FINALLY_BYPASSED` (an owning exit bypasses a declared `@goto_finally` funnel),
 `BORROW_ESCAPES` (the body stores an `@borrows` pointer, or passes it to a function that may),
+`DISTINCT_ALIASED` / `DISTINCT_UNPROVEN` (objects declared `@distinct` that are, or may be, the
+same),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (an `@unique` parameter that another
 argument reaches, or that the body keeps),
 `FREE_NONHEAP` (a `free` of a pointer into stack or other non-heap storage), `BORROW_MOVED` /
@@ -917,7 +929,7 @@ parsing C/C++ is a replaceable part.
 ## Tests
 
 `tests/*.mc` drive the engine directly (17 cases). `tests/c/*.c` and `tests/cpp/*.cpp` carry
-those scenarios plus the annotation-specific checks in real C and C++ (370 cases); the runner
+those scenarios plus the annotation-specific checks in real C and C++ (372 cases); the runner
 lowers each through libclang and asserts the produced diagnostics — **including their source
 line** — against the `//EXPECT CODE` markers in each file (on the line itself, or
 `//EXPECT CODE@LINE`). A wrong line or a missing/extra

@@ -1382,6 +1382,12 @@ proc soleAddressHere(ctx: Ctx, key: string, at: int): bool =
     if at >= l.first and at < l.last: return false
   true
 
+proc declaredDistinct(ctx: Ctx, x, y: string): bool =
+  ## Does the function being lowered declare `x` and `y` (parameter keys or global names)
+  ## different objects?
+  for set in ctx.curDistinct:
+    if x in set and y in set and x != y: return true
+
 proc uniqueVerdict(ctx: Ctx, u, o: PtrRoot, at: int): int =
   ## Can the exclusive argument `u` and the other argument `o` reach the same object?
   ## -1 no; 1 yes, as written; 2 nothing shows they cannot; 0 it depends on what the two
@@ -1401,7 +1407,8 @@ proc uniqueVerdict(ctx: Ctx, u, o: PtrRoot, at: int): int =
   if u.kind == 'P' and o.kind == 'P':
     # two parameters as passed in, one of them declared exclusive by this function
     if ctx.entryValue(u.key) and ctx.entryValue(o.key) and
-       (u.key in ctx.curUnique or o.key in ctx.curUnique): return -1
+       (u.key in ctx.curUnique or o.key in ctx.curUnique or
+        ctx.declaredDistinct(u.key, o.key)): return -1
     return 0
   let (obj, ptrv) = (if u.kind == 'O': (u, o) else: (o, u))
   if obj.key in ctx.uqLocals:
@@ -1439,6 +1446,51 @@ proc emitUniqueChecks(ctx: Ctx, call: CXCursor, callee: string, line: int, outp:
                     off = v, off2 = (if ctx.entryValue(roots[pi].key): 1 else: 0) or
                                     (if ctx.entryValue(roots[oi].key): 2 else: 0) or
                                     (if roots[pi].kind == 'O': 4 else: 0))
+
+proc emitDistinctChecks(ctx: Ctx, call: CXCursor, callee: string, line: int, outp: var seq[Stmt]) =
+  ## `@distinct` at a call: for each set the callee declares, the arguments passed for the
+  ## parameters it names are compared pair by pair, and each with every global it names.
+  ## A global stands for the object it is or points to, so an argument is shown different
+  ## from it only when it is a local of the caller that nothing else has the address of, or a
+  ## parameter the caller itself declares distinct from that global.
+  let sets = ctx.distinctSets.getOrDefault(callee, @[])
+  if sets.len == 0: return
+  let decl = clang_getCursorReferenced(call)
+  let np = int(clang_Cursor_getNumArguments(decl))
+  let na = int(clang_Cursor_getNumArguments(call))
+  var pnames: seq[string]
+  for i in 0 ..< np: pnames.add spelling(clang_Cursor_getArgument(decl, cuint(i)))
+  for set in sets:
+    var args: seq[tuple[name: string, root: PtrRoot]]
+    var globals: seq[string]
+    for name in set:
+      let pi = pnames.find(name)
+      if pi >= 0:
+        if pi < na:
+          let arg = clang_Cursor_getArgument(call, cuint(pi))
+          if canonicalPointer(arg) or isArrayType(unwrap(arg)): args.add (name, ctx.ptrRoot(arg))
+      else: globals.add name
+    for i in 0 ..< args.len:
+      for j in i + 1 ..< args.len:
+        let v = ctx.uniqueVerdict(args[i].root, args[j].root, startOffset(call))
+        if v < 0: continue
+        outp.add emit(ikUniqueCheck, line, a = args[i].root.disp, aKey = args[i].root.key,
+                      b = args[j].root.disp, bKey = args[j].root.key,
+                      cKey = callee & "|" & args[i].name & "|" & args[j].name, off = v,
+                      off2 = (if ctx.entryValue(args[i].root.key): 1 else: 0) or
+                             (if ctx.entryValue(args[j].root.key): 2 else: 0) or
+                             (if args[i].root.kind == 'O': 4 else: 0))
+      for g in globals:
+        let r = args[i].root
+        let gusr = ctx.globalUsrs.getOrDefault(g)
+        var v = 2
+        if r.kind == 'L': v = -1
+        elif r.kind in {'O', 'P'} and gusr.len > 0 and r.key == gusr: v = 1
+        elif r.kind == 'O' and ctx.soleAddressHere(r.key, startOffset(call)): v = -1
+        elif r.kind == 'P' and ctx.entryValue(r.key) and ctx.declaredDistinct(r.key, g): v = -1
+        if v < 0: continue
+        outp.add emit(ikUniqueCheck, line, a = r.disp, aKey = r.key, b = g, bKey = gusr,
+                      cKey = callee & "|" & args[i].name & "|" & g, off = v)
 
 proc keptEscapes(ctx: var Ctx, fn, body: CXCursor, unique, borrowed: seq[string],
                  outp: var seq[Stmt]) =
@@ -2224,16 +2276,32 @@ proc refPointee(ctx: Ctx, e: CXCursor): RefPath =
   result = ctx.refLvalue(u)                       # a pointer read out of a location
   if result.ok: result.steps.add "*"
 
-proc refSource(p: RefPath): string =
+proc refClass(ctx: Ctx, p: RefPath): char =
+  ## Who else can reach the storage of a region — which decides what a call that is not handed
+  ## it may still do to it. `p` private: storage of a local of this function, or managed by a
+  ## local container, which nothing outside reaches. `g` reached from a global. `x` reached
+  ## through an `@unique` parameter: no other argument of the caller reaches it. `a` through
+  ## another parameter as it was passed in. `s` anything else behind a pointer.
+  if p.root == "this": return 'a'
+  if p.global: return 'g'
+  var behindPointer = p.root in ctx.refReferences
+  for i, step in p.steps:
+    if step == "*" and (i == 0 or p.steps[i - 1] != ".#"): behindPointer = true
+  if not behindPointer: return 'p'
+  if p.root in ctx.uqParams and ctx.entryValue(p.root):
+    return (if p.root in ctx.refExclusive: 'x' else: 'a')
+  's'
+
+proc refSource(ctx: Ctx, p: RefPath): string =
   ## The pointer a region is reached through — what has to stay as it is for a pointer into
-  ## the region to remain valid — or "" when the region is a variable's own storage.
+  ## the region to remain valid — or "" when the region is a variable's own storage. It
+  ## carries who else can reach the region (`refClass`).
   if not p.ok: return ""
   var last = -1
   for i, s in p.steps:
     if s == "*": last = i
   if last < 0: return ""
-  p.root & refSep & p.steps[0 ..< last].join("/") & refSep & p.disp & refSep &
-    (if p.global: "g" else: "l")
+  p.root & refSep & p.steps[0 ..< last].join("/") & refSep & p.disp & refSep & $ctx.refClass(p)
 
 proc refHandle(decl: CXCursor): int =
   ## What kind of thing a variable can hold a reference into storage with: 1 a pointer, 2 a
@@ -2280,7 +2348,7 @@ proc refCallSources(ctx: Ctx, call: CXCursor): tuple[sources, inherits: seq[stri
   proc same(ctx: Ctx, arg: CXCursor, res: var tuple[sources, inherits: seq[string]]) =
     ## the result points where the argument does
     let region = ctx.refPointee(arg)
-    let s = refSource(region)
+    let s = ctx.refSource(region)
     if s.len > 0: res.sources.add s
     if region.ok and region.root in ctx.refTargets: res.inherits.add region.root
   if not ind.isIndirect:
@@ -2319,7 +2387,7 @@ proc refCallSources(ctx: Ctx, call: CXCursor): tuple[sources, inherits: seq[stri
       else: continue
       if not region.ok: continue
       region.steps.add [".#", "*"]
-      result.sources.add refSource(region) & (if declared: "" else: refSep & callee)
+      result.sources.add ctx.refSource(region) & (if declared: "" else: refSep & callee)
     return
   for ai in 0 ..< na:                                      # through a function pointer
     let arg = clang_Cursor_getArgument(call, cuint(ai))
@@ -2327,7 +2395,7 @@ proc refCallSources(ctx: Ctx, call: CXCursor): tuple[sources, inherits: seq[stri
     var region = ctx.refPointee(arg)
     if not region.ok: continue
     region.steps.add [".#", "*"]
-    result.sources.add refSource(region) & refSep & callee
+    result.sources.add ctx.refSource(region) & refSep & callee
 
 proc refDerivation(ctx: Ctx, decl, rhs: CXCursor): tuple[sources, inherits: seq[string]] =
   ## What assigning `rhs` to the variable `decl` makes it refer into: the pointers it is
@@ -2369,13 +2437,13 @@ proc refDerivation(ctx: Ctx, decl, rhs: CXCursor): tuple[sources, inherits: seq[
           part = ctx.refLvalue(arg)
           if part.ok: part.steps.add [".#", "*"]
         else: continue
-        if refSource(part).len > 0: result.sources.add refSource(part)
+        if ctx.refSource(part).len > 0: result.sources.add ctx.refSource(part)
         if part.ok and part.root in ctx.refTargets: result.inherits.add part.root
       return
     region = ctx.refCallRegion(u)
   elif h == 2: region = ctx.refLvalue(rhs)
   else: region = ctx.refPointee(rhs)
-  if refSource(region).len > 0: result.sources.add refSource(region)
+  if ctx.refSource(region).len > 0: result.sources.add ctx.refSource(region)
   if region.ok and region.root in ctx.refTargets: result.inherits.add region.root
 
 proc refAggSlot(ctx: Ctx, e: CXCursor): tuple[key, root: string, steps: seq[string],
@@ -2412,7 +2480,18 @@ proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
   ctx.refReturnsDeclared = fnKey in ctx.returnsInto or spelling(fn) in ctx.returnsInto
   ctx.refReturns = ctx.returnsInto.getOrDefault(fnKey, @[]) &
                    ctx.returnsInto.getOrDefault(spelling(fn), @[])
-  ctx.refActive = ctx.refSites.len > 0 or promised.len > 0 or ctx.refReturnsDeclared
+  # what it declares it may reallocate or release: with `@invalidates` or `@preserves` on it,
+  # the function says so completely — nothing beyond what `@invalidates` lists
+  ctx.refDeclared = false
+  ctx.refMayInvalidate = @[]
+  for name in [fnKey, spelling(fn)]:
+    if name in ctx.invalidatesParams or name in ctx.preservesParams: ctx.refDeclared = true
+    ctx.refMayInvalidate.add ctx.invalidatesParams.getOrDefault(name, @[])
+  ctx.refExclusive = initHashSet[string]()
+  ctx.refReferences = initHashSet[string]()
+  let exclusive = ctx.uniqueParams.getOrDefault(fnKey, @[]) &
+                  ctx.uniqueParams.getOrDefault(spelling(fn), @[])
+  ctx.refActive = ctx.refSites.len > 0 or ctx.refDeclared or ctx.refReturnsDeclared
   if not ctx.refActive: return
   var pnames: seq[string]
   var pi = 0
@@ -2423,6 +2502,12 @@ proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
     if spelling(p) in promised or ("$" & $pi) in promised: ctx.refPromised[usr(p)] = spelling(p)
     ctx.refParamOf[usr(p)] = spelling(p)
     if ("$" & $pi) in ctx.refReturns: ctx.refReturns.add spelling(p)
+    if ("$" & $pi) in ctx.refMayInvalidate: ctx.refMayInvalidate.add spelling(p)
+    if spelling(p) in exclusive: ctx.refExclusive.incl usr(p)
+    if canonKind(p) in [tyLValueReference, tyRValueReference]: ctx.refReferences.incl usr(p)
+    # a parameter the function is declared to release is one it says it invalidates
+    for (idx, instr, accessor) in ctx.argContracts.getOrDefault(fnKey, @[]):
+      if idx == pi - 1 and instr == ikFree: ctx.refMayInvalidate.add spelling(p)
   for n in promised:
     if n == "this": ctx.refPromised["this"] = "this"
     elif n notin pnames and not n.startsWith("$"): ctx.refPromisedGlobals.incl n
@@ -2436,6 +2521,8 @@ proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
                braceInits: var seq[tuple[decl, init: CXCursor]]) =
     let k = clang_getCursorKind(n)
     let kids = collectChildren(n)
+    if k == ckVarDecl and canonKind(n) in [tyLValueReference, tyRValueReference]:
+      ctx.refReferences.incl usr(n)
     if k == ckVarDecl and kids.len > 0 and clang_isExpression(clang_getCursorKind(kids[^1])) != 0:
       if hasAutomaticStorage(n):
         if clang_getCursorKind(refStrip(kids[^1])) == ckLambdaExpr:
@@ -2466,7 +2553,7 @@ proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
         if refers: ctx.refTargets.incl usr(v)
         ctx.refRangeBodies[startOffset(kids[^1])] =
           (synth, ctx.cursorTokens(kids[^2]).join(""), (if refers: usr(v) else: ""),
-           spelling(v), refSource(region), startLine(n))
+           spelling(v), ctx.refSource(region), startLine(n))
     for ch in kids: ctx.collect(ch, stores, memberStores, braceInits)
   ctx.collect(body, stores, memberStores, braceInits)
   var grown = true
@@ -2517,16 +2604,27 @@ proc collectRefFacts(ctx: var Ctx, fn, body: CXCursor, fnKey: string) =
           ctx.refPromised[key] = name
           grown = true
 
+proc refUndeclaredEffect(ctx: Ctx, root, disp: string, global: bool, text, callee: string,
+                         kind, line: int, outp: var seq[Stmt]) =
+  ## The function being lowered declares what it may reallocate or release, and here it does
+  ## that to something reached through a parameter or a global the declaration does not name.
+  if not ctx.refDeclared: return
+  var name = ctx.refPromised.getOrDefault(root)
+  if name.len == 0: name = ctx.refParamOf.getOrDefault(root)
+  if name.len == 0 and root == "this": name = "this"
+  if name.len == 0 and global: name = disp
+  if name.len == 0 or name in ctx.refMayInvalidate: return
+  outp.add emit(ikRefNotPreserved, line, a = text, b = name, cKey = callee, off = kind)
+
 proc refInvalidate(ctx: Ctx, region: RefPath, text, callee: string, kind, line: int,
-                   outp: var seq[Stmt]) =
-  ## One call may have reallocated or released what `region` holds; and, when the function
-  ## being lowered declares that storage preserved, that it does not keep its word.
+                   outp: var seq[Stmt], cls = ' ') =
+  ## One call may have reallocated or released what `region` holds. `cls` says who else can
+  ## reach that storage when it cannot be read from `region` itself (a release names the
+  ## pointer, not the block).
   outp.add emit(ikRefInvalidate, line, a = text, b = callee, aKey = region.root,
-                bKey = region.steps.join("/"), off = kind)
-  var name = ctx.refPromised.getOrDefault(region.root)
-  if name.len == 0 and region.global and region.disp in ctx.refPromisedGlobals: name = region.disp
-  if name.len > 0:
-    outp.add emit(ikRefNotPreserved, line, a = text, b = name, cKey = callee, off = kind)
+                bKey = region.steps.join("/"), off = kind,
+                cKey = $(if cls != ' ': cls else: ctx.refClass(region)) & region.disp)
+  ctx.refUndeclaredEffect(region.root, region.disp, region.global, text, callee, kind, line, outp)
 
 proc refMethodEffect(ctx: Ctx, decl: CXCursor): int =
   ## What a method does to the storage its object manages: -1 leaves it in place, 0 may
@@ -2572,6 +2670,10 @@ proc refCallEffects(ctx: Ctx, call: CXCursor, outp: var seq[Stmt]) =
       if (pname.len > 0 and pname in l) or ("$" & $(pos + 1)) in l: return true
   let std = (dk in refMethodKinds or dk in [ckFunctionDecl, ckConstructor, ckDestructor]) and
             inStd(decl)
+  var calleeDeclared = false
+  if not ind.isIndirect:
+    for n in names:
+      if n in ctx.invalidatesParams or n in ctx.preservesParams: calleeDeclared = true
   var firstArg = 0
   if dk in refMethodKinds:
     let o = ctx.refObject(call)
@@ -2584,6 +2686,7 @@ proc refCallEffects(ctx: Ctx, call: CXCursor, outp: var seq[Stmt]) =
                           callee, eff, line, outp)
   let na = int(clang_Cursor_getNumArguments(call))
   let np = (if ind.isIndirect: -1 else: int(clang_Cursor_getNumArguments(decl)))
+  let before = outp.len
   for ai in firstArg ..< na:
     let arg = clang_Cursor_getArgument(call, cuint(ai))
     let pos = ai - firstArg
@@ -2611,13 +2714,12 @@ proc refCallEffects(ctx: Ctx, call: CXCursor, outp: var seq[Stmt]) =
       if region.steps.len > 0 and region.steps[^1] == "*":
         var held = region
         held.steps.setLen(held.steps.len - 1)
-        ctx.refInvalidate(held, text, callee, 2, line, outp)
+        ctx.refInvalidate(held, text, callee, 2, line, outp, ctx.refClass(region))
       continue
     var kind = 1
     if not ind.isIndirect:
       if ctx.declares(ctx.invalidatesParams, names, pname, pos): kind = 0
-      elif ctx.declares(ctx.preservesParams, names, pname, pos) or callee in knownBorrowFns:
-        continue
+      elif calleeDeclared or callee in knownBorrowFns: continue   # a declaration is complete
       elif std and callee in refStdKeeps: continue
       elif std and callee in refStdChanges: kind = 0
     ctx.refInvalidate(region, text, callee, kind, line, outp)
@@ -2627,16 +2729,30 @@ proc refCallEffects(ctx: Ctx, call: CXCursor, outp: var seq[Stmt]) =
      callee notin knownBorrowFns and callee notin ctx.deallocators and
      not (dk in refMethodKinds and spelling(clang_getCursorSemanticParent(decl)).len == 0)):
     # (a closure's call operator is not one of them: its body is read where it runs)
-    var keeps, changes: seq[string]
-    for n in names:
-      keeps.add ctx.preservesParams.getOrDefault(n, @[])
-      changes.add ctx.invalidatesParams.getOrDefault(n, @[])
-    outp.add emit(ikRefInvalidate, line, b = callee, bKey = keeps.join(";"),
-                  cKey = changes.join(";"), off = 3)
-    for g in ctx.refPromisedGlobals:
-      if g notin keeps:
-        outp.add emit(ikRefNotPreserved, line, a = g, b = g, cKey = callee,
-                      off = (if g in changes: 0 else: 1))
+    # ... nor does what it reaches have to be a global: it may be the very object a pointer of
+    # this function points into. Only a declaration says what the callee leaves alone.
+    var changes: seq[string]
+    if calleeDeclared:
+      let params = block:
+        var ps: seq[string]
+        if not ind.isIndirect:
+          for i in 0 ..< int(clang_Cursor_getNumArguments(decl)):
+            ps.add spelling(clang_Cursor_getArgument(decl, cuint(i)))
+        ps
+      for n in names:
+        for c in ctx.invalidatesParams.getOrDefault(n, @[]):
+          if c notin params and not c.startsWith("$") and c != "this": changes.add c
+    outp.add emit(ikRefInvalidate, line, b = callee, cKey = changes.join(";"), off = 3,
+                  off2 = (if calleeDeclared: 1 else: 0))
+    if ctx.refDeclared:
+      var told = false                            # already reported for an argument of this call
+      for i in before ..< outp.len:
+        if outp[i].kind == stInstr and outp[i].ik == ikRefNotPreserved: told = true
+      if not calleeDeclared and not told:
+        outp.add emit(ikRefNotPreserved, line, a = callee, b = "", cKey = callee, off = 1, off2 = 2)
+      for g in changes:
+        if g notin ctx.refMayInvalidate:
+          outp.add emit(ikRefNotPreserved, line, a = g, b = g, cKey = callee, off = 0)
 
 proc refAggSlot(ctx: Ctx, e: CXCursor): tuple[key, root: string, steps: seq[string],
                                                element: bool] =
@@ -2868,7 +2984,8 @@ proc withoutRefEvents(stmts: seq[Stmt]): seq[Stmt] =
   for s in stmts:
     case s.kind
     of stInstr:
-      if s.ik notin {ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved, ikRefReturn}:
+      if s.ik notin {ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved, ikRefReturn,
+                      ikRefDistinct}:
         result.add s
     of stIf:
       var c = Stmt(line: s.line, kind: stIf)
@@ -2922,7 +3039,7 @@ proc refStmtEvents(ctx: Ctx, c: CXCursor, outp, post: var seq[Stmt]) =
         for s in d.sources: roots.add s.split(refSep)[0]
       else:
         let region = ctx.refPointee(kids[0])
-        if refSource(region).len > 0 or (region.ok and region.root in ctx.refTargets):
+        if ctx.refSource(region).len > 0 or (region.ok and region.root in ctx.refTargets):
           roots.add region.root
       for r in roots:
         let name = ctx.refParamOf.getOrDefault(r)
@@ -3197,6 +3314,7 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
     if key.len == 0 and rel in ctx.lockClasses: (disp, key) = (rel, rel)
     if key.len > 0: outp.add emit(ikLockRelease, line, a = disp, aKey = key)
   ctx.emitUniqueChecks(call, callee, line, outp)
+  ctx.emitDistinctChecks(call, callee, line, outp)
   # INVARIANT at the call: a callee's `@invariant(param >= K)` is what its body assumes of that
   # parameter, so each call must establish it for the argument it passes.
   for lo in ctx.lowInvariants.getOrDefault(callee, @[]):
@@ -6459,10 +6577,22 @@ proc resolveRefs(ctx: var Ctx) =
     for site in sites:
       let fn = ctx.siteFuncName(site.file, site.line)
       if fn.len == 0: continue
+      # the declaration exists even with nothing in it: `@invalidates()` says "nothing"
+      if invalidates: discard ctx.invalidatesParams.mgetOrPut(fn, @[])
+      else: discard ctx.preservesParams.mgetOrPut(fn, @[])
       for name in site.spec.split(','):
         if name.strip.len == 0: continue
-        if invalidates: ctx.invalidatesParams.mgetOrPut(fn, @[]).add name.strip
-        else: ctx.preservesParams.mgetOrPut(fn, @[]).add name.strip
+        if invalidates: ctx.invalidatesParams[fn].add name.strip
+        else: ctx.preservesParams[fn].add name.strip
+  ctx.distinctSets = initTable[string, seq[seq[string]]]()
+  if ctx.distinctSites.len > 0: ctx.globalUsrs = collectFileScopeVars(ctx.tu)
+  for site in ctx.distinctSites:
+    let fn = ctx.siteFuncName(site.file, site.line)
+    if fn.len == 0: continue
+    var names: seq[string]
+    for name in site.spec.split(','):
+      if name.strip.len > 0: names.add name.strip
+    if names.len >= 2: ctx.distinctSets.mgetOrPut(fn, @[]).add names
   ctx.returnsInto = initTable[string, seq[string]]()
   for site in ctx.returnsIntoSites:
     let fn = ctx.siteFuncName(site.file, site.line)
@@ -6471,8 +6601,12 @@ proc resolveRefs(ctx: var Ctx) =
     for name in site.spec.split(','):
       if name.strip.len > 0: ctx.returnsInto[fn].add name.strip
   for nc in ctx.namedContracts:
-    if nc.kw == "@invalidates": ctx.invalidatesParams.mgetOrPut(nc.fn, @[]).add nc.param
-    elif nc.kw == "@preserves": ctx.preservesParams.mgetOrPut(nc.fn, @[]).add nc.param
+    if nc.kw == "@invalidates":
+      discard ctx.invalidatesParams.mgetOrPut(nc.fn, @[])
+      if nc.param.len > 0: ctx.invalidatesParams[nc.fn].add nc.param
+    elif nc.kw == "@preserves":
+      discard ctx.preservesParams.mgetOrPut(nc.fn, @[])
+      if nc.param.len > 0: ctx.preservesParams[nc.fn].add nc.param
     elif nc.kw == "@returns_into":
       discard ctx.returnsInto.mgetOrPut(nc.fn, @[])
       if nc.param.len > 0: ctx.returnsInto[nc.fn].add nc.param
@@ -6938,6 +7072,19 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
     ctx[].findLandingSites(body)
     ctx[].collectJmpLocals(c, body)
     ctx.curUnique = initHashSet[string]()
+    # the `@distinct` sets of this function, its parameters by key and its globals by name
+    ctx.curDistinct = @[]
+    block:
+      var sets = ctx.distinctSets.getOrDefault(spelling(c), @[])
+      if qualName(c).len > 0: sets.add ctx.distinctSets.getOrDefault(qualName(c), @[])
+      for set in sets:
+        var members: seq[string]
+        for name in set:
+          var key = name
+          for p in collectChildren(c):
+            if clang_getCursorKind(p) == ckParmDecl and spelling(p) == name: key = usr(p)
+          members.add key
+        ctx.curDistinct.add members
     ctx[].collectUniqueFacts(c, body)
     ctx[].collectRefFacts(c, body, fnKey)
     # the declared jump target, with `$N` written as this definition's own parameter names, so
@@ -7135,6 +7282,10 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
           borrowed.add params[idx].name
       ctx[].keptEscapes(c, body, names, borrowed, fn.body)
       ctx[].keptPassedOn(body, fn.body)
+      if ctx.refActive:
+        var sets = ctx.distinctSets.getOrDefault(spelling(c), @[])
+        if qualName(c).len > 0: sets.add ctx.distinctSets.getOrDefault(qualName(c), @[])
+        for set in sets: fn.body.add emit(ikRefDistinct, startLine(c), a = set.join(";"))
     for child in collectChildren(body):
       ctx[].lowerStmt(child, fn.body)
     # LANDING PARTS, lowered again now that the whole body has been: the code a longjmp returns

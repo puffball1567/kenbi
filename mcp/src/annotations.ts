@@ -365,13 +365,26 @@ the declared intent and reports where they disagree.
   and closures: a lambda holds a copy of what it
   captures by value, reads what it captures by reference when its body runs, and its body is
   read wherever the closure is used (called, or handed to something that may call it).
-- \`// @invalidates(<param>)\` / \`// @preserves(<param>)\` above a function declare which it
-  is — \`this\` for a method, a global by name; \`invalidates:\` / \`preserves:\` in a
-  \`@contract\` block for a library. A \`@preserves\` body is verified: releasing or
-  reallocating what the parameter holds, or passing it to a function that does not make the
-  same promise, is \`REF_NOT_PRESERVED\`. A \`const\` parameter needs no declaration, and the C
-  library's readers and writers are known. When unsure, declare \`@preserves\` and run the
-  check: a finding in the body names the line that reallocates.
+- \`// @invalidates(<names>)\` above a function declares what it may reallocate or release:
+  parameters (\`this\` for a method) and globals by name, with nothing between the parentheses
+  if nothing; \`invalidates:\` in a \`@contract\` block for a library. The declaration is
+  COMPLETE — the function does that to nothing else — and its body is checked against it:
+  releasing or reallocating something it does not name, or calling a function that may, is
+  \`REF_NOT_PRESERVED\`. \`// @preserves(<param>)\` says the same of one parameter. When unsure,
+  declare \`@invalidates()\` and run the check: a finding in the body names the line.
+- A function of the program that declares nothing may reallocate any storage behind a pointer,
+  handed to it or not (through a global, or another pointer to the same object): a pointer
+  kept across a call to it is \`REF_UNPROVEN\`. A \`const\` parameter is no promise. The C
+  library's functions are known. Fix: declare the callee, or take the pointer after the call.
+- An object that is reallocated may be the one another pointer points into: in
+  \`f(struct Buf *a, struct Buf *b)\`, a pointer into \`a\` is not safe across a call that
+  reallocates \`b\` or what a global points to (\`REF_UNPROVEN\`). \`// @distinct(a, b)\` above
+  the function declares the parameters and globals it names to be different objects; each
+  call is then checked — the same object for two of them is \`DISTINCT_ALIASED\`, a pair
+  nothing shows to differ is \`DISTINCT_UNPROVEN\` (shown different: distinct variables,
+  distinct members of one struct, separate allocations made in the caller, a local nothing
+  else has the address of, what the caller itself declares \`@distinct\`). Storage that belongs
+  to the function alone — a local array, a local container — is out of every callee's reach.
 - \`// @returns_into(<param>)\` above a function declares that its result points into storage
   reached through that parameter — an accessor such as \`char *buf_data(struct Buf *b)\`. The
   caller's copy is then followed like a pointer read out of the object. \`// @returns_into()\`
@@ -381,8 +394,6 @@ the declared intent and reports where they disagree.
   point into what any pointer argument holds: using it after that argument is invalidated is
   \`REF_UNPROVEN\`. \`strchr\`, \`memcpy\` and the like are known to return a pointer into
   their argument's block; a fresh allocation (\`@owns\`) points into nothing the caller holds.
-- Storage reached from a global can be changed by any function of the program: a pointer into
-  it held across a call needs that function to declare \`@preserves(<global>)\`.
 
 ## Type-confusion axis (tagged unions, opt-in)
 - \`// @typecheck\` above a function or at file level, plus

@@ -44,6 +44,7 @@ void brace_initialised(struct Buf *b) {
 }
 
 // an array of pointers, one of them into the buffer that moved
+// @distinct(a, b)
 void row_pointers(struct Buf *a, struct Buf *b) {
   char *rows[2];
   rows[0] = a->data;
@@ -53,6 +54,7 @@ void row_pointers(struct Buf *a, struct Buf *b) {
 }
 
 // an index that is not a constant may name the element that is invalid
+// @distinct(a, b)
 void row_by_variable(struct Buf *a, struct Buf *b, int i) {
   char *rows[2];
   rows[0] = a->data;
@@ -62,6 +64,7 @@ void row_by_variable(struct Buf *a, struct Buf *b, int i) {
 }
 
 // ... and a store through one may have put the pointer in any element
+// @distinct(a, b)
 void row_stored_by_variable(struct Buf *a, struct Buf *b, int i) {
   char *rows[2];
   rows[0] = a->data;
@@ -71,7 +74,8 @@ void row_stored_by_variable(struct Buf *a, struct Buf *b, int i) {
   rows[0][0] = 'x';                               //EXPECT REF_INVALIDATED
 }
 
-// the other element still points into a buffer nothing changed
+// the other element still points into a buffer nothing changed (`a` is declared distinct)
+// @distinct(a, b)
 void other_row(struct Buf *a, struct Buf *b) {
   char *rows[2];
   rows[0] = a->data;
@@ -108,7 +112,8 @@ void member_retaken(struct Buf *b) {
   s.ptr[0] = 'x';
 }
 
-// none of the buffers the rows point into is changed
+// none of the buffers the rows point into is changed (`c` is declared distinct from both)
+// @distinct(a, b, c)
 void rows_untouched(struct Buf *a, struct Buf *b, struct Buf *c) {
   char *rows[2];
   rows[0] = a->data;

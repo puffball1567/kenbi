@@ -1019,6 +1019,38 @@
    ],
    "file": "CWE758_Undefined_Behavior__setjmp_local_01.c",
    "provenance": null
+  },
+  {
+   "id": "CWE475_Undefined_Behavior_for_Input_to_API__same_object_04",
+   "cwe": "CWE-475",
+   "class": [
+    "DISTINCT_ALIASED"
+   ],
+   "axis": "ownership",
+   "intent": "call a function that needs two different objects",
+   "title": "One block is passed where a function declares two `@distinct` objects",
+   "contracts": [
+    "@distinct",
+    "@borrows"
+   ],
+   "file": "CWE475_Undefined_Behavior_for_Input_to_API__same_object_04.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE475_Undefined_Behavior_for_Input_to_API__maybe_same_05",
+   "cwe": "CWE-475",
+   "class": [
+    "DISTINCT_UNPROVEN"
+   ],
+   "axis": "ownership",
+   "intent": "forward two pointers to a function that needs two different objects",
+   "title": "Nothing shows that two forwarded pointers are different objects",
+   "contracts": [
+    "@distinct",
+    "@borrows"
+   ],
+   "file": "CWE475_Undefined_Behavior_for_Input_to_API__maybe_same_05.c",
+   "provenance": null
   }
  ]
 }

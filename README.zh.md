@@ -482,12 +482,18 @@ kenbi 能读懂的索引或长度是：变量加减一个常量（`buf[i]`、`bu
 - 被跟踪的对象：指针、引用和迭代器变量；视图（`string_view`、`span`，包括由各部分构造而成的）；
   保存在局部结构体成员或局部数组中的指针（各成员和各元素分别跟踪；用非常量下标访问的元素可能是其中任何一个）；以及闭包——lambda
   持有按值捕获内容的副本，按引用捕获的内容在其函数体运行时读取，其函数体在闭包被使用的每一处被读取。
-- 函数上方的 `// @invalidates(param)` / `// @preserves(param)` 声明属于哪一种（方法用 `this`，
-  全局变量用其名称；库函数用 `@contract` 块中的 `invalidates:` / `preserves:`）。`@preserves` 的
-  函数体会被验证：释放或重新分配该参数所持有的存储，或把它传给未作同样承诺的函数，为
-  `REF_NOT_PRESERVED`。`const` 参数无需声明。
-- 从全局变量可达的存储可被程序中的任何函数修改；要跨调用持有指向它的指针，被调用的函数必须声明
-  `@preserves(<全局变量>)`。
+- 函数上方的 `// @invalidates(...)` 声明它可能重新分配或释放的内容：参数（方法用 `this`）和按名称
+  列出的全局变量，若没有则括号内留空（库函数用 `@contract` 块中的 `invalidates:`）。该声明是完整的
+  ——函数不会对其他任何东西这样做——其函数体据此受检：释放或重新分配未列出的内容，或调用可能这样做
+  的函数，为 `REF_NOT_PRESERVED`。`// @preserves(param)` 对单个参数作同样的声明。未作任何声明的
+  程序内函数，无论是否把存储交给它（经由全局变量，或指向同一对象的另一指针），都可能重新分配指针
+  背后的任何存储；跨越对它的调用而持有的指针为 `REF_UNPROVEN`。`const` 参数不构成承诺。C 库函数
+  视为已知。
+- 被重新分配的对象可能正是另一指针所指向的对象：在 `f(struct Buf *a, struct Buf *b)` 中，指向
+  `a` 内部的指针跨越重新分配 `b` 的调用是不安全的，跨越重新分配全局变量所指对象的调用也是如此。
+  函数上方的 `// @distinct(a, b)` 声明所列参数和全局变量是不同的对象，每次调用都会受检：为其中两者
+  传入同一对象为 `DISTINCT_ALIASED`，无法表明互不相同的一对为 `DISTINCT_UNPROVEN`。仅属于该函数
+  自身的存储——局部数组、局部容器——任何被调用的函数都无法触及。
 - 函数上方的 `// @returns_into(param)` 声明其返回值指向经由 `param` 可达的存储内部；调用方得到的
   指针随后会像从对象中直接读出的指针一样被跟踪（`// @returns_into()`：不指向任何实参内部；
   `@contract` 块中为 `returns_into:`）。返回此类指针却未声明的函数为 `REF_RETURN_UNDECLARED`。
@@ -602,6 +608,7 @@ use <var> | free <var> | move <var> | if / else / endif
 不建模的形式的 `setjmp`）、
 `FINALLY_BYPASSED`（一个持有资源的出口绕过了声明的 `@goto_finally` 漏斗）、
 `BORROW_ESCAPES`（函数体保存了 `@borrows` 指针，或把它传给可能保存它的函数）、
+`DISTINCT_ALIASED` / `DISTINCT_UNPROVEN`（声明为 `@distinct` 却相同或可能相同的对象）、
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES`（被其他实参到达、或被函数体保留的
 `@unique` 参数）、
 `FREE_NONHEAP`（对指向栈或其他非堆存储的指针执行 `free`）、`BORROW_MOVED` /
@@ -836,7 +843,7 @@ kenbi 无法建模的内容会被拒绝而不是被跳过：`UNSTRUCTURED_GOTO`�
 ## 测试
 
 `tests/*.mc` 直接驱动引擎（17 个用例）。`tests/c/*.c` 与 `tests/cpp/*.cpp` 以真实
-C 和 C++ 承载这些场景外加注解专属的检查（370 个用例）；运行器通过 libclang 下降每个
+C 和 C++ 承载这些场景外加注解专属的检查（372 个用例）；运行器通过 libclang 下降每个
 文件，并将产生的诊断 —— **连同其源代码行号** —— 与各文件中的 `//EXPECT CODE` 标记进行
 核对（标记位于该行本身，或写作 `//EXPECT CODE@LINE`）。行号错误，或诊断缺失 / 多余，都会
 使测试集失败。`tests/run_tests_project.nim` 检查项目范围的覆盖率结果，`tests/run_tests_*.py`

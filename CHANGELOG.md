@@ -9,8 +9,30 @@ and the JSON output may change in any minor version.
 
 ### Added
 
-- `explain_finding` (MCP) has worked examples for `UNIQUE_UNPROVEN`, `UNIQUE_ESCAPES` and
-  `SETJMP_CLOBBERED`. The three-state corpus has 64 entries.
+- `// @distinct(a, b)` above a function declares the parameters and globals it names to be
+  different objects for the length of a call. Each call is checked: the same object passed for
+  two of them is `DISTINCT_ALIASED`, a pair nothing shows to differ is `DISTINCT_UNPROVEN`.
+  Inside the function, storage reached through one is not storage reached through another.
+- `// @invalidates()` with nothing between the parentheses declares that a function reallocates
+  and releases nothing.
+- `explain_finding` (MCP) has worked examples for `UNIQUE_UNPROVEN`, `UNIQUE_ESCAPES`,
+  `SETJMP_CLOBBERED`, `DISTINCT_ALIASED` and `DISTINCT_UNPROVEN`. The three-state corpus has
+  66 entries.
+
+### Changed
+
+- `@refcheck` follows storage a call is not handed. A function of the program that declares
+  nothing may reallocate any storage behind a pointer — through a global, or another pointer
+  to the same object — so a pointer kept across a call to it is `REF_UNPROVEN`, whether or not
+  the object is among the arguments; a `const` parameter is no longer taken as a promise. An
+  object that is reallocated may be the one another pointer points into, unless they are
+  declared `@distinct`, one of them is an `@unique` parameter, or the storage is the calling
+  function's own. Code that passed 0.2.0 by keeping a pointer across an undeclared function
+  of the program, or across the reallocation of another parameter, will draw findings.
+- A declaration of what a function reallocates is complete: with `@invalidates(...)` or
+  `@preserves(...)` on it, a function reallocates and releases nothing beyond what
+  `@invalidates` names, and its body is checked against that. Its callers no longer need a
+  `@preserves` for each other parameter.
 
 ## [0.2.0] - 2026-11-24
 

@@ -785,7 +785,7 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
      ikLockAcquire, ikLockRelease, ikGuardedAccess, ikRequiredLockCall, ikGuardedEscape,
      ikIndirectCall, ikFnAssign,
      ikInitWrite, ikInitRead, ikVariantAccess,
-     ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved, ikRefReturn: discard
+     ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved, ikRefReturn, ikRefDistinct: discard
   of ikMustUse:
     # the front-end emits this only at a statement-level call whose result is
     # discarded; the callee is declared `@must_use`, so dropping it is the bug.
@@ -1060,7 +1060,20 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
             o notin a.conflatedOrigins and o notin a.listOrigins and o notin a.arenaObjects
         verdict = (if a.freshBlock(if (s.off2 and 4) != 0: s.bKey else: s.aKey): -1 else: 2)
       let f = s.cKey.split('|')
-      if verdict == 1:
+      if f.len >= 3:
+        # the check of a `@distinct(param, other)` declaration
+        if verdict == 1:
+          a.addDiag(s.line, "DISTINCT_ALIASED",
+            "'" & f[0] & "' declares '" & f[1] & "' and '" & f[2] & "' `@distinct`, but here '" &
+            s.a & "' and '" & s.b & "' are the same object. Pass different objects, or a copy.")
+        elif verdict == 2:
+          a.addDiag(s.line, "DISTINCT_UNPROVEN",
+            "'" & f[0] & "' declares '" & f[1] & "' and '" & f[2] & "' `@distinct`, and nothing " &
+            "shows that '" & s.a & "' and '" & s.b & "' are different objects here. kenbi can " &
+            "tell for distinct variables, distinct members of one struct, separate allocations " &
+            "made in this function, a local nothing else has the address of, and what this " &
+            "function itself declares `@distinct` or `@unique`.")
+      elif verdict == 1:
         a.addDiag(s.line, "UNIQUE_ALIASED",
           "'" & f[0] & "' declares its parameter '" & f[1] & "' `@unique`, but this call passes '" &
           s.a & "' for it and '" & s.b & "' as another argument, and both point into the same " &
@@ -4198,7 +4211,7 @@ proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
   ## `goto` does. The promise of a function that declares `@preserves` (ikRefNotPreserved) is
   ## checked whether or not the axis is on: its callers rely on it.
   type
-    Cause = tuple[line, kind: int, callee, obj, via: string]
+    Cause = tuple[line, kind: int, callee, obj, via, other: string, how: int]
     RefState = object
       dead: bool
       src: Table[string, HashSet[string]]
@@ -4206,6 +4219,12 @@ proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
   var diags: seq[Diag]
   var seen = initHashSet[string]()
   var gotoIn = initTable[string, RefState]()
+  var distinctSets: seq[seq[string]]         # what the function declares to be different objects
+  for s in fn.body:
+    if s.kind == stInstr and s.ik == ikRefDistinct: distinctSets.add s.a.split(';')
+  proc declaredDistinct(x, y: string): bool =
+    for set in distinctSets:
+      if x in set and y in set and x != y: return true
   proc report(line: int, code, msg: string) =
     let k = $line & "|" & code & "|" & msg
     if k in seen: return
@@ -4222,18 +4241,48 @@ proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
     for k, v in y.bad:
       if k notin x.bad: x.bad[k] = v
   proc invalidate(st: var RefState, s: Stmt) =
-    let region = (if s.bKey.len > 0: s.bKey.split('/') else: @[])
-    let keeps = s.bKey.split(';')
-    let changes = s.cKey.split(';')
+    let region = (if s.off != 3 and s.bKey.len > 0: s.bKey.split('/') else: @[])
+    var changes: seq[string]
+    if s.off == 3:
+      for c in s.cKey.split(';'):
+        if c.len > 0: changes.add c
+    let cls = (if s.off != 3 and s.cKey.len > 0: s.cKey[0] else: ' ')
+    let regionDisp = (if s.off != 3 and s.cKey.len > 1: s.cKey[1 .. ^1] else: "")
+    proc mayBeSame(x, y: char, xs, ys: seq[string]): bool =
+      ## Can storage of class `x` and storage of class `y`, reached from different roots, be
+      ## the same object? Not when either is private to this function; not an `@unique`
+      ## parameter and another parameter; not two different global objects.
+      if x == 'p' or y == 'p': return false
+      if (x == 'x' and y in {'x', 'a'}) or (y == 'x' and x in {'x', 'a'}): return false
+      if x == 'g' and y == 'g': return (xs.len > 0 and xs[0] == "*") or (ys.len > 0 and ys[0] == "*")
+      true
     for p, sources in st.src:
+      # of everything `p` may refer into, the most definite reason counts: the storage itself
+      # before storage that may be the same
+      var best: Cause
+      var bestRank = -1
       for source in sources:
         let f = source.split("\x1f")
         if f.len < 4: continue
         let steps = (if f[1].len > 0: f[1].split('/') else: @[])
+        let srcCls = (if f[3].len > 0: f[3][0] else: 's')
         var kind = -1
+        var other = ""
+        var how = 0            # 0 the storage itself; 1 storage that may be the same; 2 a callee
+                               # that declares nothing
         case s.off
         of 3:
-          if f[3] == "g" and f[2] notin keeps: kind = (if f[2] in changes: 0 else: 1)
+          if s.off2 == 1:
+            # a callee that declares what it reallocates or releases: the globals it names,
+            # and whatever may be the same object as one of them
+            if srcCls == 'g' and f[2] in changes: kind = 0
+            elif srcCls != 'p':
+              for c in changes:
+                if not declaredDistinct(f[2], c):
+                  kind = 1; how = 1; other = c
+                  break
+          elif srcCls != 'p':
+            kind = 1; how = 2
         of 2:
           # the block that pointer holds, and everything reached through it
           if f[0] == s.aKey and (steps == region or
@@ -4241,10 +4290,16 @@ proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
         else:
           if f[0] == s.aKey and region.len <= steps.len and steps[0 ..< region.len] == region:
             kind = s.off
+        if kind < 0 and s.off != 3 and f[0] != s.aKey and mayBeSame(cls, srcCls, region, steps) and
+           not declaredDistinct(f[2], regionDisp):
+          kind = 1; how = 1; other = (if regionDisp.len > 0: regionDisp else: s.a)
         if kind >= 0:
           let via = (if f.len > 4: f[4] else: "")
-          st.bad[p] = (s.line, (if via.len > 0: 1 else: kind), s.b, f[2], via)
-          break
+          let rank = (if how == 0 and kind != 1: 3 elif how == 0: 2 else: 1)
+          if rank > bestRank:
+            bestRank = rank
+            best = (s.line, (if via.len > 0: 1 else: kind), s.b, f[2], via, other, how)
+      if bestRank >= 0: st.bad[p] = best
   proc walk(stmts: seq[Stmt], st: var RefState, breaks, conts: var seq[RefState]) =
     for s in stmts:
       case s.kind
@@ -4290,6 +4345,22 @@ proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
                 "or release what '" & c.obj & "' holds. Declare `@returns_into(<parameter>)` on '" &
                 c.via & "' — with nothing between the parentheses if the result points into none " &
                 "of its arguments. " & again)
+            elif c.kind == 1 and c.how == 1:
+              report(s.line, "REF_UNPROVEN",
+                (if s.off == 1: "This loop is still going over '" & s.a & "'"
+                 else: "'" & s.a & "' refers into storage reached through '" & c.obj & "'") &
+                ", and " & callee & " at line " & $c.line & " may reallocate or release what '" &
+                c.other & "' holds. Nothing shows that '" & c.obj & "' and '" & c.other &
+                "' are different objects. If they are, declare it above this function — " &
+                "`@distinct(" & c.obj & ", " & c.other & ")` — and each caller is checked. " & again)
+            elif c.kind == 1 and c.how == 2:
+              report(s.line, "REF_UNPROVEN",
+                what & callee & " at line " & $c.line & " declares nothing about what it " &
+                "reallocates or releases. A function of the program can reach storage it is not " &
+                "handed — through a global, or another pointer to the same object. Declare it: " &
+                "`@invalidates(...)` naming the parameters and globals it may reallocate or " &
+                "release, with nothing between the parentheses if it does neither; its body is " &
+                "then checked. " & again)
             elif c.kind == 1:
               report(s.line, "REF_UNPROVEN",
                 what & "nothing shows that " & callee & " at line " & $c.line & " leaves that " &
@@ -4304,8 +4375,15 @@ proc analyzeRefs(fn: Func, axisOn: bool): seq[Diag] =
         of ikRefInvalidate: invalidate(st, s)
         of ikRefNotPreserved:
           let callee = (if s.cKey.len > 0: "'" & s.cKey & "'" else: "a call")
+          if s.off2 == 2:
+            report(s.line, "REF_NOT_PRESERVED",
+              "this function declares what it may reallocate or release, but calls " & callee &
+              ", which declares nothing: it may reallocate or release storage this function " &
+              "does not name. Declare " & callee & " too (`@invalidates(...)`, empty if it " &
+              "does neither).")
+            continue
           report(s.line, "REF_NOT_PRESERVED",
-            "this function declares '" & s.b & "' `@preserves`, but passes '" & s.a & "' to " &
+            "this function declares that it leaves '" & s.b & "' in place, but passes '" & s.a & "' to " &
             callee & ", which " &
             (if s.off == 2: "releases or moves the storage it holds"
              elif s.off == 0: "may reallocate or release what it holds"
