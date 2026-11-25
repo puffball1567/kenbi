@@ -796,6 +796,9 @@ kenbi --format=json --safety=demo/safety/project.json
 每项义务都为 `verified`，或是在项目文件明确接受的假设下为 `conditional` 时，运行才会通过。
 上述文档以日语撰写，每份文档都说明了它不涵盖的内容。
 [`demo/safety/`](demo/safety/) 和 [`demo/dma/`](demo/dma/) 是基于虚构设备的完整示例。
+[`demo/littlefs/`](demo/littlefs/README.md) 把 littlefs 上的效果检查与编译器的调用图逐一对照测量：
+2,774 个判定，无一错误。[`contracts/c-library.contracts.json`](contracts/c-library.contracts.json)
+是面向 C 字符串函数和编译器内建函数的契约包，项目可自行选用。
 
 ## GREEN 承诺什么、不承诺什么
 

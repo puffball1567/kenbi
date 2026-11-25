@@ -9,6 +9,86 @@ proc symbol(c: CXCursor): string =
   if result.len > 0 and clang_getCursorLinkage(c) == 2:
     result = absolutePath(fileOf(clang_getCursorLocation(c))) & "#" & result
 
+proc pointerSymbol(decl: CXCursor): string =
+  ## The identity of a function pointer a contract can name. A parameter is its function's
+  ## symbol and its own name (`c:@F@walk_tree@param:visit`): the USR clang gives a parameter
+  ## embeds a source offset, which changes whenever the file above it is edited.
+  if clang_getCursorKind(decl) != ckParmDecl: return symbol(decl)
+  let owner = clang_getCursorSemanticParent(decl)
+  if clang_getCursorKind(owner) notin [ckFunctionDecl, ckCXXMethod]: return symbol(decl)
+  var name = spelling(decl)
+  if name.len == 0:
+    for i in 0 ..< int(clang_Cursor_getNumArguments(owner)):
+      if clang_equalCursors(clang_Cursor_getArgument(owner, cuint(i)), decl) != 0: name = $i
+  symbol(owner) & "@param:" & name
+
+proc constantTypeQuery(c: CXCursor): bool =
+  ## A `sizeof` / `_Alignof` whose value is an integer constant. Its operand is then not
+  ## evaluated (C11 6.5.3.4p2: only an operand of variable length array type is), so nothing
+  ## written inside it runs. A `sizeof` of a variable length array is not a constant and is
+  ## still refused.
+  let evaluated = clang_Cursor_Evaluate(c)
+  if evaluated.isNil: return false
+  defer: clang_EvalResult_dispose(evaluated)
+  clang_EvalResult_getKind(evaluated) == CXEval_Int
+
+proc calledPointer(call: CXCursor): string =
+  ## The function pointer an indirect call goes through, when the callee expression names it:
+  ## a struct field (`cfg->read(...)`), a variable or a parameter (`cb(...)`, `(*cb)(...)`).
+  let kids = collectChildren(call)
+  if kids.len == 0: return ""
+  var callee = stripped(kids[0])
+  for _ in 0 ..< 4:                               # `(*fp)(...)`, `(**fp)(...)`
+    if clang_getCursorKind(callee) != ckUnaryOperator: break
+    let inner = collectChildren(callee)
+    if inner.len != 1: return ""
+    callee = stripped(inner[0])
+  if clang_getCursorKind(callee) notin [ckMemberRefExpr, ckDeclRefExpr]: return ""
+  let decl = clang_getCursorReferenced(callee)
+  if clang_getCursorKind(decl) notin [ckFieldDecl, ckVarDecl, ckParmDecl]: return ""
+  pointerSymbol(decl)
+
+proc isFunctionPointer(t: CXType): bool =
+  ## a pointer to function, or a function type that decays to one (110 / 111: FunctionNoProto /
+  ## FunctionProto)
+  let c = clang_getCanonicalType(t)
+  if c.kind in [110.cint, 111]: return true
+  c.kind == tyPointer and clang_getCanonicalType(clang_getPointeeType(c)).kind in [110.cint, 111]
+
+proc functionArgument(tu: CXTranslationUnit, arg: CXCursor): tuple[kind: char, symbol: string] =
+  ## What is passed where a function pointer is expected: a function named directly (`f`,
+  ## `&f`), a parameter of the calling function passed on, a null pointer constant (`n`: no
+  ## function at all), or something else.
+  block:
+    # `0`, `(void *)0`, `NULL`, `nullptr`: look through parentheses and casts for the constant
+    var n = stripped(arg)
+    for _ in 0 ..< 6:
+      let k = clang_getCursorKind(n)
+      if k == ckCStyleCastExpr or k == ckParenExpr or k == ckUnexposedExpr:
+        let inner = collectChildren(n)
+        if inner.len == 0: break
+        n = stripped(inner[^1])
+      else: break
+    let k = clang_getCursorKind(n)
+    if k in [120.cint, 123]: return ('n', "")     # CXXNullPtrLiteralExpr, GNUNullExpr
+    if k == ckIntegerLiteral:
+      let evaluated = clang_Cursor_Evaluate(n)
+      if not evaluated.isNil:
+        defer: clang_EvalResult_dispose(evaluated)
+        if clang_EvalResult_getKind(evaluated) == CXEval_Int and
+           clang_EvalResult_getAsLongLong(evaluated) == 0: return ('n', "")
+  var e = stripped(arg)
+  for _ in 0 ..< 4:
+    if clang_getCursorKind(e) != ckUnaryOperator: break
+    let inner = collectChildren(e)
+    if inner.len != 1: break
+    e = stripped(inner[0])
+  if clang_getCursorKind(e) == ckDeclRefExpr:
+    let decl = clang_getCursorReferenced(e)
+    if clang_getCursorKind(decl) == ckFunctionDecl: return ('f', symbol(decl))
+    if clang_getCursorKind(decl) == ckParmDecl: return ('p', pointerSymbol(decl))
+  ('o', "")
+
 proc collectEffectFacts*(tu: CXTranslationUnit, cpp: bool,
                          args: seq[string], transformed: bool,
                          markers: seq[tuple[file, profile: string, line, after: int]],
@@ -34,15 +114,45 @@ proc collectEffectFacts*(tu: CXTranslationUnit, cpp: bool,
       return cvrContinue
     cvrRecurse
   discard clang_visitChildren(clang_getTranslationUnitCursor(tu), visitor, addr declarations)
+  var callees: HashSet[int]      # where a function is named as the callee of a direct call
   proc walk(c: CXCursor, fn: var EffectFunction) =
     let kind = clang_getCursorKind(c)
-    if kind == 136 and fixedTypeQuery(tu, c): return
+    if kind == 136 and (fixedTypeQuery(tu, c) or constantTypeQuery(c)): return
     if kind == ckCallExpr:
       let target = clang_getCursorReferenced(c)
       let direct = clang_getCursorKind(target) == ckFunctionDecl
-      fn.calls.add EffectCall(symbol: (if direct: symbol(target) else: ""),
+      var call = EffectCall(symbol: (if direct: symbol(target) else: ""),
         name: spelling(c), file: absolutePath(fileOf(clang_getCursorLocation(c))),
-        line: startLine(c), indirect: not direct)
+        line: startLine(c), indirect: not direct,
+        pointer: (if direct: "" else: calledPointer(c)))
+      let parts = collectChildren(c)
+      if direct and parts.len > 0: callees.incl startOffset(stripped(parts[0]))
+      for ai in 0 ..< int(clang_Cursor_getNumArguments(c)):
+        let arg = clang_Cursor_getArgument(c, cuint(ai))
+        if isFunctionPointer(clang_getCursorType(arg)):
+          let a = functionArgument(tu, arg)
+          call.fnArgs.add (ai, a.kind, a.symbol)
+      fn.calls.add call
+    # a function-pointer parameter given a new value in the body, or exposed by `&param`
+    if kind in [ckBinaryOperator, ckUnaryOperator]:
+      let parts = collectChildren(c)
+      if parts.len >= 1:
+        let lhs = stripped(parts[0])
+        let decl = clang_getCursorReferenced(lhs)
+        if clang_getCursorKind(lhs) == ckDeclRefExpr and clang_getCursorKind(decl) == ckParmDecl and
+           isFunctionPointer(clang_getCursorType(decl)):
+          let all = tokens(tu, c)
+          if kind == ckBinaryOperator and parts.len == 2:
+            let before = tokens(tu, parts[0]).len
+            if before < all.len and all[before] == "=":
+              let a = functionArgument(tu, parts[1])
+              fn.pointerStores.add (pointerSymbol(decl), a.kind, a.symbol)
+          elif kind == ckUnaryOperator and all.len > 0 and all[0] == "&":
+            fn.pointerStores.add (pointerSymbol(decl), 'o', "")
+    if kind == ckDeclRefExpr and clang_getCursorKind(clang_getCursorReferenced(c)) == ckFunctionDecl and
+       startOffset(c) notin callees:
+      let taken = symbol(clang_getCursorReferenced(c))
+      if taken notin fn.addressTaken: fn.addressTaken.add taken
     # Explicitly refuse constructs with hidden effects instead of treating them as pure.
     # 215 = GCCAsmStmt, 229 = MSAsmStmt, 136 = UnaryExpr (sizeof / alignof).
     # sizeof may evaluate a VLA size; absence of ordinary children is not proof of purity.
@@ -61,6 +171,10 @@ proc collectEffectFacts*(tu: CXTranslationUnit, cpp: bool,
     var fn = EffectFunction(symbol: symbol(decl), name: spelling(decl),
       file: absolutePath(fileOf(clang_getCursorLocation(decl))),
       first: startLine(decl), last: endLine(decl), nameLine: lineOf(clang_getCursorLocation(decl)))
+    fn.external = clang_getCursorLinkage(decl) == 3
+    for i in 0 ..< int(clang_Cursor_getNumArguments(decl)):
+      let parm = clang_Cursor_getArgument(decl, cuint(i))
+      fn.params.add (pointerSymbol(parm), isFunctionPointer(clang_getCursorType(parm)))
     for child in collectChildren(decl):
       # Parameter VLA bounds can execute on entry as well as expressions inside the body.
       if clang_getCursorKind(child) in [ckCompoundStmt, ckParmDecl]: walk(child, fn)

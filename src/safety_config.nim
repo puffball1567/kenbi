@@ -73,6 +73,8 @@ type
     symbol*, assumption*, package*, version*, origin*: string
     effects*: seq[string]
     preservesProtocols*: bool
+    library*: bool                  ## from a package marked `"library": true`: a general
+                                    ## package, whose entries a project need not all use
     contextsDeclared*: bool
     contexts*: seq[string]
     accessesDeclared*: bool
@@ -723,7 +725,9 @@ proc loadSafetyConfig*(path: string): SafetyConfig =
         cfg.regions[spec.id] = spec
   for path in contractPaths:
     let doc = read(path, "contracts")
-    keys(doc, ["schemaVersion", "kind", "id", "version", "functions", "artifacts", "compilation", "target", "marks", "regions"], path)
+    keys(doc, ["schemaVersion", "kind", "id", "version", "library", "functions", "artifacts", "compilation", "target", "marks", "regions"], path)
+    if doc.hasKey("library") and doc["library"].kind != JBool: fail(path & ": library must be boolean")
+    let library = doc.hasKey("library") and doc["library"].getBool
     markDefinitions(doc, path)
     regionDefinitions(doc, path)
     artifacts(doc, path)
@@ -744,7 +748,7 @@ proc loadSafetyConfig*(path: string): SafetyConfig =
         fail(path & ": preservesProtocols must be boolean")
       var contract = EffectContract(preservesProtocols: fn.hasKey("preservesProtocols") and fn["preservesProtocols"].getBool, symbol: symbol, effects: effectList(fn, "effects", path),
         assumption: word(fn, "assumption", path), package: word(doc, "id", path),
-        version: version, origin: path)
+        version: version, origin: path, library: library)
       if fn.hasKey("maxCallDepth"): contract.maxCallDepth = depthLimit(fn["maxCallDepth"], path)
       contract.maxStackBytes = -1
       if fn.hasKey("barrier"): contract.barrier = strings(fn, "barrier", path)

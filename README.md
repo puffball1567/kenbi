@@ -879,7 +879,10 @@ the result lists as assumptions), `unverified` or `violation`. Anything kenbi ca
 `unverified`, and the run passes only when every obligation is `verified`, or `conditional` on
 assumptions the project file explicitly accepts. The documents above are in Japanese, and each states what it does not cover.
 [`demo/safety/`](demo/safety/) and [`demo/dma/`](demo/dma/) are worked examples on fictional
-devices.
+devices. [`demo/littlefs/`](demo/littlefs/README.md) measures the effect check on littlefs
+against the compiler's call graph: 2,774 verdicts, none wrong.
+[`contracts/c-library.contracts.json`](contracts/c-library.contracts.json) is a contract package
+for the C string functions and compiler builtins that a project can opt into.
 
 ## What a GREEN does and does not promise
 

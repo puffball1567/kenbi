@@ -24,6 +24,19 @@ and the JSON output may change in any minor version.
   `SETJMP_CLOBBERED`, `DISTINCT_ALIASED` and `DISTINCT_UNPROVEN`. The three-state corpus has
   66 entries.
 
+- `--safety`: a call through a function-pointer parameter is followed to the functions passed
+  for that parameter on the call path — by name, through a function that hands the pointer on,
+  or assigned to the parameter in the body; a null pointer is nothing to call. A pointer whose
+  value the source does not settle (a struct field, a parameter of an exported function, a
+  value read back from memory) takes an effect contract on its own symbol, which the
+  `UNRESOLVED_EFFECT_CALL` finding now names (`c:@S@config@FI@read`, `c:@F@walk@param:visit`).
+- `contracts/c-library.contracts.json`: a contract package for the C string and memory
+  functions and the compiler builtins, for `--safety` projects to opt into. A contract file
+  marked `"library": true` may have entries a project does not use.
+- `demo/littlefs/`: a reproducible measurement of the `--safety` effect check on littlefs
+  against the compiler's call graph (2,774 verdicts over the released source and 40 seeded
+  faults, none wrong).
+
 ### Changed
 
 - `@refcheck` follows storage a call is not handed. A function of the program that declares
@@ -34,6 +47,9 @@ and the JSON output may change in any minor version.
   declared `@distinct`, one of them is an `@unique` parameter, or the storage is the calling
   function's own. Code that passed 0.2.0 by keeping a pointer across an undeclared function
   of the program, or across the reallocation of another parameter, will draw findings.
+- `--safety`: a `sizeof` or `_Alignof` whose value is a constant no longer makes a function
+  `unverified`; its operand is not evaluated. A `sizeof` of a variable length array type is
+  still refused.
 - A declaration of what a function reallocates is complete: with `@invalidates(...)` or
   `@preserves(...)` on it, a function reallocates and releases nothing beyond what
   `@invalidates` names, and its body is checked against that. Its callers no longer need a

@@ -219,7 +219,16 @@ with tempfile.TemporaryDirectory(prefix='safety-', dir=repo / 'tmp') as temporar
     run('transformed input remains explicitly unsupported', config, 1, 'unverified', ['UNSUPPORTED_EFFECT_MODEL'])
     marked.write_text('void *malloc(unsigned long);\n'
                       'int f(void) { return sizeof(malloc(8)); }\n')
-    result = run('unevaluated allocation is not a violation', config, 1, 'unverified', ['UNSUPPORTED_EFFECT_MODEL'])
+    # The operand of a `sizeof` whose value is a constant is not evaluated (C11 6.5.3.4p2):
+    # the allocation written inside it never runs.
+    result = run('unevaluated allocation is not a violation', config, 0, 'verified')
+    assert result['findings'] == [], result['findings']
+    # ... but the operand of a `sizeof` of a variable length array type is, so that one is
+    # still refused rather than read as free of effects.
+    marked.write_text('int g(void);\n'
+                      'unsigned long f(int n) { return sizeof(char[n + g()]); }\n')
+    result = run('sizeof of a variable length array stays unsupported', config, 1, 'unverified',
+                 ['UNSUPPORTED_EFFECT_MODEL'])
     assert 'FORBIDDEN_EFFECT' not in {f['code'] for f in result['findings']}
     # Two internal functions with the same name in distinct files must not unify.
     one = work / 'one.c'

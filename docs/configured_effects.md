@@ -155,6 +155,54 @@ Project の `extends: ["base.json"]` で共通設定を再利用できる。
 schema version 1 の kind は `project` と `contracts`。
 `target` / `device` や状態機械等を、現時点の parser が読み飛ばすことはない。未対応形式はエラーになる。
 
+## 関数ポインタ経由の呼び出し
+
+関数ポインタ型の引数を通じた呼び出しは、たどっている呼び出し経路上でその引数に渡された関数へ進む。
+
+```c
+static int each(int (*cb)(void *), void *d) { return cb ? cb(d) : 0; }
+int entry(void) { return each(leaf, NULL); }   /* each の中の cb(d) は leaf として検査する */
+```
+
+- 関数名で渡された関数をたどる。引数をそのまま別の関数へ渡した場合も、渡した先でたどる。
+- 関数本体が引数へ代入した関数（`cb = other;`）も、渡された関数に加えてたどる。
+- null ポインタ定数を渡した呼び出しには、呼び出す先がない。
+- 呼び出し経路ごとに区別する。同じ関数でも、別の関数を渡した呼び出し元は別々に検査する。
+
+次のものは、たどる先がソースから決まらない。該当するポインタの記号に効果契約が必要で、なければ
+`UNRESOLVED_EFFECT_CALL`（未検証）になる。診断は契約を書くべき記号を示す。
+
+| ポインタ | 契約の記号 |
+| --- | --- |
+| 構造体のフィールド（`cfg->read(...)`） | フィールドの USR（`c:@S@lfs_config@FI@read`） |
+| 検査の起点、または外部リンケージの関数の引数 | 関数の記号 + `@param:` + 引数名（`c:@F@walk@param:visit`） |
+| メモリから読み戻した値・関数以外の式を代入された引数 | その引数の記号（同上の形式） |
+| 変数に入れた関数ポインタ | 変数の USR |
+
+ポインタへの契約は「そこに設定され得るすべての関数が、この効果の範囲に収まる」という前提である。
+引数への契約は、不明な部分だけを補う。その引数に渡されたとソースから分かる関数は、契約があっても
+本体をたどる（契約で違反を隠すことはできない）。
+
+## 同梱の C ライブラリ契約
+
+[`contracts/c-library.contracts.json`](../contracts/c-library.contracts.json) は、標準 C の文字列・メモリ関数
+（`memcpy`, `memset`, `strlen`, `strchr` など）とコンパイラ組み込み関数（`__builtin_bswap32`,
+`__builtin_clz` など）を「対応する効果を一つも生じない」と宣言する契約パッケージ。
+project の `contracts` に追加し、前提 `c-library.string.no-effects` と `compiler.builtins.no-effects` を
+`acceptedAssumptions` に書いて使う。自動では適用しない。
+
+```json
+"contracts": ["path/to/contracts/c-library.contracts.json", "board.contracts.json"],
+"acceptedAssumptions": ["c-library.string.no-effects", "compiler.builtins.no-effects"]
+```
+
+契約ファイルの最上位に `"library": true` があるパッケージは汎用パッケージとして扱い、project が
+使っていない項目があってもエラーにしない。これがない契約ファイルでは、どの宣言・呼び出しにも
+一致しない記号は従来どおり入力エラーである。`free`, `printf`, `abort` などは実装によって効果が
+異なり得るため含めていない。必要なら project 側の契約で宣言する。
+
+実コードでの測定は [`demo/littlefs/`](../demo/littlefs/README.md) を参照。
+
 ## 結果・終了コード・追跡情報
 
 | status | 意味 |
@@ -176,9 +224,12 @@ Clang 版・Kenbi 版と実行バイナリの fingerprint・有効引数・作�
 
 ## 現在の解析境界
 
-C++ の暗黙の構築・破棄・dispatch、関数ポインタの候補解決、inline assembly、cleanup 等の
-局所属性、sizeof / alignof の可変長配列評価、並列 pragma の runtime 効果は未対応として成功を拒否する。
+C++ の暗黙の構築・破棄・dispatch、inline assembly、cleanup 等の局所属性、可変長配列型の
+sizeof、並列 pragma の runtime 効果は未対応として成功を拒否する。
 純粋性を推測してこれらの呼び出しを消さない。C++ の既存所有権検査への対応とは別の能力である。
+
+値が整数定数になる sizeof / _Alignof は、オペランドを評価しない（C11 6.5.3.4p2）ので効果なしとして扱う。
+可変長配列型の sizeof だけがオペランドを評価し得るため、未対応のまま拒否する。
 
 次の段階は、所有権等との統合、汎用状態機械と持続借用、target / device の領域・MMIO・DMA 制約。
 資源量・実時間の証拠も別途必要であり、この source-phase 結果から時間保証を導かない。

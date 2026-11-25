@@ -913,6 +913,10 @@ oder `conditional` unter Annahmen, die die Projektdatei ausdrücklich akzeptiert
 Dokumente sind auf Japanisch, und jedes gibt an, was es nicht abdeckt.
 [`demo/safety/`](demo/safety/) und [`demo/dma/`](demo/dma/) sind ausgearbeitete Beispiele auf
 fiktiven Geräten.
+[`demo/littlefs/`](demo/littlefs/README.md) misst die Effektprüfung an littlefs gegen den Aufrufgraphen
+des Compilers: 2.774 Urteile, keines falsch.
+[`contracts/c-library.contracts.json`](contracts/c-library.contracts.json) ist ein Vertragspaket für
+die C-Stringfunktionen und Compiler-Builtins, das ein Projekt einbinden kann.
 
 ## Was ein GREEN verspricht und was nicht
 

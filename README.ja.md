@@ -845,6 +845,10 @@ kenbi --format=json --safety=demo/safety/project.json
 明示的に受け入れた前提の下で `conditional` である場合だけです。上記の各ドキュメントには、それぞれが
 対象外とする範囲が記載されています。
 [`demo/safety/`](demo/safety/) と [`demo/dma/`](demo/dma/) は架空のデバイスを題材にした実例です。
+[`demo/littlefs/`](demo/littlefs/README.md) は、littlefs に対する効果検証をコンパイラの呼び出しグラフと
+突き合わせた測定です（2,774 件の判定で誤り 0 件）。
+[`contracts/c-library.contracts.json`](contracts/c-library.contracts.json) は、C の文字列関数と
+コンパイラ組み込み関数のための契約パッケージで、プロジェクトが選んで取り込みます。
 
 ## GREEN が約束すること・しないこと
 

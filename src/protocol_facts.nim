@@ -20,7 +20,7 @@ proc rangeTokens(tu: CXTranslationUnit, extent: CXSourceRange,
     if offset >= first and offset < last and clang_getTokenKind(items[i]) != tkComment:
       result.add $clang_getTokenSpelling(tu, items[i])
 
-proc tokens(tu: CXTranslationUnit, c: CXCursor): seq[string] =
+proc tokens*(tu: CXTranslationUnit, c: CXCursor): seq[string] =
   rangeTokens(tu, clang_getCursorExtent(c))
 
 proc alignmentLiteral(number: string): BiggestInt =
@@ -74,7 +74,7 @@ proc explicitAlignment*(tu: CXTranslationUnit, decl, attribute: CXCursor): clong
   if value == 0 and ts[0] != "_Alignas": return
   result = value
 
-proc stripped(c: CXCursor): CXCursor =
+proc stripped*(c: CXCursor): CXCursor =
   result = c
   while true:
     let kind = clang_getCursorKind(result)

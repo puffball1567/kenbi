@@ -880,6 +880,10 @@ resolver é `unverified`, e a execução só passa quando toda obrigação é `v
 estão em japonês, e cada um declara o que não cobre.
 [`demo/safety/`](demo/safety/) e [`demo/dma/`](demo/dma/) são exemplos completos sobre
 dispositivos fictícios.
+[`demo/littlefs/`](demo/littlefs/README.md) mede a verificação de efeitos no littlefs contra o grafo de
+chamadas do compilador: 2.774 veredictos, nenhum errado.
+[`contracts/c-library.contracts.json`](contracts/c-library.contracts.json) é um pacote de contratos para
+as funções de string do C e os builtins do compilador, que um projeto pode adotar.
 
 ## O que um GREEN promete e o que não promete
 

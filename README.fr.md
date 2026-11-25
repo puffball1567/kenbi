@@ -896,6 +896,10 @@ pas résoudre est `unverified`, et l'exécution ne réussit que lorsque chaque o
 Les documents ci-dessus sont en japonais, et chacun indique ce qu'il ne couvre pas.
 [`demo/safety/`](demo/safety/) et [`demo/dma/`](demo/dma/) sont des exemples complets sur des
 périphériques fictifs.
+[`demo/littlefs/`](demo/littlefs/README.md) mesure la vérification des effets sur littlefs par rapport au
+graphe d'appels du compilateur : 2 774 verdicts, aucun faux.
+[`contracts/c-library.contracts.json`](contracts/c-library.contracts.json) est un paquet de contrats pour
+les fonctions de chaînes du C et les builtins du compilateur, qu'un projet peut adopter.
 
 ## Ce qu'un GREEN promet et ne promet pas
 

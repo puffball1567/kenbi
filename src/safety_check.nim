@@ -84,12 +84,18 @@ proc checkSafety*(cfg: SafetyConfig): tuple[report: JsonNode, exitCode: int] =
           unitIssues.mgetOrPut(fn.symbol, @[]).add issue
       for call in fn.calls:
         if call.symbol.len > 0: symbols.incl call.symbol
+        if call.pointer.len > 0: symbols.incl call.pointer
+      for p in fn.params:
+        if p.fn: symbols.incl p.symbol
   for artifact in cfg.artifacts:
     if artifact.role == "parsed-input" and artifact.path notin parsedInputs:
       fail(artifact.source & ": required artifact was not parsed: " & artifact.path)
   if checks.len == 0: fail("no configured checks or @verify regions; refusing vacuous success")
-  for symbol in cfg.contracts.keys:
-    if symbol notin symbols: fail("external contract matches no declaration/call: " & symbol)
+  for symbol, contract in cfg.contracts:
+    # a contract written for this project that matches nothing is a mistake; an entry of a
+    # general library package the project does not use is not
+    if symbol notin symbols and not contract.library:
+      fail("external contract matches no declaration/call: " & symbol)
   for symbol in cfg.boundaries.keys:
     if symbol notin symbols: fail("function boundary matches no definition/call: " & symbol)
   # No cache is consumed: every invocation re-parses all configured source units.
@@ -98,16 +104,37 @@ proc checkSafety*(cfg: SafetyConfig): tuple[report: JsonNode, exitCode: int] =
     if not fileExists(path) or $secureHash(readFile(path)) != digest:
       fail(path & ": parsed/configured input differs from current contents")
 
+  proc isPointerParam(fn: EffectFunction, symbol: string): bool =
+    for p in fn.params:
+      if p.fn and p.symbol == symbol: return true
+
   proc summarize(root: string, context = "", checkContext = true): Summary =
     var summary: Summary
     var visited, active = initHashSet[string]()
-    proc walk(symbol: string, site: Site, chain: seq[string]) =
+    # FUNCTION-POINTER PARAMETERS. A call through a parameter reaches whatever was passed for
+    # that parameter on the path being walked. `Bound` is that, per parameter: the functions
+    # passed by name (`targets`), and the pointers the value may have come from that nothing
+    # on the path pins down (`origins`) — a parameter of the function the check starts at, a
+    # parameter that was handed something other than a function, or one of a function reached
+    # through a pointer. An origin is resolved only by an effect contract on that symbol.
+    type Bound = Table[string, tuple[targets, origins: HashSet[string]]]
+    proc walk(symbol: string, site: Site, chain: seq[string], bound: Bound) =
       if symbol in active:
         summary.effects.incl "recurse"
         summary.witnesses["recurse"] = (site, chain)
         return
-      if symbol in visited: return
-      visited.incl symbol
+      # a function is walked once for each different set of functions it is handed
+      var seen = symbol
+      if symbol in functions:
+        for p in functions[symbol].params:
+          if p.fn and p.symbol in bound:
+            var parts: seq[string]
+            for t in bound[p.symbol].targets: parts.add "t" & t
+            for o in bound[p.symbol].origins: parts.add "o" & o
+            parts.sort()
+            seen.add "\x1f" & p.symbol & "=" & parts.join(",")
+      if seen in visited: return
+      visited.incl seen
       active.incl symbol
       defer: active.excl symbol
       if symbol in cfg.boundaries: summary.boundaries[symbol] = (site, chain)
@@ -136,12 +163,77 @@ proc checkSafety*(cfg: SafetyConfig): tuple[report: JsonNode, exitCode: int] =
             (fn.file, issue.line), chain)
         for call in fn.calls:
           let next = chain & @[if call.indirect: "<indirect>" else: call.symbol]
-          if call.indirect or call.symbol.len == 0:
+          if call.indirect and call.pointer.len > 0 and call.pointer in cfg.contracts and
+             not isPointerParam(fn, call.pointer):
+            # a call through a function pointer whose every target is under a declared
+            # contract: whatever is installed there has no more than these effects
+            let contract = cfg.contracts[call.pointer]
+            summary.assumptions.incl contract.assumption
+            for effect in contract.effects:
+              summary.effects.incl effect
+              summary.witnesses[effect] = ((call.file, call.line), next)
+          elif call.indirect and isPointerParam(fn, call.pointer):
+            # through a function-pointer parameter: every function passed for it on this
+            # path, and a contract for each pointer its value may have come from
+            var known = (if call.pointer in bound: bound[call.pointer]
+                         else: (targets: initHashSet[string](),
+                                origins: [call.pointer].toHashSet))
+            # ... and whatever the body itself assigns to the parameter, on any path
+            for store in fn.pointerStores:
+              if store.target != call.pointer: continue
+              case store.kind
+              of 'f': known.targets.incl store.symbol
+              of 'n': discard
+              of 'p':
+                if store.symbol in bound:
+                  known.targets.incl bound[store.symbol].targets
+                  known.origins.incl bound[store.symbol].origins
+                else: known.origins.incl store.symbol
+              else: known.origins.incl call.pointer
+            for target in known.targets:
+              walk(target, (call.file, call.line), chain & @[target], initTable[string,
+                tuple[targets, origins: HashSet[string]]]())
+            for origin in known.origins:
+              if origin in cfg.contracts:
+                let contract = cfg.contracts[origin]
+                summary.assumptions.incl contract.assumption
+                for effect in contract.effects:
+                  summary.effects.incl effect
+                  summary.witnesses[effect] = ((call.file, call.line), next)
+              else:
+                summary.unverified = true
+                summary.findings.add finding("UNRESOLVED_EFFECT_CALL", "unverified",
+                  "cannot establish effects of a call through the function pointer " &
+                  call.pointer & ": what is passed for " & origin & " is not known here; an " &
+                  "effect contract for that symbol covers every function it may hold",
+                  (call.file, call.line), next)
+          elif call.indirect or call.symbol.len == 0:
             summary.unverified = true
             summary.findings.add finding("UNRESOLVED_EFFECT_CALL", "unverified",
-              "cannot establish effects of an indirect/unresolved call",
+              (if call.pointer.len > 0:
+                 "cannot establish effects of a call through the function pointer " &
+                 call.pointer & "; an effect contract for that symbol covers every function " &
+                 "it may hold"
+               else: "cannot establish effects of an indirect/unresolved call"),
               (call.file, call.line), next)
-          else: walk(call.symbol, (call.file, call.line), next)
+          else:
+            # what this call hands the callee for each of its function-pointer parameters
+            var passed: Bound
+            if call.symbol in functions:
+              let callee = functions[call.symbol]
+              for a in call.fnArgs:
+                if a.pos >= callee.params.len or not callee.params[a.pos].fn: continue
+                let p = callee.params[a.pos].symbol
+                var item = (targets: initHashSet[string](), origins: initHashSet[string]())
+                case a.kind
+                of 'f': item.targets.incl a.symbol
+                of 'n': discard                    # a null pointer: nothing to call
+                of 'p':
+                  if a.symbol in bound: item = bound[a.symbol]
+                  else: item.origins.incl a.symbol
+                else: item.origins.incl p
+                passed[p] = item
+            walk(call.symbol, (call.file, call.line), next, passed)
       elif symbol in heapPrimitives:
         summary.effects.incl "heap_allocate"
         summary.witnesses["heap_allocate"] = (site, chain)
@@ -170,7 +262,8 @@ proc checkSafety*(cfg: SafetyConfig): tuple[report: JsonNode, exitCode: int] =
         summary.unverified = true
         summary.findings.add finding("MISSING_EFFECT_CONTRACT", "unverified",
           "no analyzed body or external effect contract for " & symbol, site, chain)
-    walk(root, (functions[root].file, functions[root].first), @[root])
+    walk(root, (functions[root].file, functions[root].first), @[root],
+         initTable[string, tuple[targets, origins: HashSet[string]]]())
     if checkContext and context.len > 0:
       for item in summary.findings.mitems: item["executionContext"] = %context
     result = summary

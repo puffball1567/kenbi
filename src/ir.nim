@@ -797,6 +797,14 @@ type
     symbol*, name*, file*: string
     line*: int
     indirect*: bool
+    pointer*: string             ## an indirect call: the symbol of the function pointer it goes
+                                 ## through — a struct field, a variable or a parameter — when the
+                                 ## callee expression names one; "" otherwise
+    fnArgs*: seq[tuple[pos: int, kind: char, symbol: string]]
+                                 ## the arguments of function-pointer type: `f` a function named
+                                 ## directly (its symbol), `p` a function-pointer parameter of the
+                                 ## calling function passed on (its symbol), `n` a null pointer
+                                 ## constant, `o` anything else
 
   EffectFunction* = object
     protocolOwner*: string       ## enclosing definition for a required compound block
@@ -806,6 +814,13 @@ type
     nameLine*: int               ## line of the function's name, where compilers locate the function
     calls*: seq[EffectCall]
     unsupported*: seq[tuple[line: int, reason: string]]
+    params*: seq[tuple[symbol: string, fn: bool]] ## its parameters; `fn`: of function-pointer type
+    external*: bool              ## external linkage: it can be called from outside the sources
+    addressTaken*: seq[string]   ## functions named in its body other than as the callee of a call
+    pointerStores*: seq[tuple[target: string, kind: char, symbol: string]]
+                                 ## what its body assigns to its own function-pointer parameters
+                                 ## (kinds as for `fnArgs`); `o` also when a parameter's address
+                                 ## is taken, after which anything may be stored in it
 
   EffectUnit* = object
     targetTriple*: string
