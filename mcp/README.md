@@ -47,6 +47,18 @@ reference documentation, not a suggestion engine.
   A result without findings is reported as "no findings from the checks that ran", never
   as "clean" or "safe".
 
+- **`check_configured_safety`** — run the configured checks (`kenbi --safety`) on a project file:
+  for each function or block the project names, or the source marks with `// @verify(profile)`,
+  that the function and everything it calls stay clear of the effects its profile forbids
+  (heap allocation, recursion, blocking, waiting).
+  - `project: string` — path to the project JSON file.
+  - `cwd?: string`, `timeoutMs?: number` — as above.
+
+  The summary lists the violations and the obligations kenbi could not decide (`unverified` is
+  not a pass), each finding with what resolves it, and the declared assumptions a `conditional`
+  result rests on. The attached JSON holds the decisions and up to 200 findings; run the CLI
+  for the full document.
+
 - **`explain_finding`** — for a finding code (`"LEAK"`, `"WRONG_DEALLOCATOR"`) or a CWE id
   (`"CWE-415"`), return a worked example in three states: A what triggers it, B why a
   half-fix still fails, C the fix and the contract it declares. The examples come from the

@@ -59,6 +59,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 |---|---|
 | `check_memory_safety` | kenbi の指摘と、どの検査をどの関数に行ったかを示す要約。そのため「指摘なし」が「安全」と読まれることはない |
 | `explain_finding` | 指摘コードまたは CWE 番号に対して、何が原因か、中途半端な修正ではなぜ直らないか、宣言する契約と合わせた修正版 |
+| `check_configured_safety` | メモリ安全性以外の規則（`// @verify(profile)`、`--safety`）について、関数とその呼び出し先が、プロファイルの禁止する操作（ヒープ確保・再帰・ブロック）をしていないか。結果が何を前提にしているかも示します |
 | `kenbi://annotations` | 注釈のリファレンス |
 | `kenbi://patterns` | kenbi が受け入れる安全な C/C++ の形と、それが拒否する危険な形の対比 |
 

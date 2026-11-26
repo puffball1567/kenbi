@@ -169,6 +169,15 @@ advisory: `// @guarded_by(<lock>)` on a field, `// @requires_lock(<lock>)`,
 `// @acquires(<lock>)` / `// @releases(<lock>)` on functions, and
 `// @lock_order(<a> < <b>)`.
 
+**Rules that are not memory safety — `// @verify(profile)`.** An interrupt
+handler that must not allocate or block, a path that must not recurse: the
+profile is defined in a project file, and the check is a separate one
+(`kenbi --safety=project.json`, the `check_configured_safety` MCP tool). It
+follows every call, including calls through function pointers, and checks each
+contract against the code wherever the sources contain it. `unverified` is not a
+pass; `conditional` holds only under the assumptions the result lists, and
+accepting an assumption is a person's decision. See `kenbi://safety`.
+
 **Non-local jumps.** A function that can reach a `longjmp` declares it:
 `// @longjmps`, or `// @longjmps_to(<jmp_buf>)` when the buffer is known. Write
 the landing site as the whole condition of an `if` or `switch`

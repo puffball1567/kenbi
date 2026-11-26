@@ -201,3 +201,62 @@ test("explain_finding on an unknown code lists what it covers (not an error)", a
   assert.match(text(r), /No worked A\/B\/C example/);
   await c.close();
 });
+
+test("lists the check_configured_safety tool and the safety reference", async () => {
+  const c = await connect();
+  const { tools } = await c.listTools();
+  assert.ok(tools.some((t) => t.name === "check_configured_safety"), "tool present");
+  const { resources } = await c.listResources();
+  assert.ok(resources.some((r) => r.uri === "kenbi://safety"), "resource present");
+  const ref = await c.readResource({ uri: "kenbi://safety" });
+  assert.match(ref.contents[0].text, /@verify\(interrupt\)/);
+  assert.match(ref.contents[0].text, /acceptedAssumptions/);
+  await c.close();
+});
+
+test("reports a forbidden effect in a configured project, with its scope", async () => {
+  const c = await connect();
+  const r = await c.callTool({
+    name: "check_configured_safety",
+    arguments: { project: resolve(repoRoot, "demo/safety/project.json") },
+  });
+  const out = text(r);
+  assert.match(out, /NOT ACCEPTED/);
+  assert.match(out, /FORBIDDEN_EFFECT/);
+  assert.match(out, /irq_entry \[interrupt/);
+  // the function that holds is not listed as a violation
+  assert.doesNotMatch(out, /- pure_entry \[/);
+  // how to resolve it, and what the result covers
+  assert.match(out, /To resolve:/);
+  assert.match(out, /Scope — the result covers only this/);
+  await c.close();
+});
+
+test("resolves a relative project path against cwd", async () => {
+  const c = await connect();
+  const r = await c.callTool({
+    name: "check_configured_safety",
+    arguments: { project: "project.json", cwd: resolve(repoRoot, "demo/safety") },
+  });
+  assert.match(text(r), /FORBIDDEN_EFFECT/);
+  await c.close();
+});
+
+test("says that nothing was checked when the project file is refused", async () => {
+  const c = await connect();
+  const r = await c.callTool({
+    name: "check_configured_safety",
+    arguments: { project: resolve(repoRoot, "demo/safety/board.contracts.json") },
+  });
+  assert.match(text(r), /checked NOTHING/);
+  await c.close();
+});
+
+test("explains a finding of the configured checks", async () => {
+  const c = await connect();
+  const r = await c.callTool({ name: "explain_finding", arguments: { code: "UNRESOLVED_EFFECT_CALL" } });
+  assert.match(text(r), /function pointer/);
+  assert.match(text(r), /kenbi:\/\/safety/);
+  await c.close();
+});
+

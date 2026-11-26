@@ -58,6 +58,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 |---|---|
 | `check_memory_safety` | kenbi 的结果，以及说明对哪些函数运行了哪些检查的摘要，因此“没有结果”不会被读成“安全” |
 | `explain_finding` | 对于一个结果代码或 CWE 编号：触发原因、为什么半吊子的修复仍然失败，以及连同所声明契约的修复 |
+| `check_configured_safety` | 针对不属于内存安全的规则（`// @verify(profile)`、`--safety`）：函数及其调用的一切是否避开了其配置档所禁止的操作——堆分配、递归、阻塞——以及每个结果所依赖的前提 |
 | `kenbi://annotations` | 注解参考 |
 | `kenbi://patterns` | kenbi 接受的安全 C/C++ 写法，与它拒绝的不安全写法并列 |
 

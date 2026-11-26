@@ -13,6 +13,8 @@ import { summarize } from "./summary.js";
 import { ANNOTATIONS } from "./annotations.js";
 import { PATTERNS } from "./patterns.js";
 import { FINDINGS, type FindingEntry } from "./generated/findings.js";
+import { runKenbiSafety, summarizeSafety, SAFETY_FIXES } from "./safety.js";
+import { SAFETY_REFERENCE } from "./safety_reference.js";
 
 const server = new McpServer({ name: "kenbi-mcp", version: "0.2.0" });
 
@@ -74,6 +76,81 @@ server.registerTool(
       ],
     };
   }
+);
+
+server.registerTool(
+  "check_configured_safety",
+  {
+    title: "Check configured low-level rules (kenbi --safety)",
+    description:
+      "Run kenbi's configured checks on a project file: for each function or block the project " +
+      "names (or the source marks with `// @verify(profile)`), verify that the function and " +
+      "everything it calls stay clear of the effects its profile forbids — heap allocation, " +
+      "recursion, blocking, waiting. Use it for interrupt handlers, no-heap code paths and " +
+      "similar rules that are not memory safety. Contracts are not trusted where the sources can " +
+      "settle them: a contract is checked against the function it describes and against every " +
+      "function stored in a pointer it describes. `unverified` is NOT a pass, and `conditional` " +
+      "holds only under the assumptions the summary lists. Read the `kenbi://safety` resource " +
+      "for the project file, contracts and `@verify`; re-run after each change until the result " +
+      "is accepted.",
+    inputSchema: {
+      project: z.string().describe("Path to the project JSON file (`kind: \"project\"`)."),
+      cwd: z
+        .string()
+        .optional()
+        .describe("Working directory to resolve a relative `project` path against."),
+      timeoutMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Hard wall-clock limit in ms (default 60000, or $KENBI_TIMEOUT_MS)."),
+    },
+  },
+  async ({ project, cwd, timeoutMs }) => {
+    let result;
+    try {
+      result = runKenbiSafety(project, { cwd, timeoutMs });
+    } catch (e) {
+      return { isError: true, content: [{ type: "text", text: (e as Error).message }] };
+    }
+    // The summary is the part an agent reads; the full document can run to megabytes on a
+    // real project, so only its decisions are attached.
+    const compact = {
+      project: result.project,
+      status: result.status,
+      accepted: result.accepted,
+      obligations: (result.obligations ?? []).map((o) => ({
+        file: o.file,
+        function: o.function,
+        profile: o.profile,
+        status: o.status,
+        assumptions: o.assumptions,
+      })),
+      findings: result.findings.slice(0, 200),
+    };
+    return {
+      content: [
+        { type: "text", text: summarizeSafety(result) },
+        { type: "text", text: "```json\n" + JSON.stringify(compact, null, 2) + "\n```" },
+      ],
+    };
+  }
+);
+
+server.registerResource(
+  "safety",
+  "kenbi://safety",
+  {
+    title: "kenbi configured checks reference (--safety, @verify)",
+    description:
+      "How to declare and check low-level rules that are not memory safety: profiles of forbidden " +
+      "effects, `// @verify(profile)`, the project file, effect contracts and function pointers.",
+    mimeType: "text/markdown",
+  },
+  async (uri) => ({
+    contents: [{ uri: uri.href, mimeType: "text/markdown", text: SAFETY_REFERENCE }],
+  })
 );
 
 server.registerResource(
@@ -157,6 +234,19 @@ server.registerTool(
           }
     } else {
       entries = FINDINGS[key] ?? [];
+    }
+    if (entries.length === 0 && key in SAFETY_FIXES) {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `# Resolving \`${key}\` (configured checks, \`check_configured_safety\`)\n` +
+              `${SAFETY_FIXES[key]}\n\nSee \`kenbi://safety\` for the project file, contracts and ` +
+              `function pointers. Re-run \`check_configured_safety\` to confirm.`,
+          },
+        ],
+      };
     }
     if (entries.length === 0) {
       const known = Object.keys(FINDINGS).sort().join(", ");

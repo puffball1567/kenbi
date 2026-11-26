@@ -59,6 +59,7 @@ Der [MCP-Server](mcp/README.md) gibt einem Agenten den Prüfer und das Material,
 |---|---|
 | `check_memory_safety` | die Befunde von kenbi mit einer Zusammenfassung, die angibt, welche Prüfungen auf welchen Funktionen liefen, sodass „keine Befunde“ nie als „sicher“ gelesen wird |
 | `explain_finding` | zu einem Befundcode oder einer CWE-Nummer: was ihn auslöst, warum eine halbe Korrektur weiter scheitert, und die Korrektur mit dem Vertrag, den sie deklariert |
+| `check_configured_safety` | für Regeln, die keine Speichersicherheit sind (`// @verify(profile)`, `--safety`): ob eine Funktion und alles, was sie aufruft, frei von dem bleibt, was ihr Profil verbietet — Heap-Allokation, Rekursion, Blockieren — und worauf jedes Ergebnis beruht |
 | `kenbi://annotations` | die Annotationsreferenz |
 | `kenbi://patterns` | sichere C/C++-Formen, die kenbi akzeptiert, neben den unsicheren, die es ablehnt |
 

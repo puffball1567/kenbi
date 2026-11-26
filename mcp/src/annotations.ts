@@ -200,6 +200,14 @@ the declared intent and reports where they disagree.
   handler or a conversion is not matched, and what a may-throw CALL throws is unknown —
   those propagate unless a \`catch (...)\` ends the chain.
 
+## Rules that are not memory safety (\`--safety\`)
+- \`// @verify(<profile>)\` above a function definition or a \`{ ... }\` block requires that the
+  function (or block) and everything it calls stay clear of the effects the profile forbids —
+  heap allocation, recursion, blocking, waiting (an interrupt handler, a no-heap path). The
+  profile is defined in a project file. This is checked by the \`check_configured_safety\` tool,
+  not by \`check_memory_safety\`: a file with \`@verify\` checked without its project is an
+  error, never silently accepted. See the \`kenbi://safety\` resource.
+
 ## Adoption marker
 - \`// @kenbi\` above a function, or at file level — the unit is under kenbi discipline:
   an undeclared heap resource there is an error, not just a note, and the unit counts in

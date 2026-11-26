@@ -59,6 +59,7 @@ Le [serveur MCP](mcp/README.md) donne à un agent le vérificateur et de quoi ag
 |---|---|
 | `check_memory_safety` | les constats de kenbi, avec un résumé qui indique quelles vérifications ont porté sur quelles fonctions, pour qu'« aucun constat » ne soit jamais lu comme « sûr » |
 | `explain_finding` | pour un code de constat ou un identifiant CWE : ce qui le déclenche, pourquoi une demi-correction échoue encore, et la correction avec le contrat qu'elle déclare |
+| `check_configured_safety` | pour les règles qui ne relèvent pas de la sûreté mémoire (`// @verify(profile)`, `--safety`) : si une fonction et tout ce qu'elle appelle restent à l'écart de ce que son profil interdit — allocation sur le tas, récursion, blocage — et sur quoi repose chaque résultat |
 | `kenbi://annotations` | la référence des annotations |
 | `kenbi://patterns` | les formes C/C++ sûres que kenbi accepte, à côté des formes dangereuses qu'il rejette |
 

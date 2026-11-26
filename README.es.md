@@ -59,6 +59,7 @@ El [servidor MCP](mcp/README.md) da a un agente el verificador y el material par
 |---|---|
 | `check_memory_safety` | los hallazgos de kenbi, con un resumen que indica qué comprobaciones se ejecutaron sobre qué funciones, para que «sin hallazgos» nunca se lea como «seguro» |
 | `explain_finding` | para un código de hallazgo o un identificador CWE: qué lo provoca, por qué una corrección a medias sigue fallando, y la corrección con el contrato que declara |
+| `check_configured_safety` | para reglas que no son seguridad de memoria (`// @verify(profile)`, `--safety`): si una función y todo lo que llama se mantienen al margen de lo que su perfil prohíbe — asignación en el montículo, recursión, bloqueo — y en qué se apoya cada resultado |
 | `kenbi://annotations` | la referencia de anotaciones |
 | `kenbi://patterns` | formas seguras de C/C++ que kenbi acepta, junto a las formas inseguras que rechaza |
 

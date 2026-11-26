@@ -78,6 +78,7 @@ The [MCP server](mcp/README.md) gives an agent the checker and the material to a
 |---|---|
 | `check_memory_safety` | kenbi's findings, with a summary that states which checks ran on which functions, so "no findings" is never read as "safe" |
 | `explain_finding` | for a finding code or a CWE id: what triggers it, why a half-fix still fails, and the fix with the contract it declares |
+| `check_configured_safety` | for rules that are not memory safety (`// @verify(profile)`, `--safety`): whether a function and everything it calls stay clear of what its profile forbids — heap allocation, recursion, blocking — with what each result rests on |
 | `kenbi://annotations` | the annotation reference |
 | `kenbi://patterns` | safe C/C++ shapes kenbi accepts, next to the unsafe shapes it rejects |
 

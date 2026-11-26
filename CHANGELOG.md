@@ -43,6 +43,12 @@ and the JSON output may change in any minor version.
   against the compiler's call graph (2,774 verdicts over the released source and 40 seeded
   faults, none wrong).
 
+- MCP: `check_configured_safety` runs the configured checks (`--safety`) on a project file and
+  summarises the violations, what could not be decided, what resolves each finding and the
+  assumptions a passing result rests on; `kenbi://safety` is the reference for the project
+  file, `// @verify(profile)`, effect contracts and function pointers; `explain_finding`
+  answers for the findings of the configured checks.
+
 ### Changed
 
 - `@refcheck` follows storage a call is not handed. A function of the program that declares
