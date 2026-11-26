@@ -31,6 +31,8 @@ proc checkSafety*(cfg: SafetyConfig): tuple[report: JsonNode, exitCode: int] =
     if binding.clangVersion != clangVersion:
       fail(binding.source & ": compilation Clang version mismatch")
   var functions = initTable[string, EffectFunction]()
+  var cellStores = initTable[string, seq[tuple[cell: string, kind: char, symbol, file: string,
+                                              line: int]]]()
   var unitIssues = initTable[string, seq[string]]()
   var inputHashes = initTable[string, string]()
   var compilation = newJArray()
@@ -87,6 +89,10 @@ proc checkSafety*(cfg: SafetyConfig): tuple[report: JsonNode, exitCode: int] =
         if call.pointer.len > 0: symbols.incl call.pointer
       for p in fn.params:
         if p.fn: symbols.incl p.symbol
+    for store in facts.cellStores:
+      symbols.incl store.cell
+      if store notin cellStores.getOrDefault(store.cell):
+        cellStores.mgetOrPut(store.cell, @[]).add store
   for artifact in cfg.artifacts:
     if artifact.role == "parsed-input" and artifact.path notin parsedInputs:
       fail(artifact.source & ": required artifact was not parsed: " & artifact.path)
@@ -424,6 +430,38 @@ proc checkSafety*(cfg: SafetyConfig): tuple[report: JsonNode, exitCode: int] =
         contractFindings.mgetOrPut(symbol, @[]).add finding("CONTRACT_BODY_UNVERIFIED", "unverified",
           "implementation effect contract could not be established",
           (functions[symbol].file, functions[symbol].first), @[symbol])
+    elif symbol in cellStores:
+      # A contract on a function pointer — a struct field, a variable — covers every function
+      # stored there. Each store the sources contain is checked against it: the function
+      # stored may have no effect the contract does not declare. What is stored outside the
+      # analysed sources remains what the contract says it is, an assumption.
+      for store in cellStores[symbol]:
+        let site = (store.file, store.line)
+        case store.kind
+        of 'n': discard                              # a null pointer: nothing to call
+        of 'f':
+          var effects: HashSet[string]
+          var unverified = false
+          if store.symbol in functions:
+            let summary = summarize(store.symbol, checkContext = false)
+            effects = summary.effects
+            unverified = summary.unverified
+          elif store.symbol in cfg.contracts:
+            for effect in cfg.contracts[store.symbol].effects: effects.incl effect
+          else: unverified = true
+          for effect in ordered(effects):
+            if effect notin contract.effects:
+              contractFindings.mgetOrPut(symbol, @[]).add finding("CONTRACT_EFFECT_MISMATCH", "violation",
+                "the function stored here may perform effect '" & effect & "', which the contract " &
+                "for " & symbol & " does not declare", site, @[symbol, store.symbol])
+          if unverified:
+            contractFindings.mgetOrPut(symbol, @[]).add finding("CONTRACT_BODY_UNVERIFIED", "unverified",
+              "the effects of the function stored here could not be established, so the contract " &
+              "for " & symbol & " is not shown to cover it", site, @[symbol, store.symbol])
+        else:
+          contractFindings.mgetOrPut(symbol, @[]).add finding("CONTRACT_STORE_UNKNOWN", "unverified",
+            "what is stored here is not a function named in the source, so the contract for " &
+            symbol & " cannot be checked against it", site, @[symbol])
 
   for symbol, contract in cfg.contracts:
     if symbol notin functions or not contract.contextsDeclared: continue

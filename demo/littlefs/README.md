@@ -23,7 +23,7 @@ with the compiler's call graph for the same source (`gcc -fcallgraph-info` at `-
 completed with the calls a compiler does not draw: a function that names another as a value,
 passing it as a callback or assigning it to one, reaches it.
 
-Three runs:
+The runs:
 
 - **default build**: the source as released. Four exported functions reach `malloc`.
 - **`LFS_NO_MALLOC` build**: the source as released. None does.
@@ -31,6 +31,10 @@ Three runs:
   hidden allocation, or a call into a recursive helper (20 functions, both faults: 40
   variants), and every exported function is checked again. The ground truth is recomputed for
   each variant.
+- **integrated**: littlefs's own RAM block device (`bd/lfs_rambd.c`) and a file that installs it
+  in a `struct lfs_config` are added to the sources, so the contracts on the block-device
+  callbacks have something to be checked against; then the same with an allocation seeded into
+  the device's read function.
 
 A verdict is wrong when kenbi accepts a function whose closure violates the property, or
 reports a violation in one whose closure does not.
@@ -44,6 +48,11 @@ littlefs v2.9.3, kenbi 0.2.0 with the changes listed below, libclang 14, gcc 11.
 | default build | 68 | 4 of 4 | 64 | 0 | 0 |
 | `LFS_NO_MALLOC` build | 66 | 0 of 0 | 66 | 0 | 0 |
 | seeded faults (40 variants) | 2640 | 452 of 452 | 2188 | 0 | 0 |
+
+In the integrated run the four block-device contracts are checked against the four functions
+installed, with no mismatch. With the fault seeded in `lfs_rambd_read`, the run is a violation,
+reported where the function is installed (`CONTRACT_EFFECT_MISMATCH` at `.read = lfs_rambd_read`):
+the contract says `read` does not allocate, and the function stored there may.
 
 The two released builds agree with what littlefs documents: with `LFS_NO_MALLOC` no exported
 function can reach an allocation, and no exported function recurses in either build.
@@ -61,13 +70,19 @@ source files, the profiles and the functions to check, and these contracts:
 - the four block-device callbacks of `struct lfs_config` (`read`, `prog`, `erase`, `sync`)
   and the callback handed to `lfs_fs_traverse`: what the integrator installs there neither
   allocates nor recurses;
-- `lfs_dir_traverse` keeps callbacks on an explicit stack and reads them back; the contract
-  states that what it reads back is what it was handed;
 - `__assert_fail`, `printf`, and in the default build `malloc` and `free`, for the effects
   the allocation model does not cover.
 
-Seven assumptions in all, each accepted by name in the project file. A wrong symbol in a
+Six assumptions in all, each accepted by name in the project file. A wrong symbol in a
 contract is an input error, not a silent miss.
+
+A contract is not taken on trust where the sources can settle it. A contract on a function
+pointer is checked against every function the analysed sources store in it: the function may
+have no effect the contract does not declare, and a store of something that is not a named
+function leaves the contract unchecked (`unverified`). What is stored outside the analysed
+sources is all that remains an assumption. `lfs_dir_traverse` keeps its callback on an explicit
+stack and reads it back; that needs no contract at all, because the stack is a local of the
+function that nothing else writes, and what the function put there is in the source.
 
 ## What the measurement changed in kenbi
 
@@ -87,6 +102,9 @@ that are now addressed:
   remains unknown — a struct field, a parameter of an exported function, a value read back
   from memory — is resolved by a contract on that pointer's symbol, which the finding names.
 
+- **Contracts on function pointers are checked.** Each store the sources contain — an
+  assignment, a designated or positional initialiser — is held against the contract, as above.
+
 The seeded-fault run also caught a defect in the first version of that resolution: a callback
 assigned to the parameter inside the function (`cb = lfs_dir_traverse_filter;`) was not
 followed, so twelve violations were accepted. It is fixed, and
@@ -102,5 +120,8 @@ followed, so twelve violations were accepted. It is fixed, and
 - The callback edges of the ground truth are read from the source text by name. They were
   checked by hand for this version (nine edges); another version needs the same check.
 - The seeded faults are direct: an allocation or a recursive call written in a function's
-  body. A fault hidden behind a pointer kenbi has to be told about is only as visible as the
-  contract for that pointer is true.
+  body.
+- A contract about code outside the analysed sources — a block device a different project
+  installs — is a declared boundary, like a contract for a library function: it is listed in
+  every result as an assumption, and it is checked the moment that code is added to the
+  sources.

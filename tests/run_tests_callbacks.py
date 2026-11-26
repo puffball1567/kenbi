@@ -136,4 +136,107 @@ with tempfile.TemporaryDirectory(prefix='callbacks-', dir=repo/'tmp') as directo
     result = run(contracts=['typo.json'], accepted=['typo'], exit_code=2)
     check('matches no declaration' in result['findings'][0]['message'], result['findings'])
 
+STORES = '''#include <stddef.h>
+void *malloc(unsigned long);
+struct device { int (*read)(void *buffer); int (*write)(void *buffer); };
+struct frame { int tag; int (*cb)(void *); };
+
+static int read_pure(void *b) { (void)b; return 0; }
+static int write_alloc(void *b) { (void)b; return malloc(4) != NULL; }
+int (*pick(void))(void *);
+
+/* installed by designator, by position, and by assignment */
+struct device by_designator = { .read = read_pure, .write = write_alloc };
+struct device by_position = { read_pure, write_alloc };
+void install(struct device *d) { d->read = read_pure; }
+void install_unknown(struct device *d) { d->read = pick(); }
+
+int through_read(struct device *d, void *b) { return d->read(b); }
+int through_write(struct device *d, void *b) { return d->write(b); }
+
+/* a callback kept in a local of the function and read back before it is called */
+static int kept(int (*cb)(void *), void *data) {
+  struct frame stack[2];
+  stack[0] = (struct frame){ .tag = 1, .cb = cb };
+  cb = stack[0].cb;
+  return cb(data);
+}
+/* ... the same, but the local is handed to something else in between */
+void scribble(struct frame *f);
+static int kept_exposed(int (*cb)(void *), void *data) {
+  struct frame stack[2];
+  stack[0] = (struct frame){ .tag = 1, .cb = cb };
+  scribble(stack);
+  cb = stack[0].cb;
+  return cb(data);
+}
+int kept_pure(void) { return kept(read_pure, NULL); }
+int kept_alloc(void) { return kept(write_alloc, NULL); }
+int exposed_pure(void) { return kept_exposed(read_pure, NULL); }
+'''
+
+with tempfile.TemporaryDirectory(prefix='callbacks-', dir=repo/'tmp') as directory:
+    work = Path(directory)
+
+    def run(source, functions, contracts, accepted, exit_code):
+        (work/'st.c').write_text(source)
+        (work/'c.json').write_text(json.dumps(dict(
+            schemaVersion=1, kind='contracts', id='device', version='1', functions=contracts)))
+        project = dict(schemaVersion=1, kind='project', id='stores', sources=['st.c'],
+                       profiles={'no_heap': {'forbid': ['heap_allocate']}},
+                       checks=[dict(file='st.c', function=f, profile='no_heap') for f in functions],
+                       contracts=['c.json'] if contracts else [], acceptedAssumptions=list(accepted))
+        (work/'project.json').write_text(json.dumps(project))
+        p = subprocess.run([binary, '--format=json', '--safety=' + str(work/'project.json')],
+                           capture_output=True, text=True, cwd=repo)
+        assert p.returncode == exit_code, (p.returncode, p.stdout[:3000], p.stderr)
+        return json.loads(p.stdout)
+
+    def check(cond, what):
+        global count
+        assert cond, what
+        count += 1
+
+    read = dict(symbol='c:@S@device@FI@read', effects=[], assumption='device.read.no-heap')
+    write_wrong = dict(symbol='c:@S@device@FI@write', effects=[], assumption='device.write.no-heap')
+    write_right = dict(symbol='c:@S@device@FI@write', effects=['heap_allocate'],
+                       assumption='device.write.allocates')
+    # (what `malloc` does besides allocating is the platform's to declare)
+    heap = dict(symbol='c:@F@malloc', effects=['heap_allocate'], assumption='libc.malloc.allocates-only')
+
+    # A contract on a field is checked against every function the sources store there: one
+    # that says `write` does not allocate is contradicted by the function installed.
+    result = run(STORES.replace('void install_unknown(struct device *d) { d->read = pick(); }', ''),
+                 ['through_read', 'through_write'], [read, write_wrong, heap],
+                 ['device.read.no-heap', 'device.write.no-heap', 'libc.malloc.allocates-only'], 1)
+    mismatches = [f for f in result['findings'] if f['code'] == 'CONTRACT_EFFECT_MISMATCH']
+    check(result['status'] == 'violation' and len(mismatches) == 2, result['findings'])
+    # ... once for the designated initialiser and once for the positional one
+    check(sorted(f['line'] for f in mismatches) == [11, 12], mismatches)
+    check(all('c:@S@device@FI@write' in f['message'] for f in mismatches), mismatches)
+
+    # The contract that says what the installed function does is accepted, and the profile
+    # then fails where the field is called.
+    result = run(STORES.replace('void install_unknown(struct device *d) { d->read = pick(); }', ''),
+                 ['through_read', 'through_write'], [read, write_right, heap],
+                 ['device.read.no-heap', 'device.write.allocates', 'libc.malloc.allocates-only'], 1)
+    s = {o['function']: o['status'] for o in result['obligations']}
+    check(s == {'through_read': 'conditional', 'through_write': 'violation'}, s)
+    check(not [f for f in result['findings'] if f['code'].startswith('CONTRACT_')], result['findings'])
+
+    # A store of something that is not a named function leaves the contract unchecked.
+    result = run(STORES, ['through_read'], [read, write_right, heap],
+                 ['device.read.no-heap', 'device.write.allocates', 'libc.malloc.allocates-only'], 1)
+    check(any(f['code'] == 'CONTRACT_STORE_UNKNOWN' and f['line'] == 14 for f in result['findings']),
+          result['findings'])
+    check(result['status'] == 'unverified', result['status'])
+
+    # A callback read back out of a local the function alone writes is the one it put there.
+    result = run(STORES.replace('void install_unknown(struct device *d) { d->read = pick(); }', ''),
+                 ['kept_pure', 'kept_alloc', 'exposed_pure'], [], [], 1)
+    s = {o['function']: o['status'] for o in result['obligations']}
+    check(s['kept_pure'] == 'verified' and s['kept_alloc'] == 'violation', s)
+    # ... but not when the local was handed to another function in between
+    check(s['exposed_pure'] == 'unverified', s)
+
 print(f'{count} function-pointer and library-contract CLI checks passed')

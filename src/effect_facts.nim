@@ -89,6 +89,121 @@ proc functionArgument(tu: CXTranslationUnit, arg: CXCursor): tuple[kind: char, s
     if clang_getCursorKind(decl) == ckParmDecl: return ('p', pointerSymbol(decl))
   ('o', "")
 
+proc assignment(tu: CXTranslationUnit, c: CXCursor): bool =
+  ## a plain `=` (not `==`, `+=`, ...)
+  let parts = collectChildren(c)
+  if clang_getCursorKind(c) != ckBinaryOperator or parts.len != 2: return false
+  let all = tokens(tu, c)
+  let before = tokens(tu, parts[0]).len
+  before < all.len and all[before] == "="
+
+proc initialiserFor(tu: CXTranslationUnit, list, field: CXCursor): tuple[found: bool, value: CXCursor] =
+  ## The expression a brace initialiser gives one field of its struct: by designator
+  ## (`.read = f`) or by position. `found` is false when the list leaves the field out (it is
+  ## then zero) or is not a list for the struct the field belongs to.
+  let record = clang_getTypeDeclaration(clang_getCanonicalType(clang_getCursorType(list)))
+  if clang_equalCursors(record, clang_getCursorSemanticParent(field)) == 0: return
+  var position = -1
+  var i = 0
+  for f in collectChildren(record):
+    if clang_getCursorKind(f) != ckFieldDecl: continue
+    if clang_equalCursors(f, field) != 0: position = i
+    inc i
+  var index = 0
+  for item in collectChildren(list):
+    let inner = collectChildren(item)
+    if clang_getCursorKind(item) == ckUnexposedExpr and inner.len == 2 and
+       clang_getCursorKind(inner[0]) == 47:        # a designator: MemberRef, then the value
+      if clang_equalCursors(clang_getCursorReferenced(inner[0]), field) != 0: return (true, inner[1])
+    else:
+      if index == position: return (true, item)
+      inc index
+
+proc localFieldValues(tu: CXTranslationUnit, body: CXCursor, local: string, field: CXCursor):
+    tuple[known: bool, values: seq[tuple[kind: char, symbol: string]]] =
+  ## What the function-pointer `field` of the automatic local `local` can hold: everything the
+  ## function stores into it — `local.field = v`, `local[i].field = v`, an element or the whole
+  ## assigned a compound literal, the local's own initialiser. Nothing else can write it as
+  ## long as the local is only ever used member by member; if its address is taken or it is
+  ## used as a whole, or one of those stores is not a literal, the answer is not known.
+  var known = true
+  var values: seq[tuple[kind: char, symbol: string]]
+  proc rooted(e: CXCursor): bool =
+    ## does this lvalue name storage inside `local` itself?
+    var u = stripped(e)
+    for _ in 0 ..< 16:
+      let k = clang_getCursorKind(u)
+      let kids = collectChildren(u)
+      if k == ckDeclRefExpr: return referencedUsr(u) == local
+      if k == ckMemberRefExpr:
+        let ts = tokens(tu, u)
+        if kids.len != 1 or (ts.len >= 2 and ts[^2] == "->"): return false
+        u = stripped(kids[0])
+      elif k == ckArraySubscriptExpr and kids.len == 2: u = stripped(kids[0])
+      else: return false
+  proc fromList(list: CXCursor) =
+    let t = clang_getCanonicalType(clang_getCursorType(list))
+    if t.kind == tyRecord:
+      let init = initialiserFor(tu, list, field)
+      if init.found:
+        let a = functionArgument(tu, init.value)
+        values.add (a.kind, a.symbol)
+      elif clang_equalCursors(clang_getTypeDeclaration(t), clang_getCursorSemanticParent(field)) == 0:
+        known = false                              # the field is nested deeper than this list
+    else:
+      for item in collectChildren(list):           # an array of them
+        if clang_getCursorKind(stripped(item)) == 119: fromList(stripped(item))
+        else: known = false
+  proc visit(n: CXCursor) =
+    let k = clang_getCursorKind(n)
+    let kids = collectChildren(n)
+    if k == 136: return                            # sizeof: nothing in it runs
+    if assignment(tu, n) and rooted(kids[0]):
+      let lhs = stripped(kids[0])
+      if clang_getCursorKind(lhs) == ckMemberRefExpr and
+         clang_equalCursors(clang_getCursorReferenced(lhs), field) != 0:
+        let a = functionArgument(tu, kids[1])
+        values.add (a.kind, a.symbol)
+      elif clang_getCanonicalType(clang_getCursorType(lhs)).kind == tyRecord:
+        var rhs = stripped(kids[1])
+        if clang_getCursorKind(rhs) == 118:        # a compound literal: its list is the child
+          for part in collectChildren(rhs):
+            if clang_getCursorKind(part) == 119: rhs = part
+        if clang_getCursorKind(rhs) == 119: fromList(rhs)
+        else: known = false
+      visit(kids[1])
+      var at = lhs                                 # the index expressions on the way down may
+      for _ in 0 ..< 16:                           # mention anything; the base is the local
+        let inner = collectChildren(at)
+        if clang_getCursorKind(at) == ckArraySubscriptExpr and inner.len == 2: visit(inner[1])
+        if clang_getCursorKind(at) notin [ckMemberRefExpr, ckArraySubscriptExpr] or inner.len == 0: break
+        at = stripped(inner[0])
+      return
+    if k == ckVarDecl and usr(n) == local:
+      for part in kids:
+        if clang_getCursorKind(part) == 119: fromList(part)
+        elif clang_isExpression(clang_getCursorKind(part)) != 0 and
+             clang_getCanonicalType(clang_getCursorType(part)).kind in [tyRecord, tyConstantArray,
+                                                                        tyIncompleteArray, tyVariableArray]:
+          known = false                            # initialised from another object (an integer
+                                                   # expression here is the size of an array)
+      return
+    if k in [ckMemberRefExpr, ckArraySubscriptExpr] and rooted(n):
+      # read member by member: fine. (The indices on the way down are ordinary expressions.)
+      var at = n
+      for _ in 0 ..< 16:
+        let inner = collectChildren(at)
+        if clang_getCursorKind(at) == ckArraySubscriptExpr and inner.len == 2: visit(inner[1])
+        if clang_getCursorKind(at) notin [ckMemberRefExpr, ckArraySubscriptExpr] or inner.len == 0: break
+        at = stripped(inner[0])
+      return
+    if k == ckDeclRefExpr and referencedUsr(n) == local:
+      known = false                                # used as a whole, or its address taken
+      return
+    for part in kids: visit(part)
+  visit(body)
+  (known, values)
+
 proc collectEffectFacts*(tu: CXTranslationUnit, cpp: bool,
                          args: seq[string], transformed: bool,
                          markers: seq[tuple[file, profile: string, line, after: int]],
@@ -115,8 +230,37 @@ proc collectEffectFacts*(tu: CXTranslationUnit, cpp: bool,
     cvrRecurse
   discard clang_visitChildren(clang_getTranslationUnitCursor(tu), visitor, addr declarations)
   var callees: HashSet[int]      # where a function is named as the callee of a direct call
+  var current: CXCursor          # the function definition being walked
+  var stores: seq[tuple[cell: string, kind: char, symbol, file: string, line: int]]
+  proc recordStores(c: CXCursor) =
+    ## a value stored into a function-pointer field or variable: by assignment, by a
+    ## declaration's initialiser, or by one entry of a brace initialiser
+    let kind = clang_getCursorKind(c)
+    let parts = collectChildren(c)
+    proc add(decl, value: CXCursor) =
+      if clang_getCursorKind(decl) notin [ckFieldDecl, ckVarDecl] or
+         not isFunctionPointer(clang_getCursorType(decl)): return
+      let a = functionArgument(tu, value)
+      stores.add (pointerSymbol(decl), a.kind, a.symbol,
+                  absolutePath(fileOf(clang_getCursorLocation(value))), startLine(value))
+    if assignment(tu, c):
+      let lhs = stripped(parts[0])
+      if clang_getCursorKind(lhs) in [ckMemberRefExpr, ckDeclRefExpr]:
+        add(clang_getCursorReferenced(lhs), parts[1])
+    elif kind == ckVarDecl and parts.len > 0 and
+         clang_isExpression(clang_getCursorKind(parts[^1])) != 0 and
+         clang_getCursorKind(parts[^1]) != 119:
+      add(c, parts[^1])
+    elif kind == 119:                              # InitListExpr
+      let record = clang_getTypeDeclaration(clang_getCanonicalType(clang_getCursorType(c)))
+      if clang_getCanonicalType(clang_getCursorType(c)).kind == tyRecord:
+        for f in collectChildren(record):
+          if clang_getCursorKind(f) == ckFieldDecl and isFunctionPointer(clang_getCursorType(f)):
+            let init = initialiserFor(tu, c, f)
+            if init.found: add(f, init.value)
   proc walk(c: CXCursor, fn: var EffectFunction) =
     let kind = clang_getCursorKind(c)
+    recordStores(c)
     if kind == 136 and (fixedTypeQuery(tu, c) or constantTypeQuery(c)): return
     if kind == ckCallExpr:
       let target = clang_getCursorReferenced(c)
@@ -145,8 +289,32 @@ proc collectEffectFacts*(tu: CXTranslationUnit, cpp: bool,
           if kind == ckBinaryOperator and parts.len == 2:
             let before = tokens(tu, parts[0]).len
             if before < all.len and all[before] == "=":
-              let a = functionArgument(tu, parts[1])
-              fn.pointerStores.add (pointerSymbol(decl), a.kind, a.symbol)
+              # read back out of a local of this function (`cb = saved[i].cb`): whatever the
+              # function itself put there, when nothing else can have written it
+              var resolved = false
+              var rhs = stripped(parts[1])
+              let field = clang_getCursorReferenced(rhs)
+              if clang_getCursorKind(rhs) == ckMemberRefExpr and
+                 clang_getCursorKind(field) == ckFieldDecl:
+                var root = rhs
+                for _ in 0 ..< 16:
+                  let inner = collectChildren(root)
+                  if clang_getCursorKind(root) notin [ckMemberRefExpr, ckArraySubscriptExpr] or
+                     inner.len == 0: break
+                  root = stripped(inner[0])
+                let holder = clang_getCursorReferenced(root)
+                if clang_getCursorKind(root) == ckDeclRefExpr and
+                   clang_getCursorKind(holder) == ckVarDecl and hasAutomaticStorage(holder) and
+                   clang_equalCursors(clang_getCursorSemanticParent(holder), current) != 0:
+                  for body in collectChildren(current):
+                    if clang_getCursorKind(body) != ckCompoundStmt: continue
+                    let held = localFieldValues(tu, body, usr(holder), field)
+                    if held.known:
+                      resolved = true
+                      for v in held.values: fn.pointerStores.add (pointerSymbol(decl), v.kind, v.symbol)
+              if not resolved:
+                let a = functionArgument(tu, parts[1])
+                fn.pointerStores.add (pointerSymbol(decl), a.kind, a.symbol)
           elif kind == ckUnaryOperator and all.len > 0 and all[0] == "&":
             fn.pointerStores.add (pointerSymbol(decl), 'o', "")
     if kind == ckDeclRefExpr and clang_getCursorKind(clang_getCursorReferenced(c)) == ckFunctionDecl and
@@ -172,6 +340,7 @@ proc collectEffectFacts*(tu: CXTranslationUnit, cpp: bool,
       file: absolutePath(fileOf(clang_getCursorLocation(decl))),
       first: startLine(decl), last: endLine(decl), nameLine: lineOf(clang_getCursorLocation(decl)))
     fn.external = clang_getCursorLinkage(decl) == 3
+    current = decl
     for i in 0 ..< int(clang_Cursor_getNumArguments(decl)):
       let parm = clang_Cursor_getArgument(decl, cuint(i))
       fn.params.add (pointerSymbol(parm), isFunctionPointer(clang_getCursorType(parm)))
@@ -185,6 +354,14 @@ proc collectEffectFacts*(tu: CXTranslationUnit, cpp: bool,
       if clang_getCursorKind(c) == ckCompoundStmt: candidates.add (c, fn, false)
       for child in collectChildren(c): blocks(child)
     for child in collectChildren(decl): blocks(child)
+  # ... and the initialisers of the variables declared at file scope
+  proc fileScope(c: CXCursor) =
+    recordStores(c)
+    for child in collectChildren(c): fileScope(child)
+  for top in collectChildren(clang_getTranslationUnitCursor(tu)):
+    if clang_getCursorKind(top) == ckVarDecl: fileScope(top)
+  for store in stores:
+    if store notin result.cellStores: result.cellStores.add store
   proc trivia(text: string): bool =
     var i = 0
     while i < text.len:

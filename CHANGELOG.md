@@ -28,8 +28,14 @@ and the JSON output may change in any minor version.
   for that parameter on the call path — by name, through a function that hands the pointer on,
   or assigned to the parameter in the body; a null pointer is nothing to call. A pointer whose
   value the source does not settle (a struct field, a parameter of an exported function, a
-  value read back from memory) takes an effect contract on its own symbol, which the
-  `UNRESOLVED_EFFECT_CALL` finding now names (`c:@S@config@FI@read`, `c:@F@walk@param:visit`).
+  value the function did not store itself) takes an effect contract on its own symbol, which
+  the `UNRESOLVED_EFFECT_CALL` finding now names (`c:@S@config@FI@read`,
+  `c:@F@walk@param:visit`). A callback a function keeps in a local of its own and reads back
+  is resolved without one.
+- `--safety`: a contract on a function pointer is checked against every function the analysed
+  sources store in it — by assignment or initialiser. A stored function with an effect the
+  contract does not declare is `CONTRACT_EFFECT_MISMATCH`, at the store; a store of something
+  that is not a named function is `CONTRACT_STORE_UNKNOWN`.
 - `contracts/c-library.contracts.json`: a contract package for the C string and memory
   functions and the compiler builtins, for `--safety` projects to opt into. A contract file
   marked `"library": true` may have entries a project does not use.

@@ -830,6 +830,10 @@ type
     inputs*: seq[tuple[path, digest: string]]
     arguments*: seq[string]
     unsupported*: seq[string]
+    cellStores*: seq[tuple[cell: string, kind: char, symbol, file: string, line: int]]
+                                 ## every store of a value into a function-pointer struct field or
+                                 ## variable the unit contains — an assignment or an initialiser —
+                                 ## by the symbol of that field or variable (kinds as for `fnArgs`)
 
   Program* = object
     effects*: EffectUnit         ## complete call inventory for configured effect checks

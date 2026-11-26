@@ -45,13 +45,14 @@ def integration_contracts(lfs_c, uses_malloc, uses_free):
     fns += [
         {"symbol": "c:@F@lfs_fs_traverse@param:cb", "effects": [],
          "assumption": "littlefs.traverse-callback.no-heap-no-recursion"},
-        {"symbol": lfs_c + "#c:lfs.c@F@lfs_dir_traverse@param:cb", "effects": [],
-         "assumption": "littlefs.dir-traverse.saved-callbacks-are-the-ones-passed-in"},
         {"symbol": "c:@F@__assert_fail", "effects": [], "assumption": "libc.assert-fail.does-not-return"},
         {"symbol": "c:@F@printf", "effects": [], "assumption": "libc.printf.no-heap-no-recursion"},
     ]
     if uses_malloc:
-        fns.append({"symbol": "c:@F@malloc", "effects": [], "assumption": "libc.malloc.no-recursion"})
+        # (kenbi knows that malloc allocates and refuses a contract that says otherwise; what
+        # the contract adds is that it does nothing else a profile here forbids)
+        fns.append({"symbol": "c:@F@malloc", "effects": ["heap_allocate"],
+                    "assumption": "libc.malloc.allocates-only"})
     if uses_free:
         fns.append({"symbol": "c:@F@free", "effects": [], "assumption": "libc.free.no-heap-no-recursion"})
     return {"schemaVersion": 1, "kind": "contracts", "id": "littlefs.integration", "version": "1",
@@ -102,6 +103,8 @@ def closure(edges, start):
 
 
 def ground_truth(directory, defines):
+    # (the exported functions of lfs.c and lfs_util.c; a block device added beside them is
+    # checked through the contracts, not as a set of entry points)
     nodes, edges, starts = call_graph(directory, defines)
     short = lambda n: n.split(':')[-1]
     truth = {}
@@ -190,9 +193,73 @@ def seeded(count):
     return total
 
 
+INTEGRATION = '''#include "lfs.h"
+#include "bd/lfs_rambd.h"
+
+/* What an application does: install a block device in the configuration. */
+static lfs_rambd_t ram;
+const struct lfs_config kenbi_demo_config = {
+    .context = &ram,
+    .read = lfs_rambd_read,
+    .prog = lfs_rambd_prog,
+    .erase = lfs_rambd_erase,
+    .sync = lfs_rambd_sync,
+    .read_size = 16, .prog_size = 16, .block_size = 512, .block_count = 64,
+    .block_cycles = -1, .cache_size = 16, .lookahead_size = 16,
+};
+'''
+
+
+def integrated(fault):
+    """The block-device contracts say what may be installed in `struct lfs_config`. With the
+    code that installs a device among the sources, kenbi checks each contract against the
+    function stored there. `fault`: the RAM device's read function is given an allocation,
+    which contradicts the contract."""
+    directory = os.path.join(WORK, 'integrated_fault' if fault else 'integrated')
+    copy_sources(directory)
+    os.makedirs(os.path.join(directory, 'bd'), exist_ok=True)
+    for f in ('lfs_rambd.c', 'lfs_rambd.h'): shutil.copy(os.path.join(SRC, 'bd', f), os.path.join(directory, 'bd'))
+    open(os.path.join(directory, 'integration.c'), 'w').write(INTEGRATION)
+    if fault:
+        path = os.path.join(directory, 'bd', 'lfs_rambd.c')
+        src = open(path).read().split('\n')
+        i = next(k for k, l in enumerate(src) if l.startswith('int lfs_rambd_read('))
+        while not src[i].rstrip().endswith('{'): i += 1
+        src.insert(i + 1, '    { void *kenbi_probe = malloc(1); (void)kenbi_probe; }')
+        open(path, 'w').write('\n'.join(['#include <stdlib.h>'] + src))
+    defines = ['-DLFS_NO_MALLOC']
+    truth, _ = ground_truth(directory, defines)
+    lfs_c = os.path.join(directory, 'lfs.c')
+    contracts = integration_contracts(lfs_c, uses_malloc=fault, uses_free=False)
+    json.dump(contracts, open(os.path.join(directory, 'integration.contracts.json'), 'w'), indent=1)
+    checks = [{"file": 'lfs_util.c' if f == 'lfs_crc' else 'lfs.c', "function": f, "profile": p}
+              for f in sorted(truth) for p in PROFILES]
+    project = {"schemaVersion": 1, "kind": "project", "id": "littlefs.integrated",
+               "sources": ["lfs.c", "lfs_util.c", "bd/lfs_rambd.c", "integration.c"],
+               "clangArgs": ["-std=c99", "-I", "."] + defines,
+               "contracts": [os.path.relpath(LIBRARY, directory), "integration.contracts.json"],
+               "acceptedAssumptions": sorted({f['assumption'] for f in contracts['functions']} |
+                                             {"c-library.string.no-effects", "compiler.builtins.no-effects"}),
+               "profiles": PROFILES, "checks": checks}
+    path = os.path.join(directory, 'project.json')
+    json.dump(project, open(path, 'w'), indent=1)
+    r = subprocess.run([KENBI, '--format=json', '--safety=' + path], capture_output=True, text=True)
+    result = json.loads(r.stdout)
+    if 'obligations' not in result:
+        sys.exit('kenbi refused the input: ' + json.dumps(result.get('findings', [])[:1]))
+    mismatches = [f for f in result['findings'] if f['code'] == 'CONTRACT_EFFECT_MISMATCH']
+    unchecked = [f for f in result['findings'] if f['code'] in ('CONTRACT_BODY_UNVERIFIED', 'CONTRACT_STORE_UNKNOWN')]
+    print('%-22s status %s, contract mismatches: %d, contracts left unchecked: %d' % (
+        'integrated + fault' if fault else 'integrated', result['status'], len(mismatches), len(unchecked)))
+    expected = (result['status'] == 'violation' and len(mismatches) == 1) if fault else \
+               (result['status'] == 'conditional' and not mismatches and not unchecked)
+    return collections.Counter() if expected else collections.Counter({'WRONG: contract check': 1})
+
+
 def main():
     shutil.rmtree(WORK, ignore_errors=True)
-    totals = [released('default', []), released('nomalloc', ['-DLFS_NO_MALLOC']), seeded(args.mutants)]
+    totals = [released('default', []), released('nomalloc', ['-DLFS_NO_MALLOC']), seeded(args.mutants),
+              integrated(False), integrated(True)]
     wrong = sum(n for c in totals for k, n in c.items() if k.startswith('WRONG'))
     print('wrong verdicts: %d' % wrong)
     sys.exit(1 if wrong else 0)
