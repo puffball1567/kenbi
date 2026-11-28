@@ -9,6 +9,19 @@ and the JSON output may change in any minor version.
 
 ### Added
 
+- Reference counting. `// @refcounted T { count: field, retain: f, release: g }` (optionally
+  `destroy: h`) declares a type whose objects are shared by counting references, and kenbi
+  follows the shares each function holds along every path: a share given up that is not held
+  (`COUNT_OVER_RELEASE`, `COUNT_NO_SHARE`), one never given back (`COUNT_LEAK`), an object
+  used when nothing is known to keep it alive (`COUNT_USE_AFTER_RELEASE`), a stored pointer
+  overwritten with its share still out or left behind after its release
+  (`COUNT_SLOT_OVERWRITTEN`, `COUNT_SLOT_DANGLING`), the counter written or the object freed
+  outside the type's own functions (`COUNT_DIRECT_WRITE`, `COUNT_DIRECT_FREE`). The retain
+  and release functions are checked against the declaration (`COUNT_RETAIN_MISMATCH`,
+  `COUNT_RELEASE_MISMATCH`), and what the check cannot follow is `COUNT_UNPROVEN`. Plain and
+  atomic counters, free functions and C++ member functions (`p->AddRef()`, `delete this`).
+  `explain_finding` (MCP) has a worked example for each of the eleven codes; the three-state
+  corpus has 77 entries.
 - `// @distinct(a, b)` above a function declares the parameters and globals it names to be
   different objects for the length of a call. Each call is checked: the same object passed for
   two of them is `DISTINCT_ALIASED`, a pair nothing shows to differ is `DISTINCT_UNPROVEN`.

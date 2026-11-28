@@ -1051,6 +1051,189 @@
    ],
    "file": "CWE475_Undefined_Behavior_for_Input_to_API__maybe_same_05.c",
    "provenance": null
+  },
+  {
+   "id": "CWE415_Double_Free__refcount_released_twice_06",
+   "cwe": "CWE-415",
+   "class": [
+    "COUNT_OVER_RELEASE"
+   ],
+   "axis": "ownership",
+   "intent": "give back a reference to a shared object",
+   "title": "A share of a reference-counted object is released twice",
+   "contracts": [
+    "@refcounted",
+    "@owns",
+    "@frees"
+   ],
+   "file": "CWE415_Double_Free__refcount_released_twice_06.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE416_Use_After_Free__refcount_used_after_release_11",
+   "cwe": "CWE-416",
+   "class": [
+    "COUNT_USE_AFTER_RELEASE"
+   ],
+   "axis": "ownership",
+   "intent": "read a shared object and give back the reference",
+   "title": "A reference-counted object is used after the function's last share was released",
+   "contracts": [
+    "@refcounted",
+    "@owns",
+    "@frees"
+   ],
+   "file": "CWE416_Use_After_Free__refcount_used_after_release_11.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE401_Memory_Leak__refcount_share_not_released_04",
+   "cwe": "CWE-401",
+   "class": [
+    "COUNT_LEAK"
+   ],
+   "axis": "ownership",
+   "intent": "use a shared object for the length of a function",
+   "title": "A share of a reference-counted object is never given back",
+   "contracts": [
+    "@refcounted",
+    "@owns",
+    "@frees"
+   ],
+   "file": "CWE401_Memory_Leak__refcount_share_not_released_04.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE416_Use_After_Free__refcount_stored_without_share_12",
+   "cwe": "CWE-416",
+   "class": [
+    "COUNT_NO_SHARE"
+   ],
+   "axis": "ownership",
+   "intent": "keep a pointer to a shared object in a structure",
+   "title": "A borrowed pointer is stored without taking a share for the holder",
+   "contracts": [
+    "@refcounted",
+    "@borrows",
+    "@frees"
+   ],
+   "file": "CWE416_Use_After_Free__refcount_stored_without_share_12.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE401_Memory_Leak__refcount_stored_pointer_overwritten_05",
+   "cwe": "CWE-401",
+   "class": [
+    "COUNT_SLOT_OVERWRITTEN"
+   ],
+   "axis": "ownership",
+   "intent": "replace the shared object a structure points to",
+   "title": "A stored pointer is replaced without releasing the share it held",
+   "contracts": [
+    "@refcounted",
+    "@borrows",
+    "@frees"
+   ],
+   "file": "CWE401_Memory_Leak__refcount_stored_pointer_overwritten_05.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE416_Use_After_Free__refcount_stored_pointer_dangling_13",
+   "cwe": "CWE-416",
+   "class": [
+    "COUNT_SLOT_DANGLING"
+   ],
+   "axis": "ownership",
+   "intent": "drop the shared object a structure points to",
+   "title": "A stored pointer keeps pointing at an object whose share was released",
+   "contracts": [
+    "@refcounted",
+    "@frees"
+   ],
+   "file": "CWE416_Use_After_Free__refcount_stored_pointer_dangling_13.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE911_Improper_Update_of_Reference_Count__counter_written_directly_01",
+   "cwe": "CWE-911",
+   "class": [
+    "COUNT_DIRECT_WRITE"
+   ],
+   "axis": "ownership",
+   "intent": "keep a shared object alive across a call",
+   "title": "The counter of a reference-counted object is changed outside its retain and release functions",
+   "contracts": [
+    "@refcounted",
+    "@borrows",
+    "@frees"
+   ],
+   "file": "CWE911_Improper_Update_of_Reference_Count__counter_written_directly_01.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE416_Use_After_Free__refcount_freed_directly_14",
+   "cwe": "CWE-416",
+   "class": [
+    "COUNT_DIRECT_FREE"
+   ],
+   "axis": "ownership",
+   "intent": "dispose of a shared object",
+   "title": "A reference-counted object is freed directly while others may hold shares",
+   "contracts": [
+    "@refcounted",
+    "@frees"
+   ],
+   "file": "CWE416_Use_After_Free__refcount_freed_directly_14.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE911_Improper_Update_of_Reference_Count__retain_does_not_count_02",
+   "cwe": "CWE-911",
+   "class": [
+    "COUNT_RETAIN_MISMATCH"
+   ],
+   "axis": "ownership",
+   "intent": "write the retain function of a shared type",
+   "title": "A retain function does not take exactly one share on every path",
+   "contracts": [
+    "@refcounted"
+   ],
+   "file": "CWE911_Improper_Update_of_Reference_Count__retain_does_not_count_02.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE911_Improper_Update_of_Reference_Count__release_frees_without_zero_test_03",
+   "cwe": "CWE-911",
+   "class": [
+    "COUNT_RELEASE_MISMATCH"
+   ],
+   "axis": "ownership",
+   "intent": "write the release function of a shared type",
+   "title": "A release function frees the object without finding its count at zero",
+   "contracts": [
+    "@refcounted",
+    "@allocator",
+    "@frees"
+   ],
+   "file": "CWE911_Improper_Update_of_Reference_Count__release_frees_without_zero_test_03.c",
+   "provenance": null
+  },
+  {
+   "id": "CWE911_Improper_Update_of_Reference_Count__undeclared_callee_04",
+   "cwe": "CWE-911",
+   "class": [
+    "COUNT_UNPROVEN"
+   ],
+   "axis": "ownership",
+   "intent": "pass a shared object to another module",
+   "title": "A reference-counted object is passed to a function that does not say what it does with it",
+   "contracts": [
+    "@refcounted",
+    "@borrows",
+    "@moves"
+   ],
+   "file": "CWE911_Improper_Update_of_Reference_Count__undeclared_callee_04.c",
+   "provenance": null
   }
  ]
 }

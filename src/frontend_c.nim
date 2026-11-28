@@ -3233,6 +3233,8 @@ proc splitBufOff(ctx: Ctx, c: CXCursor, accOff: int):
     return (false, u, u, "", "", 0)
   (true, u, u, "", "", accOff)          # leaf: the buffer itself, only a constant offset
 
+proc rcSkipsArgument(ctx: Ctx, arg: CXCursor): bool
+
 proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt]) =
   # A member call resolves its contracts by the CLASS::method the object dispatches to: the
   # class it was locally constructed as when known (dynType — a virtual call through a base
@@ -3588,6 +3590,7 @@ proc lowerCallCore(ctx: var Ctx, call: CXCursor, line: int, outp: var seq[Stmt])
   let kids = collectChildren(call)
   for ai in 1 ..< kids.len:
     var a = unwrap(kids[ai])
+    if ctx.rcSkipsArgument(kids[ai]): continue    # a share of a `@refcounted` object
     # declared arg effect, if any — through a function pointer, the effect its declared
     # `@calls` targets unanimously give (the pointer's own name has no contract)
     let ci = (if ind.isIndirect: ctx.indirectArgContract(ind.usr, ai - 1)
@@ -7110,6 +7113,8 @@ proc scanSelfAssignSafety(ctx: var Ctx) =
       ctx.selfAssign[usr(m)] = cls
       ctx.selfAssignClasses.incl cls
 
+include cfront_counts
+
 proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.cdecl.} =
   ## Pass 2: lower each function definition's body into its own Func, seeding any
   ## `@frees` parameter as an incoming obligation so the body must discharge it.
@@ -7348,6 +7353,7 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
         var sets = ctx.distinctSets.getOrDefault(spelling(c), @[])
         if qualName(c).len > 0: sets.add ctx.distinctSets.getOrDefault(qualName(c), @[])
         for set in sets: fn.body.add emit(ikRefDistinct, startLine(c), a = set.join(";"))
+    ctx[].rcLower(c, body, fn)
     for child in collectChildren(body):
       ctx[].lowerStmt(child, fn.body)
     # LANDING PARTS, lowered again now that the whole body has been: the code a longjmp returns
@@ -7398,6 +7404,7 @@ proc fnVisitor(c, parent: CXCursor, client: CXClientData): CXChildVisitResult {.
     ctx.liveLocals = @[]
     ctx.pendingLocal = @[]
     fn.body = rewriteBackwardLoop(fn.body)   # declared goto-loops -> stLoop (fixpoint)
+    ctx[].rcFinish(fn)                       # the shares of `@refcounted` types leave this view
     fn.calls = ctx.callEdges
     ctx.prog.funcs.add fn
   cvrContinue

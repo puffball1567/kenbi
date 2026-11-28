@@ -133,6 +133,7 @@ Chaque vérification s'active séparément :
 | initialisation | `@initcheck` | une variable locale lue avant d'être affectée sur tous les chemins |
 | unions étiquetées | `@typecheck` + `@variant` | un membre d'union utilisé là où son étiquette n'est pas prouvée |
 | références | `@refcheck` + `@invalidates` / `@preserves` | un pointeur, une référence ou un itérateur dans un tampon ou un conteneur, utilisé après un appel qui a pu le réallouer ou le libérer |
+| comptage de références | `@refcounted` sur le type | chaque part prise est rendue exactement une fois, rien n'est utilisé après la dernière, les pointeurs stockés gardent la leur, et les fonctions de rétention / libération font ce que dit la déclaration |
 | verrous | `@threadsafe` | accès non protégé, verrous non équilibrés, ordre de verrouillage déclaré (interblocage AB-BA) |
 | propriétés bas niveau | `--safety=project.json` | effets interdits dans une fermeture d'appels, machines à états de ressources, profondeur de pile et d'appels, régions mémoire, MMIO et plus — voir [Vérification bas niveau configurée](#vérification-bas-niveau-configurée---safety) |
 
@@ -561,6 +562,56 @@ vérification sur le chemin (`if (n >= 1)`) ou par un `@invariant(n >= 1)` décl
   `strchr`, `memcpy` et leurs semblables sont connus pour renvoyer un pointeur dans le bloc de
   leur argument.
 
+### Comptage de références (`@refcounted`)
+
+La façon de gérer la mémoire est le choix du programme ; kenbi vérifie que la discipline choisie
+est respectée. Un type dont les objets sont partagés par comptage de références se déclare une
+fois, à côté du type :
+
+```c
+// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }
+typedef struct Buf { int refs; int len; } Buf;
+
+// @owns
+Buf *buf_new(int len);          /* l'appelant reçoit une part */
+void buf_retain(Buf *b);        /* en prend une de plus */
+// @frees(b)
+void buf_release(Buf *b);       /* en rend une ; libère à zéro */
+```
+
+Chaque détenteur d'un pointeur possède une *part*. kenbi suit, sur chaque chemin de chaque
+fonction, les parts que cette fonction détient :
+
+- Une part est prise par la fonction de rétention, en recevant le résultat d'une fonction
+  `@owns`, ou en arrivant dans un paramètre déclaré `@frees` / `@moves`. Elle est cédée par la
+  fonction de libération, en stockant le pointeur (l'emplacement détient alors la part), en le
+  remettant à un paramètre `@frees` / `@moves`, ou en le renvoyant depuis une fonction `@owns`.
+  Tout autre paramètre est emprunté : la part de l'appelant maintient l'objet en vie pendant
+  l'appel.
+- Céder une part que la fonction ne détient pas est `COUNT_OVER_RELEASE` (`COUNT_NO_SHARE`
+  lorsqu'elle est stockée, remise ou renvoyée) ; une part encore détenue à une sortie est
+  `COUNT_LEAK` ; utiliser l'objet alors que rien de connu ne le maintient en vie est
+  `COUNT_USE_AFTER_RELEASE`. Un pointeur lu depuis un emplacement de stockage vient sans part :
+  il peut être utilisé jusqu'au prochain appel qui pourrait libérer celle qui est stockée, et
+  passé à une autre fonction seulement après en avoir pris une.
+- Un pointeur stocké détient sa part : affecter par-dessus un emplacement qui peut encore
+  contenir un pointeur est `COUNT_SLOT_OVERWRITTEN`, le laisser en place après l'avoir libéré
+  est `COUNT_SLOT_DANGLING`. Lire l'ancien pointeur dans une variable locale avant de le
+  remplacer, et `dst = src; src = NULL;`, sont des déplacements et sont suivis comme tels.
+- Les fonctions de rétention et de libération sont vérifiées par rapport à la déclaration :
+  exactement une incrémentation (`COUNT_RETAIN_MISMATCH`), exactement une décrémentation, et
+  l'objet libéré exactement là où le compteur décrémenté est constaté nul
+  (`COUNT_RELEASE_MISMATCH`). La fonction qui alloue un objet fixe son premier compte ; toute
+  autre écriture du compteur est `COUNT_DIRECT_WRITE`, et libérer directement un objet partagé
+  est `COUNT_DIRECT_FREE`. `destroy: f` dans la déclaration nomme un auxiliaire auquel la
+  fonction de libération remet l'objet à zéro.
+- Les compteurs simples et atomiques (`atomic_fetch_add` / `atomic_fetch_sub`, les builtins
+  `__atomic_*` et `__sync_*`) sont lus ; de même les fonctions membres C++ (`p->AddRef()`,
+  `delete this`), où un objet créé par `new` commence avec le compte que sa classe lui donne.
+- Ce que la vérification ne peut pas suivre est `COUNT_UNPROVEN`, jamais supposé inoffensif :
+  un pointeur compté passé à une fonction sans corps ni contrat, son adresse prise, un
+  détenteur copié en entier (`*dst = *src`, `memcpy`), un `goto` vers l'arrière.
+
 ### Initialisation (`@initcheck`) et unions étiquetées (`@typecheck`)
 
 - `// @initcheck` au-dessus d'une fonction ou au niveau du fichier : une variable locale scalaire
@@ -689,6 +740,9 @@ longjmp arrive), `UNSUPPORTED_SETJMP` (un `setjmp` sous une forme que kenbi ne m
 pourrait),
 `DISTINCT_ALIASED` / `DISTINCT_UNPROVEN` (des objets déclarés `@distinct` qui sont, ou peuvent
 être, le même),
+`COUNT_OVER_RELEASE` / `COUNT_NO_SHARE` / `COUNT_LEAK` / `COUNT_USE_AFTER_RELEASE` / `COUNT_SLOT_OVERWRITTEN` /
+`COUNT_SLOT_DANGLING` / `COUNT_DIRECT_WRITE` / `COUNT_DIRECT_FREE` / `COUNT_RETAIN_MISMATCH` /
+`COUNT_RELEASE_MISMATCH` / `COUNT_UNPROVEN` (les parts d'un type déclaré `@refcounted`),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (un paramètre `@unique` qu'un autre
 argument atteint, ou que le corps conserve),
 `FREE_NONHEAP` (un `free` d'un pointeur vers la pile ou un autre stockage hors tas),
@@ -953,7 +1007,7 @@ front-end, si bien que l'analyse syntaxique du C/C++ est une partie remplaçable
 ## Tests
 
 `tests/*.mc` pilotent directement le moteur (17 cas). `tests/c/*.c` et `tests/cpp/*.cpp` portent
-ces scénarios plus les contrôles spécifiques aux annotations en C et C++ réels (374 cas) ; le
+ces scénarios plus les contrôles spécifiques aux annotations en C et C++ réels (381 cas) ; le
 lanceur abaisse chacun via libclang et vérifie les diagnostics produits — **y compris leur ligne
 source** — par rapport aux marqueurs `//EXPECT CODE` de chaque fichier (sur la ligne elle-même,
 ou `//EXPECT CODE@LINE`). Une mauvaise ligne ou un diagnostic manquant / superflu fait échouer la

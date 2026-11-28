@@ -133,6 +133,7 @@ Cada verificação é ativada separadamente:
 | inicialização | `@initcheck` | um local lido antes de ser atribuído em todos os caminhos |
 | uniões etiquetadas | `@typecheck` + `@variant` | um membro de união usado onde sua etiqueta (tag) não está provada |
 | referências | `@refcheck` + `@invalidates` / `@preserves` | um ponteiro, uma referência ou um iterador para dentro de um buffer ou contêiner, usado após uma chamada que pode tê-lo realocado ou liberado |
+| contagem de referências | `@refcounted` no tipo | cada cota tomada é devolvida exatamente uma vez, nada é usado depois da última, os ponteiros armazenados mantêm a sua, e as funções de retenção / liberação fazem o que a declaração diz |
 | locks | `@threadsafe` | acesso sem guarda, locks desbalanceados, ordem de locks declarada (deadlock AB-BA) |
 | propriedades de baixo nível | `--safety=project.json` | efeitos proibidos em um fecho de chamadas, máquinas de estados de recursos, profundidade de pilha e de chamadas, regiões de memória, MMIO e mais — veja [Verificação de baixo nível configurada](#verificação-de-baixo-nível-configurada---safety) |
 
@@ -553,6 +554,55 @@ verificação no caminho (`if (n >= 1)`) ou por um `@invariant(n >= 1)` declarad
   `REF_UNPROVEN`. Sabe-se que `strchr`, `memcpy` e semelhantes retornam um ponteiro para dentro
   do bloco de seu argumento.
 
+### Contagem de referências (`@refcounted`)
+
+Como a memória é gerenciada é escolha do programa; o kenbi verifica se a disciplina escolhida é
+seguida. Um tipo cujos objetos são compartilhados por contagem de referências é declarado uma
+vez, junto ao tipo:
+
+```c
+// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }
+typedef struct Buf { int refs; int len; } Buf;
+
+// @owns
+Buf *buf_new(int len);          /* quem chama recebe uma cota */
+void buf_retain(Buf *b);        /* toma mais uma */
+// @frees(b)
+void buf_release(Buf *b);       /* devolve uma; libera ao chegar a zero */
+```
+
+Cada detentor de um ponteiro possui uma *cota*. O kenbi acompanha, em cada caminho de cada
+função, as cotas que essa função detém:
+
+- Uma cota é tomada pela função de retenção, ao receber o resultado de uma função `@owns`, ou
+  ao chegar em um parâmetro declarado `@frees` / `@moves`. É cedida pela função de liberação,
+  ao armazenar o ponteiro (o local passa a deter a cota), ao entregá-lo a um parâmetro
+  `@frees` / `@moves`, ou ao devolvê-lo de uma função `@owns`. Qualquer outro parâmetro é
+  emprestado: a cota de quem chama mantém o objeto vivo durante a chamada.
+- Ceder uma cota que a função não detém é `COUNT_OVER_RELEASE` (`COUNT_NO_SHARE` quando é
+  armazenada, entregue ou devolvida); uma ainda detida em uma saída é `COUNT_LEAK`; usar o
+  objeto quando nada conhecido o mantém vivo é `COUNT_USE_AFTER_RELEASE`. Um ponteiro lido do
+  armazenamento não traz cota: pode ser usado até a próxima chamada que possa liberar a
+  armazenada, e passado a outra função somente depois de tomar uma.
+- Um ponteiro armazenado detém a sua cota: atribuir sobre um que ainda pode conter um ponteiro
+  é `COUNT_SLOT_OVERWRITTEN`, deixá-lo no lugar depois de liberá-lo é `COUNT_SLOT_DANGLING`.
+  Ler o ponteiro antigo em uma variável local antes de substituí-lo, e
+  `dst = src; src = NULL;`, são movimentações e são acompanhadas como tal.
+- As funções de retenção e de liberação são verificadas contra a declaração: exatamente um
+  incremento (`COUNT_RETAIN_MISMATCH`), exatamente um decremento, e o objeto liberado
+  exatamente onde a contagem decrementada é constatada como zero (`COUNT_RELEASE_MISMATCH`). A
+  função que aloca um objeto define a sua primeira contagem; qualquer outra escrita no
+  contador é `COUNT_DIRECT_WRITE`, e liberar diretamente um objeto compartilhado é
+  `COUNT_DIRECT_FREE`. `destroy: f` na declaração nomeia um auxiliar ao qual a função de
+  liberação entrega o objeto em zero.
+- Contadores simples e atômicos (`atomic_fetch_add` / `atomic_fetch_sub`, os builtins
+  `__atomic_*` e `__sync_*`) são lidos; assim como funções-membro de C++ (`p->AddRef()`,
+  `delete this`), em que um objeto criado com `new` começa com a contagem que a sua classe lhe
+  dá.
+- O que a verificação não consegue acompanhar é `COUNT_UNPROVEN`, nunca presumido inofensivo:
+  um ponteiro contado passado a uma função sem corpo e sem contrato, o seu endereço tomado, um
+  detentor copiado por inteiro (`*dst = *src`, `memcpy`), um `goto` para trás.
+
 ### Inicialização (`@initcheck`) e uniões etiquetadas (`@typecheck`)
 
 - `// @initcheck` acima de uma função ou no nível do arquivo: um local escalar ou ponteiro
@@ -677,6 +727,9 @@ aterrissa), `UNSUPPORTED_SETJMP` (um `setjmp` em uma forma que o kenbi não mode
 fazê-lo),
 `DISTINCT_ALIASED` / `DISTINCT_UNPROVEN` (objetos declarados `@distinct` que são, ou podem ser,
 o mesmo),
+`COUNT_OVER_RELEASE` / `COUNT_NO_SHARE` / `COUNT_LEAK` / `COUNT_USE_AFTER_RELEASE` / `COUNT_SLOT_OVERWRITTEN` /
+`COUNT_SLOT_DANGLING` / `COUNT_DIRECT_WRITE` / `COUNT_DIRECT_FREE` / `COUNT_RETAIN_MISMATCH` /
+`COUNT_RELEASE_MISMATCH` / `COUNT_UNPROVEN` (as cotas de um tipo declarado `@refcounted`),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (um parâmetro `@unique` que outro
 argumento alcança, ou que o corpo guarda),
 `FREE_NONHEAP` (um `free` de um ponteiro para a pilha ou outro armazenamento fora do heap),
@@ -936,7 +989,7 @@ front-end, de modo que analisar C/C++ é uma peça substituível.
 ## Testes
 
 `tests/*.mc` acionam o motor diretamente (17 casos). `tests/c/*.c` e `tests/cpp/*.cpp` carregam
-esses cenários mais as verificações específicas de anotações em C e C++ reais (374 casos); o
+esses cenários mais as verificações específicas de anotações em C e C++ reais (381 casos); o
 runner rebaixa cada um via libclang e verifica os diagnósticos produzidos — **incluindo a sua
 linha de origem** — contra os marcadores `//EXPECT CODE` em cada arquivo (na própria linha, ou
 `//EXPECT CODE@LINE`). Uma linha errada ou um diagnóstico faltante / excedente faz a suíte

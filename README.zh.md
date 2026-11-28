@@ -132,6 +132,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 | 初始化 | `@initcheck` | 局部变量在尚未于每条路径上都被赋值之前就被读取 |
 | 带标签联合体 | `@typecheck` + `@variant` | 在其标签未被证明的位置使用联合体成员 |
 | 引用有效性 | `@refcheck` + `@invalidates` / `@preserves` | 指向缓冲区或容器内部的指针、引用或迭代器，在可能重新分配或释放它的调用之后被使用 |
+| 引用计数 | 类型上的 `@refcounted` | 取得的每份份额恰好归还一次，最后一份归还后不再使用，被保存的指针保有其份额，retain / release 函数的行为与声明一致 |
 | 锁 | `@threadsafe` | 未受保护的访问、不平衡的加锁、声明的加锁顺序（AB-BA 死锁） |
 | 底层性质 | `--safety=project.json` | 调用闭包中被禁止的效应、资源状态机、栈与调用深度、内存区域、MMIO 等——见[配置驱动的底层验证](#配置驱动的底层验证--safety) |
 
@@ -502,6 +503,45 @@ kenbi 能读懂的索引或长度是：变量加减一个常量（`buf[i]`、`bu
   未作任何声明的函数，其返回值可能指向任一指针实参所持有的存储内部：在该实参失效之后使用它为
   `REF_UNPROVEN`。`strchr`、`memcpy` 等已知会返回指向其实参所在内存块内部的指针。
 
+### 引用计数（`@refcounted`）
+
+内存如何管理由程序决定；kenbi 检查所选的纪律是否被遵守。通过引用计数共享的类型，在类型
+定义旁声明一次：
+
+```c
+// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }
+typedef struct Buf { int refs; int len; } Buf;
+
+// @owns
+Buf *buf_new(int len);          /* 调用方得到一份份额 */
+void buf_retain(Buf *b);        /* 再取一份 */
+// @frees(b)
+void buf_release(Buf *b);       /* 归还一份；归零时释放 */
+```
+
+每个持有指针的一方拥有一份*份额*。kenbi 沿着每个函数的每条路径，跟踪该函数持有的份额：
+
+- 份额通过以下方式取得：调用 retain 函数、接收 `@owns` 函数的返回值，或作为声明为
+  `@frees` / `@moves` 的参数传入。通过以下方式放弃：调用 release 函数、保存指针（此后由该
+  位置持有份额）、交给 `@frees` / `@moves` 参数，或从 `@owns` 函数返回。其他参数是借用：
+  调用期间由调用方的份额保持对象存活。
+- 放弃函数并未持有的份额为 `COUNT_OVER_RELEASE`（保存、移交或返回时为 `COUNT_NO_SHARE`）；
+  退出时仍持有为 `COUNT_LEAK`；在无法确知有什么保持对象存活时使用它为
+  `COUNT_USE_AFTER_RELEASE`。从存储位置读出的指针不带份额：在下一个可能释放所存份额的调用
+  之前可以使用，但要传给其他函数必须先取得份额。
+- 被保存的指针持有其份额：对可能仍持有指针的位置赋值为 `COUNT_SLOT_OVERWRITTEN`，释放后仍
+  留着指针为 `COUNT_SLOT_DANGLING`。替换前先把旧指针读入局部变量，以及
+  `dst = src; src = NULL;`，都是移动，并按移动跟踪。
+- retain 和 release 函数会对照声明检查：恰好一次递增（`COUNT_RETAIN_MISMATCH`）、恰好一次
+  递减，并且只在递减后的计数被确认为零的地方释放对象（`COUNT_RELEASE_MISMATCH`）。分配对象
+  的函数设置其初始计数；对计数器的任何其他写入为 `COUNT_DIRECT_WRITE`，直接释放共享对象为
+  `COUNT_DIRECT_FREE`。声明中的 `destroy: f` 指定 release 函数在归零时把对象交给的辅助函数。
+- 普通计数器和原子计数器（`atomic_fetch_add` / `atomic_fetch_sub`，以及 `__atomic_*` 和
+  `__sync_*` 内建函数）都能识别；C++ 成员函数（`p->AddRef()`、`delete this`）也一样，其中
+  `new` 出的对象从其类给定的计数开始。
+- 检查无法跟踪的情况为 `COUNT_UNPROVEN`，绝不假定为无害：把计数指针传给既无函数体也无契约的
+  函数、取其地址、整体复制持有者（`*dst = *src`、`memcpy`）、向后的 `goto`。
+
 ### 初始化（`@initcheck`）与带标签联合体（`@typecheck`）
 
 - 函数上方或文件级的 `// @initcheck`：一个声明时没有初始化器的标量或指针局部变量，必须在
@@ -611,6 +651,9 @@ use <var> | free <var> | move <var> | if / else / endif
 `FINALLY_BYPASSED`（一个持有资源的出口绕过了声明的 `@goto_finally` 漏斗）、
 `BORROW_ESCAPES`（函数体保存了 `@borrows` 指针，或把它传给可能保存它的函数）、
 `DISTINCT_ALIASED` / `DISTINCT_UNPROVEN`（声明为 `@distinct` 却相同或可能相同的对象）、
+`COUNT_OVER_RELEASE` / `COUNT_NO_SHARE` / `COUNT_LEAK` / `COUNT_USE_AFTER_RELEASE` / `COUNT_SLOT_OVERWRITTEN` /
+`COUNT_SLOT_DANGLING` / `COUNT_DIRECT_WRITE` / `COUNT_DIRECT_FREE` / `COUNT_RETAIN_MISMATCH` /
+`COUNT_RELEASE_MISMATCH` / `COUNT_UNPROVEN`（声明为 `@refcounted` 的类型的份额）、
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES`（被其他实参到达、或被函数体保留的
 `@unique` 参数）、
 `FREE_NONHEAP`（对指向栈或其他非堆存储的指针执行 `free`）、`BORROW_MOVED` /
@@ -848,7 +891,7 @@ kenbi 无法建模的内容会被拒绝而不是被跳过：`UNSTRUCTURED_GOTO`�
 ## 测试
 
 `tests/*.mc` 直接驱动引擎（17 个用例）。`tests/c/*.c` 与 `tests/cpp/*.cpp` 以真实
-C 和 C++ 承载这些场景外加注解专属的检查（374 个用例）；运行器通过 libclang 下降每个
+C 和 C++ 承载这些场景外加注解专属的检查（381 个用例）；运行器通过 libclang 下降每个
 文件，并将产生的诊断 —— **连同其源代码行号** —— 与各文件中的 `//EXPECT CODE` 标记进行
 核对（标记位于该行本身，或写作 `//EXPECT CODE@LINE`）。行号错误，或诊断缺失 / 多余，都会
 使测试集失败。`tests/run_tests_project.nim` 检查项目范围的覆盖率结果，`tests/run_tests_*.py`

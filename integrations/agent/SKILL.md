@@ -146,6 +146,16 @@ int first_or(const int *buf, unsigned n, unsigned i) {
 **Initialisation — `// @initcheck`.** A local declared without an initializer
 must be assigned on every path before it is read.
 
+**Shared objects — `// @refcounted`.** Declare the type once, next to it —
+`// @refcounted T { count: field, retain: f, release: g }` — and every holder of a
+pointer owns one share. A share is taken by `f`, by receiving an `@owns` result or
+through a `@frees` / `@moves` parameter, and given up by `g`, by storing the
+pointer, by handing it to a `@frees` / `@moves` parameter or by returning it from
+an `@owns` function; any other parameter is borrowed. A pointer read from a field
+or a global comes with no share: retain it before a call if it is used after, or
+passed to, that call. Replace a stored pointer by reading the old one into a
+local, storing the new one, and releasing the old.
+
 **References into buffers and containers — `// @refcheck`.** A local holding a
 pointer, reference, iterator or view into storage another object manages
 (`p = buf->data`, `&v[0]`, `v.begin()`, `s.c_str()`) may not be used after a call
@@ -259,6 +269,13 @@ code, then fix that. The message names the line and usually the fix.
 | `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` | an `@unique` parameter is passed an object another argument reaches, or may reach | pass a separate object or a copy; make the distinction visible (distinct variables or members, a fresh allocation, `@unique` on the caller's own parameter) |
 | `UNIQUE_ESCAPES` / `BORROW_ESCAPES` | the body stores an `@unique` / `@borrows` pointer where it outlives the call, or passes it to a function that does not declare it gives it back | keep it in locals; declare `@borrows` (or `@unique`) on the receiving parameter if that function only uses it — its body is then checked too; drop the declaration if the function really keeps the pointer |
 | `DISTINCT_ALIASED` / `DISTINCT_UNPROVEN` | objects a callee declares `@distinct` are, or may be, the same at this call | pass different objects; make the difference visible (distinct variables, a local nothing else points to), or declare `@distinct` on the caller for its own parameters |
+| `COUNT_OVER_RELEASE` / `COUNT_NO_SHARE` | a share of a `@refcounted` object is released, stored, handed over or returned by a function that does not hold one | take a share first (the type's retain function), or remove the extra release; a parameter is borrowed unless the function declares `@frees(p)` / `@moves(p)` |
+| `COUNT_LEAK` | a share is still held when the function returns | release it on every path, store it, hand it to a `@frees` / `@moves` parameter, or return it from an `@owns` function |
+| `COUNT_USE_AFTER_RELEASE` | the object is used when nothing is known to keep it alive: after the last release, or a pointer read from storage used after a call (or passed to one) | use it before the release; for a pointer read from storage, take a share for as long as it is used |
+| `COUNT_SLOT_OVERWRITTEN` / `COUNT_SLOT_DANGLING` | a stored pointer is replaced while it may hold a share, or left in place after its share was released | read the old pointer into a local, store the new one, release the old; set the location to NULL after releasing it |
+| `COUNT_DIRECT_WRITE` / `COUNT_DIRECT_FREE` | the counter is changed, or the object freed, outside the type's retain / release functions | call the retain / release function instead |
+| `COUNT_RETAIN_MISMATCH` / `COUNT_RELEASE_MISMATCH` | the declared retain or release function does not do one increment, or one decrement with the object freed exactly where the count is found zero | fix the function: `p->n++;` and `if (--p->n == 0) free(p);` (atomic: compare `fetch_sub` with 1) |
+| `COUNT_UNPROVEN` | something the check cannot follow: an undeclared callee, the address of a counted pointer, a holder copied whole, a backward `goto` | declare the callee (`@borrows(p)` / `@moves(p)`); copy holders member by member, taking a share for each pointer |
 | `REF_INVALIDATED` | a pointer, reference or iterator into a buffer or container is used after a call that reallocates or releases it | take it again after the call (`p = buf->data;`, `it = v.erase(it);`), or use an index instead of a pointer |
 | `REF_UNPROVEN` | the same, but nothing shows the storage stays: the callee declares nothing, or what it reallocates may be the same object | take the pointer after the call; or declare the callee (`@invalidates(...)`, empty if nothing — its body is checked); or, when two objects are in fact different, `@distinct(a, b)` on the function |
 | `REF_RETURN_UNDECLARED` | a function returns a pointer into what a parameter holds without saying so | declare `@returns_into(param)` above it; its callers are then checked against reallocation of that object |

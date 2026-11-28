@@ -133,6 +133,7 @@ Jede Prüfung wird einzeln aktiviert:
 | Initialisierung | `@initcheck` | eine lokale Variable, die gelesen wird, bevor sie auf jedem Pfad zugewiesen wurde |
 | getaggte Unions | `@typecheck` + `@variant` | ein Union-Member, der verwendet wird, wo sein Tag nicht bewiesen ist |
 | Referenzen | `@refcheck` + `@invalidates` / `@preserves` | ein Zeiger, eine Referenz oder ein Iterator in einen Puffer oder Container, verwendet nach einem Aufruf, der ihn neu allokiert oder freigegeben haben kann |
+| Referenzzählung | `@refcounted` am Typ | jeder genommene Anteil wird genau einmal zurückgegeben, nach dem letzten wird nichts mehr benutzt, gespeicherte Zeiger behalten ihren, und die Retain- / Release-Funktionen tun, was die Deklaration sagt |
 | Locks | `@threadsafe` | ungeschützter Zugriff, unausgeglichene Locks, deklarierte Lock-Reihenfolge (AB-BA-Deadlock) |
 | Low-Level-Eigenschaften | `--safety=project.json` | verbotene Effekte in einer Aufrufhülle, Zustandsautomaten für Ressourcen, Stack- und Aufruftiefe, Speicherregionen, MMIO und mehr – siehe [Konfigurierte Low-Level-Verifikation](#konfigurierte-low-level-verifikation---safety) |
 
@@ -573,6 +574,59 @@ durch eine Prüfung auf dem Pfad (`if (n >= 1)`) oder ein deklariertes `@invaria
   wurde, ist `REF_UNPROVEN`. Von `strchr`, `memcpy` und ähnlichen ist bekannt, dass sie einen
   Zeiger in den Block ihres Arguments zurückgeben.
 
+### Referenzzählung (`@refcounted`)
+
+Wie Speicher verwaltet wird, entscheidet das Programm; kenbi prüft, ob die gewählte Disziplin
+eingehalten wird. Ein Typ, dessen Objekte durch Referenzzählung geteilt werden, wird einmal
+neben dem Typ deklariert:
+
+```c
+// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }
+typedef struct Buf { int refs; int len; } Buf;
+
+// @owns
+Buf *buf_new(int len);          /* der Aufrufer erhält einen Anteil */
+void buf_retain(Buf *b);        /* nimmt einen weiteren */
+// @frees(b)
+void buf_release(Buf *b);       /* gibt einen zurück; gibt bei null frei */
+```
+
+Jeder Halter eines Zeigers besitzt einen *Anteil*. kenbi verfolgt auf jedem Pfad jeder Funktion
+die Anteile, die diese Funktion hält:
+
+- Ein Anteil wird durch die Retain-Funktion genommen, durch das Empfangen des Ergebnisses einer
+  `@owns`-Funktion oder durch die Ankunft in einem als `@frees` / `@moves` deklarierten
+  Parameter. Er wird abgegeben durch die Release-Funktion, durch das Speichern des Zeigers (der
+  Ort hält dann den Anteil), durch die Übergabe an einen `@frees`- / `@moves`-Parameter oder
+  durch die Rückgabe aus einer `@owns`-Funktion. Jeder andere Parameter ist geliehen: Der
+  Anteil des Aufrufers hält das Objekt für die Dauer des Aufrufs am Leben.
+- Einen Anteil abzugeben, den die Funktion nicht hält, ist `COUNT_OVER_RELEASE`
+  (`COUNT_NO_SHARE`, wenn er gespeichert, übergeben oder zurückgegeben wird); ein beim
+  Verlassen noch gehaltener ist `COUNT_LEAK`; das Objekt zu benutzen, wenn nichts Bekanntes es
+  am Leben hält, ist `COUNT_USE_AFTER_RELEASE`. Ein aus dem Speicher gelesener Zeiger bringt
+  keinen Anteil mit: Er darf bis zum nächsten Aufruf benutzt werden, der den gespeicherten
+  freigeben könnte, und erst nach dem Nehmen eines Anteils an eine andere Funktion übergeben
+  werden.
+- Ein gespeicherter Zeiger hält seinen Anteil: Eine Zuweisung über einen, der noch einen Zeiger
+  enthalten kann, ist `COUNT_SLOT_OVERWRITTEN`, ihn nach der Freigabe stehen zu lassen ist
+  `COUNT_SLOT_DANGLING`. Den alten Zeiger vor dem Ersetzen in eine lokale Variable zu lesen
+  und `dst = src; src = NULL;` sind Verschiebungen und werden als solche verfolgt.
+- Die Retain- und die Release-Funktion werden gegen die Deklaration geprüft: genau ein
+  Inkrement (`COUNT_RETAIN_MISMATCH`), genau ein Dekrement, und das Objekt wird genau dort
+  freigegeben, wo der dekrementierte Zähler als null erkannt ist (`COUNT_RELEASE_MISMATCH`).
+  Die Funktion, die ein Objekt alloziert, setzt seinen ersten Zählerstand; jeder andere
+  Schreibzugriff auf den Zähler ist `COUNT_DIRECT_WRITE`, und das direkte Freigeben eines
+  geteilten Objekts ist `COUNT_DIRECT_FREE`. `destroy: f` in der Deklaration benennt einen
+  Helfer, dem die Release-Funktion das Objekt bei null übergibt.
+- Einfache und atomare Zähler (`atomic_fetch_add` / `atomic_fetch_sub`, die Builtins
+  `__atomic_*` und `__sync_*`) werden gelesen; ebenso C++-Memberfunktionen (`p->AddRef()`,
+  `delete this`), wobei ein mit `new` erzeugtes Objekt mit dem Zählerstand beginnt, den seine
+  Klasse ihm gibt.
+- Was die Prüfung nicht verfolgen kann, ist `COUNT_UNPROVEN` und wird nie als harmlos
+  angenommen: ein gezählter Zeiger, der an eine Funktion ohne Rumpf und ohne Vertrag übergeben
+  wird, dessen Adresse genommen wird, ein als Ganzes kopierter Halter (`*dst = *src`,
+  `memcpy`), ein rückwärts gerichtetes `goto`.
+
 ### Initialisierung (`@initcheck`) und getaggte Unions (`@typecheck`)
 
 - `// @initcheck` über einer Funktion oder auf Dateiebene: Eine ohne Initialisierer deklarierte
@@ -703,6 +757,9 @@ longjmp landet), `UNSUPPORTED_SETJMP` (ein `setjmp` in einer Form, die kenbi nic
 die das könnte),
 `DISTINCT_ALIASED` / `DISTINCT_UNPROVEN` (als `@distinct` deklarierte Objekte, die dasselbe sind
 oder sein können),
+`COUNT_OVER_RELEASE` / `COUNT_NO_SHARE` / `COUNT_LEAK` / `COUNT_USE_AFTER_RELEASE` / `COUNT_SLOT_OVERWRITTEN` /
+`COUNT_SLOT_DANGLING` / `COUNT_DIRECT_WRITE` / `COUNT_DIRECT_FREE` / `COUNT_RETAIN_MISMATCH` /
+`COUNT_RELEASE_MISMATCH` / `COUNT_UNPROVEN` (die Anteile eines als `@refcounted` deklarierten Typs),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (ein `@unique`-Parameter, den ein anderes
 Argument erreicht oder den der Rumpf behält),
 `FREE_NONHEAP` (ein `free` eines Zeigers in Stack- oder anderen Nicht-Heap-Speicher),
@@ -970,7 +1027,7 @@ IR, sodass das Parsen von C/C++ ein austauschbarer Teil ist.
 ## Tests
 
 `tests/*.mc` treiben die Engine direkt an (17 Fälle). `tests/c/*.c` und `tests/cpp/*.cpp` tragen
-diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (374 Fälle); der
+diese Szenarien plus die annotationsspezifischen Prüfungen in echtem C und C++ (381 Fälle); der
 Runner überführt jedes über libclang und prüft die erzeugten Diagnosen — **einschließlich ihrer
 Quellzeile** — gegen die `//EXPECT CODE`-Marker in jeder Datei (in der Zeile selbst oder
 `//EXPECT CODE@LINE`). Eine falsche Zeile oder eine fehlende / überzählige

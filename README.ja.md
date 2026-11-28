@@ -133,6 +133,7 @@ demo/quickstart.c:8: error: leak: 'app::buf' allocated here is never freed or mo
 | 初期化 | `@initcheck` | すべてのパスで代入される前に読まれるローカル変数 |
 | タグ付き共用体 | `@typecheck` + `@variant` | タグが証明されていない箇所で使われる共用体メンバ |
 | 参照の有効性 | `@refcheck` + `@invalidates` / `@preserves` | バッファやコンテナの中を指すポインタ・参照・イテレータを、再確保や解放が起きうる呼び出しの後で使う |
+| 参照カウント | 型に `@refcounted` | 取った共有はちょうど 1 回返され、最後の共有を返した後は使われず、保存されたポインタは共有を保ち、retain / release 関数は宣言どおりに動く |
 | ロック | `@threadsafe` | ロックなしのアクセス、釣り合わないロック、宣言されたロック順序（AB-BA デッドロック） |
 | 低レベル性質 | `--safety=project.json` | 呼び出し閉包内の禁止された効果、リソースの状態機械、スタックと呼び出しの深さ、メモリ領域、MMIO など。[設定による低レベル検証](#設定による低レベル検証--safety)を参照 |
 
@@ -535,6 +536,51 @@ kenbi が添字や長さとして読めるのは、変数に定数を足し引�
   無効化された後で使うと `REF_UNPROVEN` です。`strchr` や `memcpy` などは、引数のブロックの中を指す
   ポインタを返すものとして既知です。
 
+### 参照カウント（`@refcounted`）
+
+メモリをどう管理するかはプログラムが決めることで、kenbi は選ばれた規律が守られているかを
+検査します。参照を数えて共有する型は、型の定義のそばで一度だけ宣言します。
+
+```c
+// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }
+typedef struct Buf { int refs; int len; } Buf;
+
+// @owns
+Buf *buf_new(int len);          /* 呼び出し側が共有を 1 つ受け取る */
+void buf_retain(Buf *b);        /* 共有をもう 1 つ取る */
+// @frees(b)
+void buf_release(Buf *b);       /* 1 つ返す。0 になれば解放 */
+```
+
+ポインタを持つ者はそれぞれ*共有*を 1 つ持ちます。kenbi は、各関数が持つ共有を、その関数の
+すべての経路について追います。
+
+- 共有は、retain 関数の呼び出し、`@owns` 関数の戻り値の受け取り、`@frees` / `@moves` と宣言
+  された引数として受け取ることで得られます。release 関数の呼び出し、ポインタの保存（以後は
+  保存先が共有を持つ）、`@frees` / `@moves` の引数への引き渡し、`@owns` 関数からの返却で
+  手放します。それ以外の引数は借用で、呼び出しの間は呼び出し側の共有がオブジェクトを生かします。
+- 持っていない共有を手放すと `COUNT_OVER_RELEASE`（保存・引き渡し・返却の場合は
+  `COUNT_NO_SHARE`）、関数を抜けるときに持ったままなら `COUNT_LEAK`、オブジェクトを生かして
+  いるものが分からない状態で使うと `COUNT_USE_AFTER_RELEASE` です。保存先から読んだポインタに
+  共有は付いてきません。保存先の共有を解放しうる次の呼び出しまでは使えますが、別の関数に
+  渡すには先に共有を取る必要があります。
+- 保存されたポインタは共有を持っています。まだポインタを持っているかもしれない場所への代入は
+  `COUNT_SLOT_OVERWRITTEN`、解放した後にポインタを残したままにすると `COUNT_SLOT_DANGLING`
+  です。差し替える前に古いポインタをローカル変数へ読み出す書き方と、`dst = src; src = NULL;`
+  は移動として追います。
+- retain 関数と release 関数は宣言と突き合わせます。増やすのはちょうど 1 回
+  （`COUNT_RETAIN_MISMATCH`）、減らすのもちょうど 1 回で、減らした結果が 0 だと分かった
+  ところでだけ解放すること（`COUNT_RELEASE_MISMATCH`）。最初のカウントはオブジェクトを確保
+  する関数が設定します。それ以外のカウンタへの書き込みは `COUNT_DIRECT_WRITE`、共有されて
+  いるオブジェクトの直接の解放は `COUNT_DIRECT_FREE` です。宣言の `destroy: f` は、0 に
+  なったときに release 関数がオブジェクトを渡す補助関数を指します。
+- 通常のカウンタとアトミックなカウンタ（`atomic_fetch_add` / `atomic_fetch_sub`、`__atomic_*`
+  と `__sync_*` のビルトイン）を読み取ります。C++ のメンバ関数（`p->AddRef()`、`delete this`）
+  も同様で、`new` したオブジェクトはクラスが与えるカウントから始まります。
+- 追えないものは `COUNT_UNPROVEN` で、無害とは仮定しません。本体も契約もない関数に渡された
+  ポインタ、アドレスを取られたポインタ、丸ごとコピーされた保持側（`*dst = *src`、`memcpy`）、
+  後ろ向きの `goto` がこれに当たります。
+
 ### 初期化（`@initcheck`）とタグ付き共用体（`@typecheck`）
 
 - 関数の上またはファイルレベルの `// @initcheck`: 初期化子なしで宣言されたスカラーまたはポインタの
@@ -653,6 +699,9 @@ use <var> | free <var> | move <var> | if / else / endif
 `BORROW_ESCAPES`（本体が `@borrows` のポインタを保存する、または保存しうる関数へ渡す）、
 `DISTINCT_ALIASED` / `DISTINCT_UNPROVEN`（`@distinct` と宣言されたのに同じ、または同じかもしれない
 オブジェクト）、
+`COUNT_OVER_RELEASE` / `COUNT_NO_SHARE` / `COUNT_LEAK` / `COUNT_USE_AFTER_RELEASE` / `COUNT_SLOT_OVERWRITTEN` /
+`COUNT_SLOT_DANGLING` / `COUNT_DIRECT_WRITE` / `COUNT_DIRECT_FREE` / `COUNT_RETAIN_MISMATCH` /
+`COUNT_RELEASE_MISMATCH` / `COUNT_UNPROVEN`（`@refcounted` と宣言された型の共有）、
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES`（他の引数から届く、または本体が保持する
 `@unique` 引数）、
 `FREE_NONHEAP`（スタックなどヒープ以外の記憶域を指すポインタの `free`）、`BORROW_MOVED` /
@@ -900,7 +949,7 @@ C/C++ のパースは差し替え可能な部品です。
 ## テスト
 
 `tests/*.mc` はエンジンを直接駆動します（17 ケース）。`tests/c/*.c` と `tests/cpp/*.cpp` は、
-それらのシナリオに加えて注釈固有のチェックを実際の C / C++ で書いたものです（374 ケース）。ランナーは
+それらのシナリオに加えて注釈固有のチェックを実際の C / C++ で書いたものです（381 ケース）。ランナーは
 各ファイルを libclang で lowering し、生成された診断を —— **その発生行も含めて** —— 各ファイルの
 `//EXPECT CODE` マーカー（その行自体に書くか、`//EXPECT CODE@LINE`）と突き合わせて検証します。
 行が違っても、診断の過不足があっても suite は失敗します。`tests/run_tests_project.nim` は

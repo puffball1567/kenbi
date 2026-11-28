@@ -157,6 +157,7 @@ Each check is opted into separately:
 | initialisation | `@initcheck` | a local read before it is assigned on every path |
 | tagged unions | `@typecheck` + `@variant` | a union member used where its tag is not proven |
 | references | `@refcheck` + `@invalidates` / `@preserves` | a pointer, reference or iterator into a buffer or container used after a call that may have reallocated or released it |
+| reference counting | `@refcounted` on the type | every share taken is given back exactly once, nothing is used after the last one, stored pointers keep theirs, and the retain / release functions do what the declaration says |
 | locks | `@threadsafe` | unguarded access, unbalanced locks, declared lock order (AB-BA deadlock) |
 | low-level properties | `--safety=project.json` | forbidden effects in a call closure, resource state machines, stack and call depth, memory regions, MMIO and more — see [Configured low-level verification](#configured-low-level-verification---safety) |
 
@@ -566,6 +567,54 @@ by a check on the path (`if (n >= 1)`) or by a declared `@invariant(n >= 1)`.
   using it after that argument is invalidated is `REF_UNPROVEN`. `strchr`, `memcpy` and the
   like are known to return a pointer into their argument's block.
 
+### Reference counting (`@refcounted`)
+
+How memory is managed is the program's choice; kenbi checks that the chosen discipline is
+followed. A type whose objects are shared by counting references is declared once, next to the
+type:
+
+```c
+// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }
+typedef struct Buf { int refs; int len; } Buf;
+
+// @owns
+Buf *buf_new(int len);          /* the caller receives one share */
+void buf_retain(Buf *b);        /* takes one more */
+// @frees(b)
+void buf_release(Buf *b);       /* gives one back; frees at zero */
+```
+
+Every holder of a pointer owns one *share*. kenbi follows, along every path of every function,
+the shares that function holds:
+
+- A share is taken by the retain function, by receiving the result of an `@owns` function, or
+  by arriving in a parameter declared `@frees` / `@moves`. It is given up by the release
+  function, by storing the pointer (the location then holds the share), by handing it to a
+  `@frees` / `@moves` parameter, or by returning it from an `@owns` function. Any other
+  parameter is borrowed: the caller's share keeps the object alive for the call.
+- Giving up a share the function does not hold is `COUNT_OVER_RELEASE` (`COUNT_NO_SHARE` when
+  it is stored, handed over or returned); one still held at an exit is `COUNT_LEAK`; using the
+  object when nothing is known to keep it alive is `COUNT_USE_AFTER_RELEASE`. A pointer read
+  from storage comes with no share: it may be used until the next call that could release the
+  stored one, and passed to another function only after taking a share.
+- A stored pointer holds its share: assigning over one that may still hold a pointer is
+  `COUNT_SLOT_OVERWRITTEN`, leaving one behind after releasing it is `COUNT_SLOT_DANGLING`.
+  Reading the old pointer into a local before replacing it, and `dst = src; src = NULL;`, are
+  moves and are followed as such.
+- The retain and release functions are checked against the declaration: exactly one increment
+  (`COUNT_RETAIN_MISMATCH`), exactly one decrement, and the object freed exactly where the
+  decremented count is found to be zero (`COUNT_RELEASE_MISMATCH`). The function that
+  allocates an object sets its first count; any other write to the counter is
+  `COUNT_DIRECT_WRITE`, and freeing a shared object directly is `COUNT_DIRECT_FREE`.
+  `destroy: f` in the declaration names a helper the release function hands the object to at
+  zero.
+- Plain and atomic counters (`atomic_fetch_add` / `atomic_fetch_sub`, the `__atomic_*` and
+  `__sync_*` builtins) are read; so are C++ member functions (`p->AddRef()`, `delete this`),
+  where a `new` object starts with the count its class gives it.
+- What the check cannot follow is `COUNT_UNPROVEN`, never assumed harmless: a counted pointer
+  passed to a function with no body and no contract, its address taken, a holder copied whole
+  (`*dst = *src`, `memcpy`), a backward `goto`.
+
 ### Initialisation (`@initcheck`) and tagged unions (`@typecheck`)
 
 - `// @initcheck` above a function or at file level: a scalar or pointer local declared without
@@ -686,6 +735,9 @@ not the declared one), `SETJMP_CLOBBERED` (a non-volatile local read where a lon
 `BORROW_ESCAPES` (the body stores an `@borrows` pointer, or passes it to a function that may),
 `DISTINCT_ALIASED` / `DISTINCT_UNPROVEN` (objects declared `@distinct` that are, or may be, the
 same),
+`COUNT_OVER_RELEASE` / `COUNT_NO_SHARE` / `COUNT_LEAK` / `COUNT_USE_AFTER_RELEASE` / `COUNT_SLOT_OVERWRITTEN` /
+`COUNT_SLOT_DANGLING` / `COUNT_DIRECT_WRITE` / `COUNT_DIRECT_FREE` / `COUNT_RETAIN_MISMATCH` /
+`COUNT_RELEASE_MISMATCH` / `COUNT_UNPROVEN` (the shares of a type declared `@refcounted`),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (an `@unique` parameter that another
 argument reaches, or that the body keeps),
 `FREE_NONHEAP` (a `free` of a pointer into stack or other non-heap storage), `BORROW_MOVED` /
@@ -934,7 +986,7 @@ parsing C/C++ is a replaceable part.
 ## Tests
 
 `tests/*.mc` drive the engine directly (17 cases). `tests/c/*.c` and `tests/cpp/*.cpp` carry
-those scenarios plus the annotation-specific checks in real C and C++ (374 cases); the runner
+those scenarios plus the annotation-specific checks in real C and C++ (381 cases); the runner
 lowers each through libclang and asserts the produced diagnostics — **including their source
 line** — against the `//EXPECT CODE` markers in each file (on the line itself, or
 `//EXPECT CODE@LINE`). A wrong line or a missing/extra

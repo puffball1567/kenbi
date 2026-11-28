@@ -1943,5 +1943,331 @@ export const FINDINGS: Record<string, FindingEntry[]> =
         "why": "the function declares the same requirement of its own parameters. Inside it they are different objects, and each of its callers is checked in turn. GREEN."
       }
     }
+  ],
+  "COUNT_OVER_RELEASE": [
+    {
+      "id": "CWE415_Double_Free__refcount_released_twice_06",
+      "cwe": "CWE-415",
+      "class": [
+        "COUNT_OVER_RELEASE"
+      ],
+      "axis": "ownership",
+      "intent": "give back a reference to a shared object",
+      "title": "A share of a reference-counted object is released twice",
+      "contracts": [
+        "@refcounted",
+        "@owns",
+        "@frees"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nint CWE415_Double_Free__refcount_released_twice_06_bad(void)\n{\n    struct Buf *b = buf_new(16);\n    if (!b) return 0;\n    int n = b->len;\n    buf_release(b);\n    /* POTENTIAL FLAW: this function held one share and has already given it back */\n    buf_release(b);\n    return n;\n}\n",
+        "why": "the function receives one share from `buf_new` and releases it twice. The second release gives back a share that belongs to another holder, or frees an object that is already gone: COUNT_OVER_RELEASE."
+      },
+      "B": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nint CWE415_Double_Free__refcount_released_twice_06_bad(int again)\n{\n    struct Buf *b = buf_new(16);\n    if (!b) return 0;\n    int n = b->len;\n    buf_release(b);\n    /* POTENTIAL FLAW: when `again` is set, the one share is given back a second time */\n    if (again) buf_release(b);\n    return n;\n}\n",
+        "why": "a half-fix: the second release is made conditional. On the path where the condition holds the share is still given back twice, so it is STILL COUNT_OVER_RELEASE."
+      },
+      "C": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nint CWE415_Double_Free__refcount_released_twice_06_fixed(void)\n{\n    struct Buf *b = buf_new(16);\n    if (!b) return 0;\n    int n = b->len;\n    buf_release(b);   /* FIXED: the only release */\n    return n;\n}\n",
+        "why": "one share received, one share released. GREEN."
+      }
+    }
+  ],
+  "COUNT_USE_AFTER_RELEASE": [
+    {
+      "id": "CWE416_Use_After_Free__refcount_used_after_release_11",
+      "cwe": "CWE-416",
+      "class": [
+        "COUNT_USE_AFTER_RELEASE"
+      ],
+      "axis": "ownership",
+      "intent": "read a shared object and give back the reference",
+      "title": "A reference-counted object is used after the function's last share was released",
+      "contracts": [
+        "@refcounted",
+        "@owns",
+        "@frees"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nint CWE416_Use_After_Free__refcount_used_after_release_11_bad(void)\n{\n    struct Buf *b = buf_new(16);\n    if (!b) return 0;\n    buf_release(b);\n    /* POTENTIAL FLAW: nothing this function holds keeps `b` alive any more */\n    return b->len;\n}\n",
+        "why": "the function releases its only share and then reads the object. If that was the last share the object is freed: COUNT_USE_AFTER_RELEASE."
+      },
+      "B": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nint CWE416_Use_After_Free__refcount_used_after_release_11_bad(int early)\n{\n    struct Buf *b = buf_new(16);\n    if (!b) return 0;\n    if (early) buf_release(b);\n    /* POTENTIAL FLAW: when `early` is set, the share is already gone here */\n    int n = b->len;\n    if (!early) buf_release(b);\n    return n;\n}\n",
+        "why": "a half-fix: the release is moved after the read on one path only. On the other path the object is still read after the release, so it is STILL COUNT_USE_AFTER_RELEASE."
+      },
+      "C": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nint CWE416_Use_After_Free__refcount_used_after_release_11_fixed(void)\n{\n    struct Buf *b = buf_new(16);\n    if (!b) return 0;\n    int n = b->len;   /* FIXED: read before the release */\n    buf_release(b);\n    return n;\n}\n",
+        "why": "the object is read while the function still holds its share, and released after. GREEN."
+      }
+    }
+  ],
+  "COUNT_LEAK": [
+    {
+      "id": "CWE401_Memory_Leak__refcount_share_not_released_04",
+      "cwe": "CWE-401",
+      "class": [
+        "COUNT_LEAK"
+      ],
+      "axis": "ownership",
+      "intent": "use a shared object for the length of a function",
+      "title": "A share of a reference-counted object is never given back",
+      "contracts": [
+        "@refcounted",
+        "@owns",
+        "@frees"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nint CWE401_Memory_Leak__refcount_share_not_released_04_bad(void)\n{\n    /* POTENTIAL FLAW: the share received here is never given back */\n    struct Buf *b = buf_new(16);\n    if (!b) return 0;\n    return b->len;\n}\n",
+        "why": "the function receives a share from `buf_new` and returns without releasing it. The count never reaches zero, so the object is never freed: COUNT_LEAK."
+      },
+      "B": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nint CWE401_Memory_Leak__refcount_share_not_released_04_bad(int limit)\n{\n    /* POTENTIAL FLAW: the early return below leaves with the share still held */\n    struct Buf *b = buf_new(16);\n    if (!b) return 0;\n    if (b->len > limit) return -1;\n    int n = b->len;\n    buf_release(b);\n    return n;\n}\n",
+        "why": "a half-fix: the share is released on the normal path, but an early return skips the release. On that path it is STILL COUNT_LEAK."
+      },
+      "C": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nint CWE401_Memory_Leak__refcount_share_not_released_04_fixed(int limit)\n{\n    struct Buf *b = buf_new(16);\n    if (!b) return 0;\n    int n = b->len;\n    buf_release(b);   /* FIXED: released before either return */\n    if (n > limit) return -1;\n    return n;\n}\n",
+        "why": "every path that leaves the function gives the share back. GREEN."
+      }
+    }
+  ],
+  "COUNT_NO_SHARE": [
+    {
+      "id": "CWE416_Use_After_Free__refcount_stored_without_share_12",
+      "cwe": "CWE-416",
+      "class": [
+        "COUNT_NO_SHARE"
+      ],
+      "axis": "ownership",
+      "intent": "keep a pointer to a shared object in a structure",
+      "title": "A borrowed pointer is stored without taking a share for the holder",
+      "contracts": [
+        "@refcounted",
+        "@borrows",
+        "@frees"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\nstruct Holder { struct Buf *buf; };\n\nvoid CWE416_Use_After_Free__refcount_stored_without_share_12_bad(struct Holder *h, struct Buf *b)\n{\n    if (h->buf) buf_release(h->buf);\n    /* POTENTIAL FLAW: `h->buf` now holds the object, but no share was taken for it */\n    h->buf = b;\n}\n",
+        "why": "`b` is borrowed from the caller, and the function stores it in `h->buf` without taking a share. When the caller releases its own, the stored pointer dangles: COUNT_NO_SHARE."
+      },
+      "B": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\nstruct Holder { struct Buf *buf; };\n\nvoid CWE416_Use_After_Free__refcount_stored_without_share_12_bad(struct Holder *h, struct Buf *b, int pin)\n{\n    if (pin) buf_retain(b);\n    if (h->buf) buf_release(h->buf);\n    /* POTENTIAL FLAW: when `pin` is 0, no share goes with the stored pointer */\n    h->buf = b;\n}\n",
+        "why": "a half-fix: a share is taken only when `pin` is set. On the other path the pointer is still stored without one, so it is STILL COUNT_NO_SHARE."
+      },
+      "C": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\nstruct Holder { struct Buf *buf; };\n\nvoid CWE416_Use_After_Free__refcount_stored_without_share_12_fixed(struct Holder *h, struct Buf *b)\n{\n    buf_retain(b);    /* FIXED: the share the holder will own */\n    if (h->buf) buf_release(h->buf);\n    h->buf = b;\n}\n",
+        "why": "the function takes a share and that share goes into `h->buf` with the pointer. GREEN."
+      }
+    }
+  ],
+  "COUNT_SLOT_OVERWRITTEN": [
+    {
+      "id": "CWE401_Memory_Leak__refcount_stored_pointer_overwritten_05",
+      "cwe": "CWE-401",
+      "class": [
+        "COUNT_SLOT_OVERWRITTEN"
+      ],
+      "axis": "ownership",
+      "intent": "replace the shared object a structure points to",
+      "title": "A stored pointer is replaced without releasing the share it held",
+      "contracts": [
+        "@refcounted",
+        "@borrows",
+        "@frees"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\nstruct Holder { struct Buf *buf; };\n\nvoid CWE401_Memory_Leak__refcount_stored_pointer_overwritten_05_bad(struct Holder *h, struct Buf *b)\n{\n    buf_retain(b);\n    /* POTENTIAL FLAW: whatever `h->buf` held is overwritten with its share still out */\n    h->buf = b;\n}\n",
+        "why": "`h->buf` may already point to an object and hold a share of it. Assigning over it loses that share, so that object is never freed: COUNT_SLOT_OVERWRITTEN."
+      },
+      "B": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\nstruct Holder { struct Buf *buf; };\n\nvoid CWE401_Memory_Leak__refcount_stored_pointer_overwritten_05_bad(struct Holder *h, struct Buf *b, int replace)\n{\n    buf_retain(b);\n    if (replace) {\n        if (h->buf) buf_release(h->buf);\n    }\n    /* POTENTIAL FLAW: when `replace` is 0 the old share is lost here */\n    h->buf = b;\n}\n",
+        "why": "a half-fix: the old pointer is released only when `replace` is set. On the other path it is still overwritten, so it is STILL COUNT_SLOT_OVERWRITTEN."
+      },
+      "C": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\nstruct Holder { struct Buf *buf; };\n\nvoid CWE401_Memory_Leak__refcount_stored_pointer_overwritten_05_fixed(struct Holder *h, struct Buf *b)\n{\n    struct Buf *old = h->buf;\n    buf_retain(b);\n    h->buf = b;\n    if (old) buf_release(old);   /* FIXED: the share the location held is given back */\n}\n",
+        "why": "the old pointer is read out, the new one stored, and the old share released. GREEN."
+      }
+    }
+  ],
+  "COUNT_SLOT_DANGLING": [
+    {
+      "id": "CWE416_Use_After_Free__refcount_stored_pointer_dangling_13",
+      "cwe": "CWE-416",
+      "class": [
+        "COUNT_SLOT_DANGLING"
+      ],
+      "axis": "ownership",
+      "intent": "drop the shared object a structure points to",
+      "title": "A stored pointer keeps pointing at an object whose share was released",
+      "contracts": [
+        "@refcounted",
+        "@frees"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "#include <stddef.h>\n// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\nstruct Holder { struct Buf *buf; };\n\nvoid CWE416_Use_After_Free__refcount_stored_pointer_dangling_13_bad(struct Holder *h)\n{\n    /* POTENTIAL FLAW: `h->buf` still holds the pointer when the function returns */\n    if (h->buf) buf_release(h->buf);\n}\n",
+        "why": "the share `h->buf` held is released, but the pointer stays in the structure. The next function that reads `h->buf` uses an object that may be freed: COUNT_SLOT_DANGLING."
+      },
+      "B": {
+        "code": "#include <stddef.h>\n// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\nstruct Holder { struct Buf *buf; };\n\nvoid CWE416_Use_After_Free__refcount_stored_pointer_dangling_13_bad(struct Holder *h, int clear)\n{\n    if (!h->buf) return;\n    /* POTENTIAL FLAW: when `clear` is 0, `h->buf` keeps the released pointer */\n    buf_release(h->buf);\n    if (clear) h->buf = NULL;\n}\n",
+        "why": "a half-fix: the pointer is cleared only when `clear` is set. On the other path it is left behind, so it is STILL COUNT_SLOT_DANGLING."
+      },
+      "C": {
+        "code": "#include <stddef.h>\n// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\nstruct Holder { struct Buf *buf; };\n\nvoid CWE416_Use_After_Free__refcount_stored_pointer_dangling_13_fixed(struct Holder *h)\n{\n    if (!h->buf) return;\n    buf_release(h->buf);\n    h->buf = NULL;    /* FIXED: nothing is left to read */\n}\n",
+        "why": "the pointer is cleared right after its share is released. GREEN."
+      }
+    }
+  ],
+  "COUNT_DIRECT_WRITE": [
+    {
+      "id": "CWE911_Improper_Update_of_Reference_Count__counter_written_directly_01",
+      "cwe": "CWE-911",
+      "class": [
+        "COUNT_DIRECT_WRITE"
+      ],
+      "axis": "ownership",
+      "intent": "keep a shared object alive across a call",
+      "title": "The counter of a reference-counted object is changed outside its retain and release functions",
+      "contracts": [
+        "@refcounted",
+        "@borrows",
+        "@frees"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nvoid work(void);\n\nvoid CWE911_Improper_Update_of_Reference_Count__counter_written_directly_01_bad(struct Buf *b)\n{\n    /* POTENTIAL FLAW: the count changes behind the back of buf_retain / buf_release */\n    b->refs++;\n    work();\n    b->refs--;\n}\n",
+        "why": "the counter is incremented and decremented by hand. The decrement never tests for zero, so a last share given back this way frees nothing — and nothing checks that the two are paired: COUNT_DIRECT_WRITE."
+      },
+      "B": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nvoid work(void);\n\nvoid CWE911_Improper_Update_of_Reference_Count__counter_written_directly_01_bad(struct Buf *b)\n{\n    buf_retain(b);\n    work();\n    /* POTENTIAL FLAW: if this was the last share, nothing frees the object */\n    b->refs--;\n}\n",
+        "why": "a half-fix: the share is taken with `buf_retain`, but still given back by decrementing the field. It is STILL COUNT_DIRECT_WRITE."
+      },
+      "C": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nvoid work(void);\n\nvoid CWE911_Improper_Update_of_Reference_Count__counter_written_directly_01_fixed(struct Buf *b)\n{\n    buf_retain(b);\n    work();\n    buf_release(b);   /* FIXED: the release function tests for zero and frees */\n}\n",
+        "why": "the share is taken and given back through the type's own functions. GREEN."
+      }
+    }
+  ],
+  "COUNT_DIRECT_FREE": [
+    {
+      "id": "CWE416_Use_After_Free__refcount_freed_directly_14",
+      "cwe": "CWE-416",
+      "class": [
+        "COUNT_DIRECT_FREE"
+      ],
+      "axis": "ownership",
+      "intent": "dispose of a shared object",
+      "title": "A reference-counted object is freed directly while others may hold shares",
+      "contracts": [
+        "@refcounted",
+        "@frees"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "#include <stdlib.h>\n// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nvoid CWE416_Use_After_Free__refcount_freed_directly_14_bad(struct Buf *b)\n{\n    /* POTENTIAL FLAW: other holders may still have shares of `b` */\n    free(b);\n}\n",
+        "why": "the object is passed to `free` whatever its count. Every other holder is left with a pointer to freed memory: COUNT_DIRECT_FREE."
+      },
+      "B": {
+        "code": "#include <stdlib.h>\n// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\n// @frees(b)\nvoid CWE416_Use_After_Free__refcount_freed_directly_14_bad(struct Buf *b)\n{\n    /* POTENTIAL FLAW: owning one share does not mean owning the last one */\n    free(b);\n}\n",
+        "why": "a half-fix: the function now declares that it takes over the caller's share (`@frees(b)`), but it still frees the object instead of releasing that share. It is STILL COUNT_DIRECT_FREE."
+      },
+      "C": {
+        "code": "#include <stdlib.h>\n// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\n// @frees(b)\nvoid CWE416_Use_After_Free__refcount_freed_directly_14_fixed(struct Buf *b)\n{\n    buf_release(b);   /* FIXED: freed by the release function, at count zero */\n}\n",
+        "why": "the function takes over the caller's share and gives it back with `buf_release`, which frees the object only if that was the last one. GREEN."
+      }
+    }
+  ],
+  "COUNT_RETAIN_MISMATCH": [
+    {
+      "id": "CWE911_Improper_Update_of_Reference_Count__retain_does_not_count_02",
+      "cwe": "CWE-911",
+      "class": [
+        "COUNT_RETAIN_MISMATCH"
+      ],
+      "axis": "ownership",
+      "intent": "write the retain function of a shared type",
+      "title": "A retain function does not take exactly one share on every path",
+      "contracts": [
+        "@refcounted"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n/* POTENTIAL FLAW: on the path where `b->len` is 0 the count does not change */\nvoid buf_retain(struct Buf *b)\n{\n    if (b->len > 0) b->refs++;\n}\n",
+        "why": "the function declared as the retain function increments the counter only when the buffer is not empty. A caller that retains an empty buffer holds a share that was never counted: COUNT_RETAIN_MISMATCH."
+      },
+      "B": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n/* POTENTIAL FLAW: a non-empty buffer is counted twice for one share */\nvoid buf_retain(struct Buf *b)\n{\n    b->refs++;\n    if (b->len > 0) b->refs++;\n}\n",
+        "why": "a half-fix: the increment is made unconditional, but the old conditional one is left in. On that path the count goes up by two, so it is STILL COUNT_RETAIN_MISMATCH."
+      },
+      "C": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\nvoid buf_retain(struct Buf *b)\n{\n    b->refs++;        /* FIXED: exactly one share per call */\n}\n",
+        "why": "one call, one increment, on every path. GREEN."
+      }
+    }
+  ],
+  "COUNT_RELEASE_MISMATCH": [
+    {
+      "id": "CWE911_Improper_Update_of_Reference_Count__release_frees_without_zero_test_03",
+      "cwe": "CWE-911",
+      "class": [
+        "COUNT_RELEASE_MISMATCH"
+      ],
+      "axis": "ownership",
+      "intent": "write the release function of a shared type",
+      "title": "A release function frees the object without finding its count at zero",
+      "contracts": [
+        "@refcounted",
+        "@allocator",
+        "@frees"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "#include <stdlib.h>\n// @allocator demo::heap { alloc: malloc, free: free }\n// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @frees(b)\nvoid buf_release(struct Buf *b)\n{\n    b->refs--;\n    /* POTENTIAL FLAW: freed even when other shares remain */\n    free(b);\n}\n",
+        "why": "the function declared as the release function decrements the counter and frees the object whatever the result. Every other holder is left with freed memory: COUNT_RELEASE_MISMATCH."
+      },
+      "B": {
+        "code": "#include <stdlib.h>\n// @allocator demo::heap { alloc: malloc, free: free }\n// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n/* POTENTIAL FLAW: the count is tested but never decremented */\n// @frees(b)\nvoid buf_release(struct Buf *b)\n{\n    if (b->refs == 0) free(b);\n}\n",
+        "why": "a half-fix: a zero test is added, but the decrement is dropped, so a call no longer gives a share back. It is STILL COUNT_RELEASE_MISMATCH."
+      },
+      "C": {
+        "code": "#include <stdlib.h>\n// @allocator demo::heap { alloc: malloc, free: free }\n// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @frees(b)\nvoid buf_release(struct Buf *b)\n{\n    if (--b->refs == 0) free(b);   /* FIXED */\n}\n",
+        "why": "one decrement per call, and the object is freed exactly where the decremented count is zero. GREEN."
+      }
+    }
+  ],
+  "COUNT_UNPROVEN": [
+    {
+      "id": "CWE911_Improper_Update_of_Reference_Count__undeclared_callee_04",
+      "cwe": "CWE-911",
+      "class": [
+        "COUNT_UNPROVEN"
+      ],
+      "axis": "ownership",
+      "intent": "pass a shared object to another module",
+      "title": "A reference-counted object is passed to a function that does not say what it does with it",
+      "contracts": [
+        "@refcounted",
+        "@borrows",
+        "@moves"
+      ],
+      "provenance": null,
+      "A": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\nvoid log_buf(struct Buf *b);\nvoid audit_buf(struct Buf *b);\n\nvoid CWE911_Improper_Update_of_Reference_Count__undeclared_callee_04_bad(struct Buf *b)\n{\n    /* POTENTIAL FLAW: nothing says whether these calls keep or release `b` */\n    log_buf(b);\n    audit_buf(b);\n}\n",
+        "why": "`log_buf` has no body here and no contract: it may only read the object, or it may keep the pointer or release a share. kenbi does not guess: COUNT_UNPROVEN."
+      },
+      "B": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\n// @borrows(b)\nvoid log_buf(struct Buf *b);\nvoid audit_buf(struct Buf *b);\n\nvoid CWE911_Improper_Update_of_Reference_Count__undeclared_callee_04_bad(struct Buf *b)\n{\n    log_buf(b);\n    /* POTENTIAL FLAW: `audit_buf` is still undeclared */\n    audit_buf(b);\n}\n",
+        "why": "a half-fix: one of the two callees is declared. The other still says nothing, so it is STILL COUNT_UNPROVEN."
+      },
+      "C": {
+        "code": "// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }\nstruct Buf { int refs; int len; };\n\n// @owns\nstruct Buf *buf_new(int len);\n// @borrows(b)\nvoid buf_retain(struct Buf *b);\n// @frees(b)\nvoid buf_release(struct Buf *b);\n\n// @borrows(b)\nvoid log_buf(struct Buf *b);\n// @borrows(b)\nvoid audit_buf(struct Buf *b);\n\nvoid CWE911_Improper_Update_of_Reference_Count__undeclared_callee_04_fixed(struct Buf *b)\n{\n    log_buf(b);       /* FIXED: declared, so the call is checked against the declaration */\n    audit_buf(b);\n}\n",
+        "why": "both callees declare that they only use the object during the call. GREEN."
+      }
+    }
   ]
 };

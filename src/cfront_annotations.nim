@@ -218,6 +218,33 @@ proc parseArenaComment(ctx: var Ctx, text: string, line: int) =
   if allocFn.len > 0: ctx.arenaAlloc.incl allocFn
 
 
+proc parseRefcountedComment(ctx: var Ctx, text: string, line: int) =
+  ## Parse `@refcounted <Type> { count: field, retain: f, release: g, destroy: h }` — a type
+  ## whose objects are shared by counting references. The declaration names the counter and the
+  ## functions that change it; kenbi then checks those functions against it and every other
+  ## function against them. `destroy:` is optional.
+  let at = text.find("@refcounted")
+  if at < 0: return
+  let braceOpen = text.find('{', at)
+  if braceOpen < 0: return
+  let braceClose = text.find('}', braceOpen)
+  if braceClose < 0: return
+  let head = text[at+11 ..< braceOpen].splitWhitespace()
+  if head.len < 1: return
+  var d = CountedDecl(typeName: (if head[0] == "struct" and head.len > 1: head[1] else: head[0]),
+                      line: line)
+  for f in text[braceOpen+1 ..< braceClose].split(','):
+    let kv = f.split(':')
+    if kv.len != 2: continue
+    let v = kv[1].strip()
+    case kv[0].strip()
+    of "count":   d.count = v
+    of "retain":  d.retain = v
+    of "release": d.release = v
+    of "destroy": d.destroy = v
+    else: discard
+  ctx.prog.counted[d.typeName] = d
+
 const engineCoreDirectives* = [
   ## The directive keywords handled INLINE by the `case kw` in scanCommentTokens
   ## (the engine-core half of the vocabulary; the other half is plugin-registered,
@@ -229,7 +256,7 @@ const engineCoreDirectives* = [
   "@counted_by", "@invariant", "@maintains", "@mem", "@move", "@goto_noreturn",
   "@goto_finally", "@goto_backward", "@copy", "@unsafe", "@escapes", "@realloc", "@raii", "@arena",
   "@allocator", "@lock_order", "@drains", "@list", "@contract", "@contracts_for", "@unique",
-  "@refcheck", "@invalidates", "@preserves", "@returns_into", "@distinct"]
+  "@refcheck", "@invalidates", "@preserves", "@returns_into", "@distinct", "@refcounted"]
 
 proc allKenbiDirectives*(): HashSet[string] =
   ## The COMPLETE set of directive keywords kenbi recognises as the first token of
@@ -391,6 +418,7 @@ proc scanCommentTokens(ctx: var Ctx, toks: ptr CXToken, n: cuint) =
       # `@allocator` family (where there is no per-site resource to hang it on).
       ctx.parseListComment(body, line)
     of "@arena":    ctx.parseArenaComment(body, line)
+    of "@refcounted": ctx.parseRefcountedComment(body, line)
     of "@allocator": ctx.parseAllocatorComment(body, line)
     # @lock_order also records state (ctx.lockOrders) for the conflict pass, so it
     # stays inline; the pure-advisory directives are now plugins (annotations/advisory.nim).

@@ -133,6 +133,7 @@ Cada comprobación se activa por separado:
 | inicialización | `@initcheck` | una variable local leída antes de asignarse en todas las vías |
 | uniones etiquetadas | `@typecheck` + `@variant` | un miembro de unión usado donde su etiqueta no está demostrada |
 | referencias | `@refcheck` + `@invalidates` / `@preserves` | un puntero, una referencia o un iterador dentro de un búfer o contenedor, usado tras una llamada que pudo reasignarlo o liberarlo |
+| conteo de referencias | `@refcounted` en el tipo | cada participación tomada se devuelve exactamente una vez, nada se usa después de la última, los punteros guardados conservan la suya y las funciones de retención / liberación hacen lo que dice la declaración |
 | locks | `@threadsafe` | acceso sin protección, locks desequilibrados, orden de locks declarado (deadlock AB-BA) |
 | propiedades de bajo nivel | `--safety=project.json` | efectos prohibidos en un cierre de llamadas, máquinas de estados de recursos, profundidad de pila y de llamadas, regiones de memoria, MMIO y más — ver [Verificación configurada de bajo nivel](#verificación-configurada-de-bajo-nivel---safety) |
 
@@ -556,6 +557,56 @@ camino (`if (n >= 1)`) o con un `@invariant(n >= 1)` declarado.
   invalidado es `REF_UNPROVEN`. De `strchr`, `memcpy` y similares se sabe que devuelven un
   puntero dentro del bloque de su argumento.
 
+### Conteo de referencias (`@refcounted`)
+
+Cómo se gestiona la memoria lo decide el programa; kenbi comprueba que la disciplina elegida se
+cumple. Un tipo cuyos objetos se comparten contando referencias se declara una vez, junto al
+tipo:
+
+```c
+// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }
+typedef struct Buf { int refs; int len; } Buf;
+
+// @owns
+Buf *buf_new(int len);          /* quien llama recibe una participación */
+void buf_retain(Buf *b);        /* toma una más */
+// @frees(b)
+void buf_release(Buf *b);       /* devuelve una; libera al llegar a cero */
+```
+
+Cada poseedor de un puntero tiene una *participación*. kenbi sigue, por cada camino de cada
+función, las participaciones que esa función tiene:
+
+- Una participación se toma con la función de retención, al recibir el resultado de una función
+  `@owns`, o al llegar en un parámetro declarado `@frees` / `@moves`. Se cede con la función de
+  liberación, al guardar el puntero (el lugar pasa a tener la participación), al entregarlo a
+  un parámetro `@frees` / `@moves`, o al devolverlo desde una función `@owns`. Cualquier otro
+  parámetro es prestado: la participación de quien llama mantiene vivo el objeto durante la
+  llamada.
+- Ceder una participación que la función no tiene es `COUNT_OVER_RELEASE` (`COUNT_NO_SHARE`
+  cuando se guarda, se entrega o se devuelve); una que sigue en su poder al salir es
+  `COUNT_LEAK`; usar el objeto cuando nada conocido lo mantiene vivo es
+  `COUNT_USE_AFTER_RELEASE`. Un puntero leído del almacenamiento no trae participación: puede
+  usarse hasta la siguiente llamada que pudiera liberar la almacenada, y pasarse a otra función
+  solo después de tomar una.
+- Un puntero guardado conserva su participación: asignar sobre uno que aún puede contener un
+  puntero es `COUNT_SLOT_OVERWRITTEN`, dejarlo ahí tras liberarlo es `COUNT_SLOT_DANGLING`.
+  Leer el puntero antiguo en una variable local antes de reemplazarlo, y
+  `dst = src; src = NULL;`, son movimientos y se siguen como tales.
+- Las funciones de retención y de liberación se comprueban contra la declaración: exactamente
+  un incremento (`COUNT_RETAIN_MISMATCH`), exactamente un decremento, y el objeto liberado
+  exactamente donde la cuenta decrementada resulta ser cero (`COUNT_RELEASE_MISMATCH`). La
+  función que asigna un objeto fija su primera cuenta; cualquier otra escritura del contador es
+  `COUNT_DIRECT_WRITE`, y liberar directamente un objeto compartido es `COUNT_DIRECT_FREE`.
+  `destroy: f` en la declaración nombra un auxiliar al que la función de liberación entrega el
+  objeto al llegar a cero.
+- Se leen contadores simples y atómicos (`atomic_fetch_add` / `atomic_fetch_sub`, los builtins
+  `__atomic_*` y `__sync_*`); también las funciones miembro de C++ (`p->AddRef()`,
+  `delete this`), donde un objeto creado con `new` empieza con la cuenta que le da su clase.
+- Lo que la comprobación no puede seguir es `COUNT_UNPROVEN`, nunca se supone inocuo: un puntero
+  contado pasado a una función sin cuerpo y sin contrato, su dirección tomada, un poseedor
+  copiado entero (`*dst = *src`, `memcpy`), un `goto` hacia atrás.
+
 ### Inicialización (`@initcheck`) y uniones etiquetadas (`@typecheck`)
 
 - `// @initcheck` sobre una función o a nivel de archivo: una variable local escalar o puntero
@@ -682,6 +733,9 @@ longjmp), `UNSUPPORTED_SETJMP` (un `setjmp` en una forma que kenbi no modela),
 hacerlo),
 `DISTINCT_ALIASED` / `DISTINCT_UNPROVEN` (objetos declarados `@distinct` que son, o pueden ser,
 el mismo),
+`COUNT_OVER_RELEASE` / `COUNT_NO_SHARE` / `COUNT_LEAK` / `COUNT_USE_AFTER_RELEASE` / `COUNT_SLOT_OVERWRITTEN` /
+`COUNT_SLOT_DANGLING` / `COUNT_DIRECT_WRITE` / `COUNT_DIRECT_FREE` / `COUNT_RETAIN_MISMATCH` /
+`COUNT_RELEASE_MISMATCH` / `COUNT_UNPROVEN` (las participaciones de un tipo declarado `@refcounted`),
 `UNIQUE_ALIASED` / `UNIQUE_UNPROVEN` / `UNIQUE_ESCAPES` (un parámetro `@unique` que otro argumento
 alcanza, o que el cuerpo conserva),
 `FREE_NONHEAP` (un `free` de un puntero a la pila u otro almacenamiento no heap), `BORROW_MOVED` /
@@ -944,7 +998,7 @@ front-end, de modo que analizar C/C++ es una pieza reemplazable.
 ## Pruebas
 
 `tests/*.mc` accionan el motor directamente (17 casos). `tests/c/*.c` y `tests/cpp/*.cpp` llevan
-esos escenarios más las comprobaciones específicas de anotaciones en C y C++ reales (374 casos); el
+esos escenarios más las comprobaciones específicas de anotaciones en C y C++ reales (381 casos); el
 runner baja cada uno vía libclang y verifica los diagnósticos producidos — **incluida su línea de
 origen** — frente a los marcadores `//EXPECT CODE` de cada archivo (en la propia línea, o
 `//EXPECT CODE@LINE`). Una línea incorrecta o un diagnóstico faltante / sobrante hace fallar la

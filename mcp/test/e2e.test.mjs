@@ -54,6 +54,20 @@ test("flags a double free", async () => {
   await c.close();
 });
 
+test("follows the shares of a reference-counted type", async () => {
+  const c = await connect();
+  const r = await c.callTool({
+    name: "check_memory_safety",
+    arguments: { files: [resolve(repoRoot, "tests/c/t328_refcount_over_release.c")] },
+  });
+  assert.match(text(r), /COUNT_OVER_RELEASE/);
+  assert.match(text(r), /COUNT_USE_AFTER_RELEASE/);
+  const e = await c.callTool({ name: "explain_finding", arguments: { code: "COUNT_SLOT_OVERWRITTEN" } });
+  assert.match(text(e), /C — the fix \(GREEN\)/);
+  assert.match(text(e), /@refcounted/);
+  await c.close();
+});
+
 test("resolves relative paths against the cwd option", async () => {
   const c = await connect();
   const r = await c.callTool({

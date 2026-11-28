@@ -427,6 +427,12 @@ type Ctx* = object  ## module-local state during a single parse (all fields publ
                                     ## below) such a line is the cleanup convergence funnel
   gotoBackwardLines*: HashSet[int]  ## lines carrying `@goto_backward` — the goto on that line
                                     ## is a declared loop back-edge (modelled via the fixpoint)
+  rcKeep*: HashSet[string]          ## REFERENCE COUNTING, the function being lowered: its pointers
+                                    ## to a counted type that the ownership view still describes
+                                    ## (the object a constructor allocates, the parameter a
+                                    ## release function frees). Every other one is a share.
+  rcStrip*: HashSet[string]         ## ... and those it does not
+  rcZeroIfs*: seq[tuple[line: int, thenNonZero: bool]] ## ... a release function's zero tests
   callEdges*: seq[CallEdge]         ## ownership-relevant call edges of the function
                                     ## currently being lowered (reset per function in
                                     ## fnVisitor, then attached to its Func.calls)

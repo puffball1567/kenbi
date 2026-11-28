@@ -406,6 +406,57 @@ the declared intent and reports where they disagree.
   \`REF_UNPROVEN\`. \`strchr\`, \`memcpy\` and the like are known to return a pointer into
   their argument's block; a fresh allocation (\`@owns\`) points into nothing the caller holds.
 
+## Reference counting (shared objects)
+How memory is managed is the program's choice; kenbi checks the discipline it chose. A type
+shared by counting references is declared once, next to the type:
+\`\`\`c
+// @refcounted Buf { count: refs, retain: buf_retain, release: buf_release }
+typedef struct Buf { int refs; int len; } Buf;
+// @owns
+Buf *buf_new(int len);          /* the caller receives one share */
+void buf_retain(Buf *b);        /* takes one more */
+// @frees(b)
+void buf_release(Buf *b);       /* gives one back; frees at zero */
+\`\`\`
+Every holder of a pointer owns one SHARE, and kenbi follows the shares each function holds
+along every path. No marker is needed: the check runs wherever ownership is checked.
+- A share is TAKEN by the retain function, by receiving the result of an \`@owns\` function,
+  or by arriving in a parameter declared \`@frees\` / \`@moves\`. It is GIVEN UP by the release
+  function, by storing the pointer in a field / global / array element (that location then
+  holds the share), by passing it to a \`@frees\` / \`@moves\` parameter, or by returning it
+  from an \`@owns\` function. Any other parameter is BORROWED: the caller's share keeps the
+  object alive during the call, and the function must not release it.
+- \`COUNT_OVER_RELEASE\`: a release without a share. \`COUNT_NO_SHARE\`: stored, handed over or
+  returned without one — call the retain function first. \`COUNT_LEAK\`: a share still held at
+  an exit. \`COUNT_USE_AFTER_RELEASE\`: the object used when nothing is known to keep it alive.
+- A pointer READ FROM STORAGE (\`c = h->buf\`) comes with no share. It may be used until the
+  next call that could release the stored one; to use it after a call, or to pass it to a
+  function, retain it first and release it after.
+- A stored pointer holds its share. Assigning over one that may still hold a pointer is
+  \`COUNT_SLOT_OVERWRITTEN\`; releasing it and leaving the pointer there is
+  \`COUNT_SLOT_DANGLING\`. The shapes that pass:
+  \`old = h->buf; buf_retain(b); h->buf = b; if (old) buf_release(old);\` (replace),
+  \`if (h->buf) { buf_release(h->buf); h->buf = NULL; }\` (drop),
+  \`t = h->buf; h->buf = NULL; return t;\` from an \`@owns\` function (take), and
+  \`dst = src; src = NULL;\` between two stored pointers (move).
+- The retain and release functions are CHECKED against the declaration: one increment
+  (\`COUNT_RETAIN_MISMATCH\`); one decrement, and the object freed exactly in the branch where
+  the decremented count is found zero (\`COUNT_RELEASE_MISMATCH\`) — \`if (--p->refs == 0)
+  free(p);\`, or with an atomic counter \`if (atomic_fetch_sub(&p->refs, 1) == 1) free(p);\`
+  (\`fetch_sub\` yields the value BEFORE the decrement). The release function also declares
+  \`@frees(p)\` (and \`@frees(p.field)\` for each member it frees), like any destructor.
+  \`destroy: f\` in the declaration names a helper it hands the object to at zero.
+- The function that allocates an object sets its first count (\`p->refs = 1;\`,
+  \`atomic_init(&p->refs, 1)\`). Any other write to the counter is \`COUNT_DIRECT_WRITE\`;
+  \`free(p)\` of an object others may share is \`COUNT_DIRECT_FREE\`.
+- C++ member functions are read the same way (\`p->AddRef()\`, \`p->Release()\`,
+  \`delete this\`); a \`new\` object starts with the count its class gives the counter (a
+  default member initialiser, or what every constructor sets).
+- \`COUNT_UNPROVEN\`: what the check cannot follow, never assumed harmless — a counted pointer
+  passed to a function with no body here and no contract (declare \`@borrows(p)\` or
+  \`@moves(p)\` on it), its address taken (an out-parameter needs \`@owns(out)\` on the
+  callee), a holder copied whole (\`*dst = *src\`, \`memcpy\`), a backward \`goto\`.
+
 ## Type-confusion axis (tagged unions, opt-in)
 - \`// @typecheck\` above a function or at file level, plus
   \`// @variant(<member>: <tag> == <value>)\` per union member —

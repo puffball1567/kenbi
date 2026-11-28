@@ -785,7 +785,8 @@ proc applyInstr(a: var Analyzer, s: Stmt, st: var StateMap, nst: var NullState) 
      ikLockAcquire, ikLockRelease, ikGuardedAccess, ikRequiredLockCall, ikGuardedEscape,
      ikIndirectCall, ikFnAssign,
      ikInitWrite, ikInitRead, ikVariantAccess,
-     ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved, ikRefReturn, ikRefDistinct: discard
+     ikRefDerive, ikRefUse, ikRefInvalidate, ikRefNotPreserved, ikRefReturn, ikRefDistinct,
+     ikCount: discard
   of ikMustUse:
     # the front-end emits this only at a statement-level call whose result is
     # discarded; the callee is declared `@must_use`, so dropping it is the bug.
@@ -4465,6 +4466,8 @@ type
     axUnions = "taggedUnions"       ## `@typecheck`
     axRefs = "references"           ## `@refcheck`
 
+include analyze_counts
+
 proc axesOf*(prog: Program, fn: Func): set[Axis] =
   ## Which checks run on `fn`. analyzeFull runs exactly these, and the reported scope of a
   ## result is read from here too, so what is reported as checked is what ran. A file with no
@@ -4513,6 +4516,10 @@ proc analyzeFull*(prog: Program): tuple[diags: seq[Diag], cov: CoverageStats, un
       # REFERENCE VALIDITY axis — independent opt-in (`@refcheck`). The promise of a function
       # that declares `@preserves` is checked on every function, opted in or not.
       for d in analyzeRefs(fn, axRefs in axes): a.diags.add d
+      # REFERENCE COUNTING — the shares of the types declared `@refcounted`, part of the
+      # ownership axis: a file that declares none has nothing to follow.
+      if axOwnership in axes and prog.counted.len > 0:
+        for d in analyzeCounts(prog, fn): a.diags.add d
       var hasRed = false
       var vouched = false
       for i in mark ..< a.diags.len:

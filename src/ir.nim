@@ -182,6 +182,12 @@ type
                  ## `a` is the argument or object as written.
     ikRefNotPreserved ## the body of a function that declares `b` `@preserves` passes `a` to
                  ## `cKey`, which may reallocate or release it (off as for ikRefInvalidate).
+    ikCount      ## REFERENCE COUNTING: one event of the discipline of a type declared
+                 ## `@refcounted`, read by the reference-count pass only (they live in
+                 ## `Func.countBody`, never in `body`). `off` says which event (the `rc*`
+                 ## constants below); a pointer is named by a DESIGNATOR key — a local or
+                 ## parameter by its identity key, a stored pointer (a field, an array
+                 ## element, a global) by `rcSlotMark` followed by its tokens.
     ikJmpLocalRead ## a use of the value of `a` (key `aKey`), a non-volatile automatic local or
                  ## parameter of a function with a landing site. On a path a longjmp took back
                  ## into the function, a local changed between the setjmp and the jump is
@@ -443,6 +449,34 @@ type
                  ## (default-red, unconditional — held or not): keep the access inline under the lock,
                  ## or declare a contract. The sound analogue of UNCONTRACTED_ESCAPE. No-op elsewhere.
 
+const
+  rcSlotMark* = "\x03"   ## starts the designator key of a stored pointer
+  rcTokSep* = "\x1f"     ## separates the tokens of such a key
+  rcBind* = 1        ## `a` (aKey) := a value. off2 0: the pointer `bKey` designates; 1: a
+                     ## fresh share (the result of an `@owns` function); 2: a new allocation
+                     ## whose counter is not set yet; 3: a pointer that comes with no share
+                     ## (`bKey` = the stored pointer it was read from, if any); 4: null
+  rcAcquire* = 2     ## the retain function is called on `aKey`
+  rcRelease* = 3     ## a share of `aKey` is given up. off2 0: by the release function;
+                     ## 1: handed to `b`, which takes it over; 2: returned to the caller
+  rcUse* = 4         ## the object `aKey` points to is used (`b` says how). off2 1: by being
+                     ## passed to a function that may run any code while it uses it
+  rcStore* = 5       ## the stored pointer `aKey` := `bKey` ("" = null); a share moves there
+  rcCall* = 6        ## a call to `b` that may run any code. `a`: the variable it deallocates,
+                     ## if it is a deallocator; `cKey`: the names its arguments mention
+  rcStep* = 7        ## the counter of `aKey` changes by off2
+  rcSet* = 8         ## the counter of `aKey` is assigned off2 (-1: not a constant)
+  rcDealloc* = 9     ## the object `aKey` points to is deallocated by `b`
+  rcUnmodeled* = 10  ## something the pass does not follow (`a` says what)
+  rcKill* = 11       ## the variable named `a` is assigned: stored pointers named through it
+                     ## are other locations from here on
+  rcUnproven* = 12   ## `a` is passed to `b`, which has no body here and no contract
+  rcFreshBase* = 13  ## the variable named `a` holds storage no pointer has been stored into
+                     ## yet. off2 1: an automatic aggregate, gone when the function returns
+
+  rcMovedOut* = 14   ## the automatic aggregate named `a` is returned or copied out whole:
+                     ## what it holds leaves with it
+type
   StmtKind* = enum stInstr, stIf, stLoop, stSwitch, stLabel, stTry
 
   Stmt* = ref object
@@ -550,6 +584,8 @@ type
       headerAt*: int       ## index in `loopBody` where the loop header's own statements (the
                            ## condition's and the increment's effects) start. A `continue`
                            ## jumps there, not to the end of the loop.
+      tailAt*: int         ## reference-count bodies only: where the statements a `continue`
+                           ## jumps to start (a `for`'s increment, a `do`'s condition)
       noBackEdge*: bool    ## the body runs AT MOST ONCE: `do … while (0)`, the standard C
                            ## multi-statement macro wrapper. There is no second iteration, so no
                            ## fixpoint over the back edge — without this the release in a
@@ -640,6 +676,15 @@ type
                         ## the frontend (reconcileHeadroom) — cleared when a companion is found,
                         ## the whole bound dropped otherwise; never reaches the analyzer set.
 
+  CountedDecl* = object
+    ## `@refcounted <Type> { count: f, retain: r, release: d, destroy: x }` — a type whose
+    ## objects are shared by counting references. `count` is the counter field, `retain` the
+    ## function that takes one more share, `release` the one that gives a share back and frees
+    ## the object when none is left, `destroy` (optional) a helper the release function hands
+    ## the object to at that point.
+    typeName*, count*, retain*, release*, destroy*: string
+    line*: int
+
   Resource* = object
     ## A declared logical resource (registry entry). The scoped, project-unique
     ## name (e.g. "lib::image") keys the registry; size/free/owner bind to it.
@@ -728,6 +773,17 @@ type
                                  ## same pointer, and both destructors release it. Recorded at the
                                  ## copy rather than on the class, because a class that can be
                                  ## copied wrongly but never is has no double free.
+    countBody*: seq[Stmt]        ## REFERENCE COUNTING: the function's `ikCount` events, with its
+                                 ## branches, loops, switches and labels kept. Empty when the
+                                 ## function touches no pointer to a `@refcounted` type.
+    countRole*: int              ## 1: the retain function of a counted type; 2: its release
+                                 ## function; 3: its destroy helper; 0: any other function
+    countSubject*: tuple[key, disp: string] ## ... the parameter that role is about
+    countParams*: seq[tuple[key, disp: string, takes: bool]] ## parameters that point to a
+                                 ## counted type; `takes`: declared to take over a share
+                                 ## (`@frees` / `@moves` / `@adopts`), otherwise borrowed
+    countScoped*: HashSet[string] ## names of its automatic aggregates
+    countTypes*: Table[string, string] ## designator key -> the counted type it points to
     selfAssignCls*: string       ## SELF-ASSIGNMENT: on an `@raii` class's `operator=` that
                                  ## releases a member and afterwards reads the source, with no
                                  ## guard comparing the source against `this` — the class name.
@@ -862,6 +918,7 @@ type
                                  ## field's display name, which normalises both to `->`.
     quarantined*: HashSet[int]   ## lines carrying `@unsafe` — findings here are
                                  ## suppressed (the author takes responsibility)
+    counted*: Table[string, CountedDecl] ## `@refcounted` types by name
     deepFrees*: HashSet[string]  ## releases declared `frees_fields:` — a typed destroy wrapper
                                  ## that releases the object's OWNED FIELDS as well as the
                                  ## object (`DestroyThresholdMap` frees map_id / description /
